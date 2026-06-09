@@ -45,7 +45,7 @@ async function chamarClaude(historico) {
   try {
     const response = await axios.post(
       'https://api.anthropic.com/v1/messages',
-      { model: 'claude-sonnet-4-20250514', max_tokens: 500, messages: historico },
+      { model: 'claude-sonnet-4-6', max_tokens: 500, messages: historico },
       { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
     );
     return response.data.content[0].text;
