@@ -1,6 +1,6 @@
-import express from 'express';
-import axios from 'axios';
-import 'dotenv/config';
+const express = require('express');
+const axios = require('axios');
+require('dotenv/config');
 
 const app = express();
 app.use(express.json());
@@ -50,16 +50,21 @@ async function chamarClaude(historico) {
     );
     return response.data.content[0].text;
   } catch (err) {
+    console.error('Erro Claude:', err.response?.data || err.message);
     return 'Desculpe, tive um problema técnico. Tente novamente!';
   }
 }
 
 async function enviarMensagem(para, texto) {
-  await axios.post(
-    `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
-    { messaging_product: 'whatsapp', to: para, type: 'text', text: { body: texto } },
-    { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
-  );
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      { messaging_product: 'whatsapp', to: para, type: 'text', text: { body: texto } },
+      { headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+  } catch (err) {
+    console.error('Erro WhatsApp:', err.response?.data || err.message);
+  }
 }
 
 app.listen(process.env.PORT || 3000, () => console.log('Bot rodando!'));
