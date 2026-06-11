@@ -1,11 +1,117 @@
 const express = require('express');
 const axios = require('axios');
+const { google } = require('googleapis');
 require('dotenv/config');
 
 const app = express();
 app.use(express.json());
 
 const conversas = {};
+const agendamentos = {};
+
+// Credenciais do Google Calendar via variável de ambiente
+const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+const CALENDAR_ID = 'cliquee.fecha@gmail.com';
+
+const auth = new google.auth.GoogleAuth({
+  credentials: serviceAccountKey,
+  scopes: ['https://www.googleapis.com/auth/calendar'],
+});
+
+const calendar = google.calendar({ version: 'v3', auth });
+
+// Busca horários disponíveis nos próximos 2 dias úteis
+async function buscarHorariosDisponiveis() {
+  const agora = new Date();
+  const horaCG = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
+  
+  const slots = [];
+  let diasVerificados = 0;
+  let diaAtual = new Date(horaCG);
+
+  while (slots.length < 2 && diasVerificados < 5) {
+    const diaSemana = diaAtual.getDay();
+    
+    // Pular fins de semana
+    if (diaSemana === 0 || diaSemana === 6) {
+      diaAtual.setDate(diaAtual.getDate() + 1);
+      diasVerificados++;
+      continue;
+    }
+
+    // Horários candidatos: 9h, 10h, 11h, 14h, 15h, 16h, 17h
+    const horariosCandiatos = [9, 10, 11, 14, 15, 16, 17];
+
+    for (const hora of horariosCandiatos) {
+      if (slots.length >= 2) break;
+
+      const inicio = new Date(diaAtual);
+      inicio.setHours(hora, 0, 0, 0);
+      const fim = new Date(inicio);
+      fim.setMinutes(fim.getMinutes() + 30);
+
+      // Ignorar horários no passado ou com menos de 2h de antecedência
+      const minAntes = new Date(horaCG.getTime() + 2 * 60 * 60 * 1000);
+      if (inicio <= minAntes) continue;
+
+      // Verificar se o horário está livre na agenda
+      try {
+        const res = await calendar.freebusy.query({
+          requestBody: {
+            timeMin: inicio.toISOString(),
+            timeMax: fim.toISOString(),
+            timeZone: 'America/Campo_Grande',
+            items: [{ id: CALENDAR_ID }],
+          },
+        });
+
+        const ocupado = res.data.calendars[CALENDAR_ID].busy.length > 0;
+        if (!ocupado) {
+          const nomeDia = inicio.toLocaleDateString('pt-BR', {
+            weekday: 'long',
+            day: 'numeric',
+            month: 'long',
+            timeZone: 'America/Campo_Grande'
+          });
+          slots.push({
+            label: `${nomeDia} às ${hora}h`,
+            inicio: inicio.toISOString(),
+            fim: fim.toISOString(),
+          });
+        }
+      } catch (err) {
+        console.error('Erro ao verificar agenda:', err.message);
+      }
+    }
+
+    diaAtual.setDate(diaAtual.getDate() + 1);
+    diasVerificados++;
+  }
+
+  return slots;
+}
+
+// Cria evento no Google Calendar
+async function criarEvento(nome, email, telefone, slotInicio, slotFim) {
+  try {
+    await calendar.events.insert({
+      calendarId: CALENDAR_ID,
+      requestBody: {
+        summary: `Consultoria Clique e Fecha - ${nome}`,
+        description: `Lead: ${nome}\nWhatsApp: ${telefone}\nEmail: ${email}`,
+        start: { dateTime: slotInicio, timeZone: 'America/Campo_Grande' },
+        end: { dateTime: slotFim, timeZone: 'America/Campo_Grande' },
+        conferenceData: {
+          createRequest: { requestId: `${Date.now()}`, conferenceSolutionKey: { type: 'hangoutsMeet' } }
+        }
+      },
+      conferenceDataVersion: 1,
+    });
+    console.log(`Evento criado para ${nome}`);
+  } catch (err) {
+    console.error('Erro ao criar evento:', err.message);
+  }
+}
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -26,31 +132,24 @@ app.post('/webhook', async (req, res) => {
   const userPhone = message.from;
   const userText = message.text.body;
 
-  const agora = new Date();
-  const horaCG = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
-  const hora = horaCG.getHours();
-  const diaSemana = horaCG.getDay();
-  const dentroHorario = diaSemana >= 1 && diaSemana <= 5 && hora >= 9 && hora < 18;
-
-  let opcaoHoje = '';
-  if (dentroHorario && hora < 17) {
-    opcaoHoje = `hoje às ${hora + 1}h`;
-  }
-
-  let diasParaProximo = 1;
-  const proximoDia = new Date(horaCG);
-  proximoDia.setDate(proximoDia.getDate() + diasParaProximo);
-  while (proximoDia.getDay() === 0 || proximoDia.getDay() === 6) {
-    diasParaProximo++;
-    proximoDia.setDate(horaCG.getDate() + diasParaProximo);
-  }
-  const nomeDia = diasParaProximo === 1 ? 'amanhã' : proximoDia.toLocaleDateString('pt-BR', { weekday: 'long' });
-  const opcaoAmanha = `${nomeDia} às 10h`;
-  const opcoesHorario = opcaoHoje
-    ? `${opcaoHoje} ou ${opcaoAmanha}`
-    : `${opcaoAmanha} ou ${nomeDia} às 14h`;
-
   if (!conversas[userPhone]) {
+    // Buscar horários disponíveis ao iniciar conversa
+    let opcoesHorario = 'amanhã às 10h ou amanhã às 14h';
+    let slotsDisponiveis = [];
+
+    try {
+      slotsDisponiveis = await buscarHorariosDisponiveis();
+      if (slotsDisponiveis.length >= 2) {
+        opcoesHorario = `${slotsDisponiveis[0].label} ou ${slotsDisponiveis[1].label}`;
+      } else if (slotsDisponiveis.length === 1) {
+        opcoesHorario = slotsDisponiveis[0].label;
+      }
+    } catch (err) {
+      console.error('Erro ao buscar horários:', err.message);
+    }
+
+    agendamentos[userPhone] = { slots: slotsDisponiveis };
+
     conversas[userPhone] = [
       {
         role: 'user',
@@ -59,7 +158,7 @@ app.post('/webhook', async (req, res) => {
 Seu objetivo é qualificar o lead e agendar uma reunião no Google Meet com a equipe da Clique e Fecha.
 
 NÚMERO DO CLIENTE: ${userPhone}
-OPÇÕES DE HORÁRIO DISPONÍVEIS: ${opcoesHorario}
+HORÁRIOS DISPONÍVEIS NA AGENDA: ${opcoesHorario}
 
 SOBRE A EMPRESA:
 Serviços: automações de processos, chatbots personalizados e soluções de atendimento automatizado.
@@ -80,29 +179,29 @@ Pergunte qual tipo de negócio a pessoa tem. Entenda se já usa alguma ferrament
 4. AGENDAR A REUNIÃO
 Siga esta sequência obrigatória, uma mensagem por vez:
 a. Primeiro pergunte se faz sentido agendar uma conversa rápida com a equipe. Exemplo: "Faz sentido marcarmos uma conversa rápida para entender melhor o seu caso?"
-b. Somente após a confirmação do cliente, ofereça os horários: "Tenho disponível ${opcoesHorario}. Qual funciona melhor para você?"
+b. Somente após a confirmação do cliente, ofereça os horários disponíveis: "Tenho disponível ${opcoesHorario}. Qual funciona melhor para você?"
 c. Após a escolha do horário, confirme o WhatsApp: "Posso usar o número ${userPhone} para contato, ou prefere outro?"
 d. Após confirmar o WhatsApp, peça o email.
 
 5. CONFIRMAÇÃO
-Confirme todos os dados: nome, WhatsApp, email e horário escolhido. Informe que a equipe vai enviar o link do Google Meet em até 24 horas.
+Confirme todos os dados: nome, WhatsApp, email e horário escolhido. Informe que o link do Google Meet será enviado em até 24 horas.
 
 6. APÓS O AGENDAMENTO
-Continue presente e disponível. Responda qualquer pergunta de forma natural e completa, sem pressa de encerrar. Somente se despeça quando o cliente der sinais claros de encerramento, como "obrigado", "até logo" ou "combinado". Nesse caso, encerre com leveza: "Fico à disposição se precisar de mais alguma coisa. Até lá!"
+Continue presente e disponível. Responda qualquer pergunta de forma natural e completa, sem pressa de encerrar. Somente se despeça quando o cliente der sinais claros de encerramento como "obrigado", "até logo" ou "combinado". Nesse caso, encerre com leveza: "Fico à disposição se precisar de mais alguma coisa. Até lá!"
 
 TRATAMENTO DE OBJEÇÕES:
 
 Quando o cliente disser "agora não", "não tenho tempo" ou similar:
-Não aceite de imediato. Demonstre compreensão e investigue o motivo com uma pergunta gentil. Exemplo: "Entendo! Só para eu saber, tem alguma coisa que ficou sem resposta ou posso esclarecer algo agora?" Se ele confirmar que não quer, ofereça reagendamento para outro momento: "Sem problema. Quando for melhor para você, é só me chamar aqui que marco um horário."
+Não aceite de imediato. Demonstre compreensão e investigue o motivo com uma pergunta gentil. Exemplo: "Entendo. Só para eu saber, tem alguma coisa que ficou sem resposta ou posso esclarecer algo agora?" Se ele confirmar que não quer, ofereça reagendamento: "Sem problema. Quando for melhor para você, é só me chamar aqui que marco um horário."
 
 Quando o cliente disser "está caro" ou perguntar sobre preço:
-Reforce que a consultoria é completamente gratuita e sem compromisso. Esclareça que os valores das soluções são apresentados apenas durante a reunião, de acordo com cada caso. Exemplo: "A consultoria em si não tem nenhum custo. Os valores das soluções variam conforme o que faz mais sentido para o seu negócio, e a equipe apresenta tudo na reunião, sem pressão."
+Reforce que a consultoria é completamente gratuita e sem compromisso. Esclareça que os valores das soluções são apresentados apenas durante a reunião, de acordo com cada caso.
 
 Quando o cliente disser "já tenho alguém que faz isso":
-Não confronte. Demonstre respeito pela escolha e explore se está satisfeito. Exemplo: "Que bom que você já tem suporte nisso. Só por curiosidade, está conseguindo os resultados que esperava?" Se ele estiver insatisfeito, apresente a consultoria como uma oportunidade de comparar. Se estiver satisfeito, encerre com gentileza.
+Não confronte. Demonstre respeito e explore se está satisfeito. Se estiver insatisfeito, apresente a consultoria como oportunidade de comparar. Se estiver satisfeito, encerre com gentileza.
 
 Quando o cliente disser "não tenho tempo agora":
-Valide e ofereça uma opção de horário mais flexível. Exemplo: "Entendo, a rotina de quem tem negócio é puxada. A reunião é só 30 minutos e pode ser no horário que for melhor para você. Tem algum dia da semana que costuma ser mais tranquilo?"
+Valide e ofereça flexibilidade. Exemplo: "Entendo, a rotina de quem tem negócio é puxada. A reunião é só 30 minutos e pode ser no horário que for melhor para você. Tem algum dia da semana que costuma ser mais tranquilo?"
 
 REGRAS DE LINGUAGEM:
 Responda sempre em português brasileiro.
@@ -111,7 +210,7 @@ Não use emojis.
 Não use travessões.
 Não use diminutivos.
 Nunca coloque negrito em emails, números de telefone ou dados pessoais do cliente.
-Quando precisar destacar algo, use apenas um asterisco de cada lado, colado na palavra, sem espaço e sem asterisco duplo. Exemplo: *Clique e Fecha* e nunca **Clique e Fecha**.
+Quando precisar destacar algo, use apenas um asterisco de cada lado, colado na palavra, sem espaço. Exemplo: *Clique e Fecha*.
 Faça apenas uma pergunta por mensagem, nunca duas ao mesmo tempo. Esta regra é absoluta.
 Mensagens curtas e diretas, no máximo três parágrafos por resposta.`
       },
@@ -125,6 +224,29 @@ Mensagens curtas e diretas, no máximo três parágrafos por resposta.`
   conversas[userPhone].push({ role: 'user', content: userText });
   const resposta = await chamarClaude(conversas[userPhone]);
   conversas[userPhone].push({ role: 'assistant', content: resposta });
+
+  // Detectar confirmação de agendamento e criar evento
+  const confirmaAgendamento = resposta.toLowerCase().includes('link do google meet') &&
+    resposta.toLowerCase().includes('24 horas');
+
+  if (confirmaAgendamento && agendamentos[userPhone]?.slots?.length > 0) {
+    const slots = agendamentos[userPhone].slots;
+    // Detectar qual slot foi escolhido com base na conversa
+    const historico = conversas[userPhone].map(m => m.content).join(' ').toLowerCase();
+    let slotEscolhido = slots[0];
+    if (slots[1] && historico.includes(slots[1].label.split(' às ')[1]?.replace('h', ''))) {
+      slotEscolhido = slots[1];
+    }
+
+    // Extrair nome e email do histórico
+    const nomeMatch = historico.match(/me chamo ([a-záéíóúâêîôûãõç ]+)/i) ||
+                      historico.match(/meu nome é ([a-záéíóúâêîôûãõç ]+)/i);
+    const emailMatch = historico.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+    const nome = nomeMatch ? nomeMatch[1].trim() : 'Lead';
+    const email = emailMatch ? emailMatch[0] : '';
+
+    await criarEvento(nome, email, userPhone, slotEscolhido.inicio, slotEscolhido.fim);
+  }
 
   await enviarMensagem(userPhone, resposta);
   res.sendStatus(200);
