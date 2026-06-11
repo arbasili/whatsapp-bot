@@ -94,26 +94,29 @@ async function buscarHorariosDisponiveis() {
 // Cria evento no Google Calendar
 async function criarEvento(nome, email, telefone, slotInicio, slotFim) {
   try {
-    await calendar.events.insert({
+    const res = await calendar.events.insert({
       calendarId: CALENDAR_ID,
+      conferenceDataVersion: 1,
       requestBody: {
         summary: `Consultoria Clique e Fecha - ${nome}`,
         description: `Lead: ${nome}\nWhatsApp: ${telefone}\nEmail: ${email}`,
         start: { dateTime: slotInicio, timeZone: 'America/Campo_Grande' },
         end: { dateTime: slotFim, timeZone: 'America/Campo_Grande' },
         conferenceData: {
-          createRequest: { requestId: `meet-${Date.now()}`, conferenceSolutionKey: { type: 'hangoutsMeet' } }
+          createRequest: { requestId: `meet-${Date.now()}` }
         },
         reminders: {
           useDefault: false,
           overrides: [{ method: 'email', minutes: 60 }, { method: 'popup', minutes: 30 }]
         }
       },
-      conferenceDataVersion: 1,
     });
-    console.log(`Evento criado para ${nome}`);
+    const meetLink = res.data.conferenceData?.entryPoints?.[0]?.uri || null;
+    console.log(`Evento criado para ${nome}. Meet: ${meetLink}`);
+    return meetLink;
   } catch (err) {
     console.error('Erro ao criar evento:', err.message);
+    return null;
   }
 }
 
@@ -236,21 +239,22 @@ Mensagens curtas e diretas, no máximo três parágrafos por resposta.`
 
   if (confirmaAgendamento && agendamentos[userPhone]?.slots?.length > 0) {
     const slots = agendamentos[userPhone].slots;
-    // Detectar qual slot foi escolhido com base na conversa
     const historico = conversas[userPhone].map(m => m.content).join(' ').toLowerCase();
     let slotEscolhido = slots[0];
     if (slots[1] && historico.includes(slots[1].label.split(' às ')[1]?.replace('h', ''))) {
       slotEscolhido = slots[1];
     }
 
-    // Extrair nome e email do histórico
     const nomeMatch = historico.match(/me chamo ([a-záéíóúâêîôûãõç ]+)/i) ||
                       historico.match(/meu nome é ([a-záéíóúâêîôûãõç ]+)/i);
     const emailMatch = historico.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
     const nome = nomeMatch ? nomeMatch[1].trim() : 'Lead';
     const email = emailMatch ? emailMatch[0] : '';
 
-    await criarEvento(nome, email, userPhone, slotEscolhido.inicio, slotEscolhido.fim);
+    const meetLink = await criarEvento(nome, email, userPhone, slotEscolhido.inicio, slotEscolhido.fim);
+    if (meetLink) {
+      await enviarMensagem(userPhone, `Aqui está o link da sua consultoria no Google Meet: ${meetLink}`);
+    }
   }
 
   await enviarMensagem(userPhone, resposta);
