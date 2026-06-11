@@ -7,9 +7,56 @@ app.use(express.json());
 
 const conversas = {};
 const ultimaMensagem = {};
+const followUpStatus = {};
 const EXPIRACAO_MS = 24 * 60 * 60 * 1000; // 24 horas
+const FOLLOWUP_1_MS = 2 * 60 * 60 * 1000; // 2 horas
+const FOLLOWUP_2_MS = 24 * 60 * 60 * 1000; // 24 horas após o 1o follow-up
+const ENCERRAMENTO_MS = 24 * 60 * 60 * 1000; // 24 horas após o 2o follow-up
 
 const CALENDLY_LINK = 'https://calendly.com/cliquee-fecha/30min';
+const MEU_NUMERO = '5567988885170';
+
+// Verificar follow-ups a cada 15 minutos
+setInterval(async () => {
+  const agora = Date.now();
+
+  for (const phone of Object.keys(ultimaMensagem)) {
+    const status = followUpStatus[phone] || { tentativas: 0, ultimoFollowUp: 0 };
+    const tempoSemResposta = agora - ultimaMensagem[phone];
+
+    // Extrair nome do histórico
+    let nome = 'você';
+    if (conversas[phone]) {
+      const historico = conversas[phone].map(m => m.content).join(' ');
+      const nomeMatch = historico.match(/Para começar[^?]+\?[\s\S]{0,200}?([A-ZÀ-Ú][a-zà-ú]+)/);
+      if (nomeMatch) nome = nomeMatch[1];
+    }
+
+    // 1a tentativa após 2h
+    if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
+      await enviarMensagem(phone, `Oi ${nome}, tudo bem? Ficou alguma dúvida sobre nossa conversa? Estou por aqui.`);
+      followUpStatus[phone] = { tentativas: 1, ultimoFollowUp: agora };
+      console.log(`Follow-up 1 enviado para ${phone}`);
+    }
+
+    // 2a tentativa 24h após o 1o
+    else if (status.tentativas === 1 && agora - status.ultimoFollowUp > FOLLOWUP_2_MS) {
+      await enviarMensagem(phone, `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`);
+      followUpStatus[phone] = { tentativas: 2, ultimoFollowUp: agora };
+      console.log(`Follow-up 2 enviado para ${phone}`);
+    }
+
+    // Encerramento 24h após o 2o
+    else if (status.tentativas === 2 && agora - status.ultimoFollowUp > ENCERRAMENTO_MS) {
+      await enviarMensagem(phone, `Olá ${nome}, como não tivemos retorno, vou encerrar nosso atendimento por aqui. Se precisar de algo futuramente, é só me chamar. Será um prazer!`);
+      await enviarMensagem(MEU_NUMERO, `*Lead encerrado*\n\nNome: ${nome}\nWhatsApp: ${phone}\n\nNão respondeu após 2 tentativas de follow-up.`);
+      delete conversas[phone];
+      delete ultimaMensagem[phone];
+      delete followUpStatus[phone];
+      console.log(`Lead ${phone} encerrado após 2 tentativas`);
+    }
+  }
+}, 15 * 60 * 1000);
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -37,6 +84,10 @@ app.post('/webhook', async (req, res) => {
     console.log(`Conversa expirada para ${userPhone}`);
   }
   ultimaMensagem[userPhone] = agora;
+  // Resetar follow-up quando o lead responder
+  if (followUpStatus[userPhone]) {
+    followUpStatus[userPhone] = { tentativas: 0, ultimoFollowUp: 0 };
+  }
 
   if (!conversas[userPhone]) {
     conversas[userPhone] = [
