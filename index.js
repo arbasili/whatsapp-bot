@@ -100,6 +100,21 @@ Mensagens curtas e diretas, no máximo três parágrafos por resposta.`
   const resposta = await chamarClaude(conversas[userPhone]);
   conversas[userPhone].push({ role: 'assistant', content: resposta });
 
+  // Detectar confirmação de agendamento e notificar você
+  const confirmaAgendamento = resposta.toLowerCase().includes('link para você escolher') ||
+    resposta.toLowerCase().includes('calendly.com');
+
+  if (confirmaAgendamento) {
+    const historico = conversas[userPhone].map(m => m.content).join(' ');
+    const nomeMatch = historico.match(/como posso te chamar\?[\s\S]*?([A-ZÀ-Ú][a-zà-ú]+)/);
+    const emailMatch = historico.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+    const nome = nomeMatch ? nomeMatch[1] : 'Não identificado';
+    const email = emailMatch ? emailMatch[0] : 'Não informado';
+
+    const msgNotificacao = `*Novo lead agendando!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${email}\n\nO lead acabou de receber o link do Calendly para agendar a consultoria.`;
+    await enviarMensagem('5567988885170', msgNotificacao);
+  }
+
   await enviarMensagem(userPhone, resposta);
   res.sendStatus(200);
 });
