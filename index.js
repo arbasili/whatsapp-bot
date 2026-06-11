@@ -137,19 +137,20 @@ app.post('/webhook', async (req, res) => {
   const userText = message.text.body;
 
   if (!conversas[userPhone]) {
-    // Buscar horários disponíveis ao iniciar conversa
+    // Buscar horários com timeout de 5 segundos
     let opcoesHorario = 'amanhã às 10h ou amanhã às 14h';
     let slotsDisponiveis = [];
 
     try {
-      slotsDisponiveis = await buscarHorariosDisponiveis();
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000));
+      slotsDisponiveis = await Promise.race([buscarHorariosDisponiveis(), timeoutPromise]);
       if (slotsDisponiveis.length >= 2) {
         opcoesHorario = `${slotsDisponiveis[0].label} ou ${slotsDisponiveis[1].label}`;
       } else if (slotsDisponiveis.length === 1) {
         opcoesHorario = slotsDisponiveis[0].label;
       }
     } catch (err) {
-      console.error('Erro ao buscar horários:', err.message);
+      console.error('Erro ou timeout ao buscar horários:', err.message);
     }
 
     agendamentos[userPhone] = { slots: slotsDisponiveis };
