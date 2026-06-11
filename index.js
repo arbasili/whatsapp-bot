@@ -6,6 +6,8 @@ const app = express();
 app.use(express.json());
 
 const conversas = {};
+const ultimaMensagem = {};
+const EXPIRACAO_MS = 24 * 60 * 60 * 1000; // 24 horas
 
 const CALENDLY_LINK = 'https://calendly.com/cliquee-fecha/30min';
 
@@ -27,6 +29,14 @@ app.post('/webhook', async (req, res) => {
 
   const userPhone = message.from;
   const userText = message.text.body;
+
+  // Expirar conversa após 24h
+  const agora = Date.now();
+  if (ultimaMensagem[userPhone] && agora - ultimaMensagem[userPhone] > EXPIRACAO_MS) {
+    delete conversas[userPhone];
+    console.log(`Conversa expirada para ${userPhone}`);
+  }
+  ultimaMensagem[userPhone] = agora;
 
   if (!conversas[userPhone]) {
     conversas[userPhone] = [
@@ -100,9 +110,8 @@ Mensagens curtas e diretas, no máximo três parágrafos por resposta.`
   const resposta = await chamarClaude(conversas[userPhone]);
   conversas[userPhone].push({ role: 'assistant', content: resposta });
 
-  // Detectar confirmação de agendamento e notificar você
-  const confirmaAgendamento = resposta.toLowerCase().includes('link para você escolher') ||
-    resposta.toLowerCase().includes('calendly.com');
+  // Detectar quando o bot enviou o link do Calendly e notificar você
+  const confirmaAgendamento = resposta.includes('calendly.com/cliquee-fecha');
 
   if (confirmaAgendamento) {
     const historico = conversas[userPhone].map(m => m.content).join(' ');
