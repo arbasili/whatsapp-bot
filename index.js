@@ -293,5 +293,3 @@ async function enviarMensagem(para, texto) {
     console.error('Erro WhatsApp:', err.response?.data || err.message);
   }
 }
-
-app.listen(process.env.PORT || 3000, () => console.log('Bot rodando!'));
