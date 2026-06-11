@@ -102,7 +102,11 @@ async function criarEvento(nome, email, telefone, slotInicio, slotFim) {
         start: { dateTime: slotInicio, timeZone: 'America/Campo_Grande' },
         end: { dateTime: slotFim, timeZone: 'America/Campo_Grande' },
         conferenceData: {
-          createRequest: { requestId: `${Date.now()}`, conferenceSolutionKey: { type: 'hangoutsMeet' } }
+          createRequest: { requestId: `meet-${Date.now()}`, conferenceSolutionKey: { type: 'hangoutsMeet' } }
+        },
+        reminders: {
+          useDefault: false,
+          overrides: [{ method: 'email', minutes: 60 }, { method: 'popup', minutes: 30 }]
         }
       },
       conferenceDataVersion: 1,
@@ -293,3 +297,5 @@ async function enviarMensagem(para, texto) {
     console.error('Erro WhatsApp:', err.response?.data || err.message);
   }
 }
+
+app.listen(process.env.PORT || 3000, () => console.log('Bot rodando!'));
