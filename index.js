@@ -10,6 +10,7 @@ const conversas = {};
 const ultimaMensagem = {};
 const followUpStatus = {};
 const agendamentos = {};
+const leadsAgendados = new Set();
 
 const EXPIRACAO_MS = 24 * 60 * 60 * 1000;
 const FOLLOWUP_1_MS = 2 * 60 * 60 * 1000;
@@ -73,46 +74,47 @@ async function buscarHorariosDisponiveis() {
   const manha = [9, 10, 11];
   const tarde = [14, 15, 16, 17];
 
-  // Tentar hoje: um slot de manhã e um de tarde
+  // Opção 1: hoje (manhã ou tarde disponível)
   const diaSemanaHoje = horaCG.getDay();
   if (diaSemanaHoje >= 1 && diaSemanaHoje <= 5) {
     const manhãFiltrada = manha.filter(h => { const t = new Date(horaCG); t.setHours(h,0,0,0); return t > minAntes; });
     const tardeFiltrada = tarde.filter(h => { const t = new Date(horaCG); t.setHours(h,0,0,0); return t > minAntes; });
-
-    const slotManha = await buscarSlotDisponivel(horaCG, manhãFiltrada);
-    const slotTarde = await buscarSlotDisponivel(horaCG, tardeFiltrada);
-
-    if (slotManha && slotTarde) {
-      return [slotManha, slotTarde];
-    }
+    const slotHoje = await buscarSlotDisponivel(horaCG, manhãFiltrada) || await buscarSlotDisponivel(horaCG, tardeFiltrada);
+    if (slotHoje) slots.push(slotHoje);
   }
 
-  // Se não tiver 2 slots hoje, usar próximo dia útil
+  // Opção 2: próximo dia útil (período diferente do slot de hoje)
   const proximoDia = proximoDiaUtil(horaCG);
   const slotManhaNP = await buscarSlotDisponivel(proximoDia, manha);
   const slotTardeNP = await buscarSlotDisponivel(proximoDia, tarde);
 
-  if (slotManhaNP) slots.push(slotManhaNP);
-  if (slotTardeNP) slots.push(slotTardeNP);
-
-  // Se ainda não tiver 2, tenta o dia seguinte
-  if (slots.length < 2) {
-    const outroDia = proximoDiaUtil(proximoDia);
-    const s = await buscarSlotDisponivel(outroDia, [...manha, ...tarde]);
-    if (s) slots.push(s);
+  // Se hoje tem slot de manhã, pegar tarde do próximo dia e vice-versa
+  if (slots.length > 0) {
+    const slotHojeLabel = slots[0].label;
+    if (slotHojeLabel.includes('9h') || slotHojeLabel.includes('10h') || slotHojeLabel.includes('11h')) {
+      if (slotTardeNP) slots.push(slotTardeNP);
+      else if (slotManhaNP) slots.push(slotManhaNP);
+    } else {
+      if (slotManhaNP) slots.push(slotManhaNP);
+      else if (slotTardeNP) slots.push(slotTardeNP);
+    }
+  } else {
+    // Sem slot hoje, pegar manhã e tarde do próximo dia útil
+    if (slotManhaNP) slots.push(slotManhaNP);
+    if (slotTardeNP) slots.push(slotTardeNP);
   }
 
   return slots.slice(0, 2);
 }
 
-async function criarEvento(nome, email, telefone, slotInicio, slotFim) {
+async function criarEvento(nome, email, telefone, slotInicio, slotFim, resumo = '') {
   try {
     const res = await calendar.events.insert({
       calendarId: CALENDAR_ID,
       conferenceDataVersion: 1,
       requestBody: {
         summary: `Consultoria Clique e Fecha - ${nome}`,
-        description: `Lead: ${nome}\nWhatsApp: ${telefone}\nEmail: ${email}`,
+        description: `Nome: ${nome}\nWhatsApp: ${telefone}\nEmail: ${email}\n\n${resumo}`,
         start: { dateTime: slotInicio, timeZone: 'America/Campo_Grande' },
         end: { dateTime: slotFim, timeZone: 'America/Campo_Grande' },
         attendees: email ? [{ email }] : [],
@@ -138,6 +140,7 @@ async function criarEvento(nome, email, telefone, slotInicio, slotFim) {
 setInterval(async () => {
   const agora = Date.now();
   for (const phone of Object.keys(ultimaMensagem)) {
+    if (leadsAgendados.has(phone)) continue;
     const status = followUpStatus[phone] || { tentativas: 0, ultimoFollowUp: 0 };
     const tempoSemResposta = agora - ultimaMensagem[phone];
 
@@ -248,7 +251,7 @@ c. Após a escolha do horário, confirme o WhatsApp: "Posso usar o número ${use
 d. Após confirmar o WhatsApp, peça o email.
 
 5. CONFIRMAÇÃO
-Confirme todos os dados: nome, WhatsApp, email e horário. Informe que o link do Google Meet será enviado em seguida.
+Após o sistema enviar automaticamente a mensagem com os dados e o link do Meet, faça apenas esta pergunta: "Tem alguma dúvida antes da reunião?"
 
 6. APÓS O AGENDAMENTO
 Continue presente e disponível. Responda perguntas naturalmente. Somente se despeça quando o cliente der sinais claros de encerramento. Encerre com leveza: "Fico à disposição se precisar de mais alguma coisa. Até lá!"
@@ -301,10 +304,34 @@ Mensagens curtas, no máximo três parágrafos.`
     const nomeMatch = historico.match(/posso te chamar\?[\s\S]{0,100}?([a-záéíóúâêîôûãõç]+)/i);
     const nome = nomeMatch ? nomeMatch[1] : 'Lead';
 
-    const meetLink = await criarEvento(nome, emailLead, userPhone, slotEscolhido.inicio, slotEscolhido.fim);
+    // Gerar resumo da conversa com Claude
+    let resumoConversa = 'Resumo não disponível';
+    try {
+      const historicoParaResumo = conversas[userPhone].slice(0, -1);
+      const resumoResp = await axios.post(
+        'https://api.anthropic.com/v1/messages',
+        {
+          model: 'claude-sonnet-4-6',
+          max_tokens: 300,
+          messages: [
+            ...historicoParaResumo,
+            { role: 'user', content: 'Com base nessa conversa, escreva um pequeno resumo em 3 a 5 linhas sobre o lead: quem é, qual negócio tem, qual a principal dor ou desafio relatado e o que ele busca. Seja direto e objetivo, como se fosse uma anotação para o vendedor antes da reunião.' }
+          ]
+        },
+        { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
+      );
+      resumoConversa = resumoResp.data.content[0].text;
+    } catch (err) {
+      console.error('Erro ao gerar resumo:', err.message);
+    }
+
+    const meetLink = await criarEvento(nome, emailLead, userPhone, slotEscolhido.inicio, slotEscolhido.fim, resumoConversa);
+
+    leadsAgendados.add(userPhone);
+    delete followUpStatus[userPhone];
 
     if (meetLink) {
-      await enviarMensagem(userPhone, `Aqui está o link da sua consultoria no Google Meet: ${meetLink}\n\nAté lá!`);
+      await enviarMensagem(userPhone, `Tudo confirmado!\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\nLink do Google Meet: ${meetLink}`);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\nMeet: ${meetLink}`);
     } else {
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
