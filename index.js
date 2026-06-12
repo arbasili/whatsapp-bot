@@ -233,12 +233,12 @@ SEU ROTEIRO (siga esta ordem):
 
 1. BOAS-VINDAS
 Na primeira mensagem do lead, responda em EXATAMENTE 3 partes separadas pelo marcador "|||". Siga este formato obrigatório:
-[resposta à saudação do lead, natural e breve]|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Para começar, como posso te chamar?
+[resposta à saudação do lead, natural e breve]|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Qual o seu nome?
 
 Exemplos:
-- Lead diz "oi": Olá!|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Para começar, como posso te chamar?
-- Lead diz "bom dia": Bom dia!|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Para começar, como posso te chamar?
-- Lead diz "boa tarde, tudo bem?": Boa tarde! Tudo bem, obrigado.|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Para começar, como posso te chamar?
+- Lead diz "oi": Olá!|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Qual o seu nome?
+- Lead diz "bom dia": Bom dia!|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Qual o seu nome?
+- Lead diz "boa tarde, tudo bem?": Boa tarde! Tudo bem, obrigado.|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Qual o seu nome?
 
 A partir da segunda mensagem do lead, responda normalmente sem o marcador "|||"."
 
@@ -338,7 +338,8 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
           { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
         )
       ]);
-      nome = nomeResp.data.content[0].text.trim().split(/\s+/)[0] || 'Lead';
+      const nomeExtraido = nomeResp.data.content[0].text.trim().split(/\s+/)[0] || '';
+      nome = (nomeExtraido && !nomeExtraido.includes('@')) ? nomeExtraido : 'Lead';
       resumoConversa = resumoResp.data.content[0].text;
     } catch (err) {
       console.error('Erro ao extrair nome ou gerar resumo:', err.message);
@@ -358,6 +359,7 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
         `Horário: ${slotEscolhido.label}\n` +
         `Link do Google Meet: ${meetLink}`
       );
+      await new Promise(r => setTimeout(r, 2000));
       await enviarMensagem(userPhone,
         `Nossa equipe entrará em contato antes da reunião para confirmar os detalhes. Até lá, ${nome}!`
       );
@@ -371,6 +373,7 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
         `Horário: ${slotEscolhido.label}\n\n` +
         `Atenção: o link do Google Meet não foi gerado automaticamente. Nossa equipe entrará em contato para enviar o link.`
       );
+      await new Promise(r => setTimeout(r, 2000));
       await enviarMensagem(userPhone,
         `Nossa equipe entrará em contato antes da reunião para confirmar os detalhes. Até lá, ${nome}!`
       );
@@ -384,9 +387,9 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     const partes = resposta.split('|||').map(p => p.trim()).filter(Boolean);
     if (partes.length === 3) {
       await enviarMensagem(userPhone, partes[0]);
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, 1500));
       await enviarMensagem(userPhone, partes[1]);
-      await new Promise(r => setTimeout(r, 1000));
+      await new Promise(r => setTimeout(r, 3000));
       await enviarMensagem(userPhone, partes[2]);
     } else {
       await enviarMensagem(userPhone, resposta);
