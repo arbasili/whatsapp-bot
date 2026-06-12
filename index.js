@@ -232,10 +232,18 @@ Reunião: consultoria gratuita de 30 minutos via Google Meet, sem compromisso.
 SEU ROTEIRO (siga esta ordem):
 
 1. BOAS-VINDAS
-Sempre comece se apresentando: "Olá! Sou do time de atendimento da *Clique e Fecha*, empresa especializada em automações e chatbots para pequenos negócios." Depois faça apenas esta pergunta: "Para começar, como posso te chamar?"
+Na primeira mensagem do lead, responda em EXATAMENTE 3 partes separadas pelo marcador "|||". Siga este formato obrigatório:
+[resposta à saudação do lead, natural e breve]|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Para começar, como posso te chamar?
+
+Exemplos:
+- Lead diz "oi": Olá!|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Para começar, como posso te chamar?
+- Lead diz "bom dia": Bom dia!|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Para começar, como posso te chamar?
+- Lead diz "boa tarde, tudo bem?": Boa tarde! Tudo bem, obrigado.|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Para começar, como posso te chamar?
+
+A partir da segunda mensagem do lead, responda normalmente sem o marcador "|||"."
 
 2. ENTENDER A NECESSIDADE
-Use o nome da pessoa a partir daqui. Pergunte qual é o maior desafio de atendimento da empresa hoje. Se a resposta for vaga ou muito curta, aprofunde com uma segunda pergunta antes de seguir, por exemplo: "Qual parte do atendimento te gera mais dor hoje: o volume de mensagens, a demora para responder ou a falta de organização?" Demonstre que entendeu o problema e relacione com o que a Clique e Fecha resolve.
+Use o nome da pessoa a partir daqui. Vá direto para a pergunta, sem frases de transição como "Prazer" ou "Que bom falar com você". Pergunte qual é o maior desafio de atendimento da empresa hoje. Se a resposta for vaga ou muito curta, aprofunde com uma segunda pergunta antes de seguir, por exemplo: "Qual parte do atendimento te gera mais dor hoje: o volume de mensagens, a demora para responder ou a falta de organização?" Demonstre que entendeu o problema com empatia e siga em frente. Não mencione a Clique e Fecha ou o que ela resolve neste momento — isso fica para a reunião.
 
 3. QUALIFICAR
 Pergunte qual tipo de negócio a pessoa tem. Entenda se já usa alguma ferramenta de atendimento ou automação. Se o perfil for de pequena empresa local, avance para o agendamento.
@@ -245,7 +253,7 @@ Siga esta sequência obrigatória, uma mensagem por vez:
 a. Primeiro pergunte se faz sentido agendar uma consultoria gratuita de 30 minutos com um especialista da Clique e Fecha.
 b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
 c. Após a escolha do horário, confirme o WhatsApp: "Posso usar o número ${userPhone} para contato, ou prefere outro?"
-d. Após confirmar o WhatsApp, peça o email com esta mensagem exata: "Ótimo! E qual é o seu email para eu registrar o agendamento?"
+d. Após confirmar o WhatsApp, peça o email com esta mensagem exata: "E qual é o seu email para eu registrar o agendamento?"
 
 5. CONFIRMAÇÃO
 Após receber o email, não envie nenhuma mensagem. Não mencione link, Meet, confirmação, agendamento ou qualquer coisa relacionada. O sistema cuidará disso automaticamente. Somente retome a conversa se o cliente enviar uma nova mensagem.
@@ -272,7 +280,8 @@ Não use diminutivos.
 Nunca coloque negrito em emails, números ou dados pessoais.
 Use asterisco simples para negrito: *palavra* e nunca **palavra**.
 Faça apenas uma pergunta por mensagem. Esta regra é absoluta.
-Mensagens curtas, no máximo três parágrafos.`
+Mensagens curtas, no máximo três parágrafos.
+Nunca escreva instruções internas, meta-comentários ou textos entre parênteses como resposta ao cliente.`
       },
       {
         role: 'assistant',
@@ -282,18 +291,12 @@ Mensagens curtas, no máximo três parágrafos.`
   }
 
   conversas[userPhone].push({ role: 'user', content: userText });
-  const resposta = await chamarClaude(conversas[userPhone]);
-  conversas[userPhone].push({ role: 'assistant', content: resposta });
 
-  // Detectar confirmação de agendamento e criar evento
-  const confirmaAgendamento =
-    resposta.toLowerCase().includes('google meet') &&
-    (resposta.toLowerCase().includes('confirmado') ||
-     resposta.toLowerCase().includes('instantes') ||
-     resposta.toLowerCase().includes('vai receber') ||
-     resposta.toLowerCase().includes('receberá'));
+  // Verificar email ANTES de chamar o Claude — se for agendamento, Claude não fala
+  const emailNaMensagem = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.test(userText);
+  const confirmaAgendamento = emailNaMensagem && agendamentos[userPhone]?.slots?.length > 0 && !leadsAgendados.has(userPhone);
 
-  if (confirmaAgendamento && agendamentos[userPhone]?.slots?.length > 0) {
+  if (confirmaAgendamento) {
     const slots = agendamentos[userPhone].slots;
     const historico = conversas[userPhone].map(m => m.content).join(' ').toLowerCase();
     let slotEscolhido = slots[0];
@@ -374,7 +377,20 @@ Mensagens curtas, no máximo três parágrafos.`
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
   } else {
-    await enviarMensagem(userPhone, resposta);
+    const resposta = await chamarClaude(conversas[userPhone]);
+    conversas[userPhone].push({ role: 'assistant', content: resposta });
+
+    // Detectar abertura em 3 partes (primeira mensagem do lead)
+    const partes = resposta.split('|||').map(p => p.trim()).filter(Boolean);
+    if (partes.length === 3) {
+      await enviarMensagem(userPhone, partes[0]);
+      await new Promise(r => setTimeout(r, 1000));
+      await enviarMensagem(userPhone, partes[1]);
+      await new Promise(r => setTimeout(r, 1000));
+      await enviarMensagem(userPhone, partes[2]);
+    } else {
+      await enviarMensagem(userPhone, resposta);
+    }
   }
 
   res.sendStatus(200);
