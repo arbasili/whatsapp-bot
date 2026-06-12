@@ -69,42 +69,39 @@ async function buscarHorariosDisponiveis() {
   const agora = new Date();
   const horaCG = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
   const minAntes = new Date(horaCG.getTime() + 2 * 60 * 60 * 1000);
-  const slots = [];
 
   const manha = [9, 10, 11];
   const tarde = [14, 15, 16, 17];
 
-  // Opção 1: hoje (manhã ou tarde disponível)
+  // Slot 1: primeiro horario disponivel (hoje se possivel, senao proximo dia util)
+  let slot1 = null;
+  let diaSlot1 = null;
+
   const diaSemanaHoje = horaCG.getDay();
   if (diaSemanaHoje >= 1 && diaSemanaHoje <= 5) {
-    const manhãFiltrada = manha.filter(h => { const t = new Date(horaCG); t.setHours(h,0,0,0); return t > minAntes; });
-    const tardeFiltrada = tarde.filter(h => { const t = new Date(horaCG); t.setHours(h,0,0,0); return t > minAntes; });
-    const slotHoje = await buscarSlotDisponivel(horaCG, manhãFiltrada) || await buscarSlotDisponivel(horaCG, tardeFiltrada);
-    if (slotHoje) slots.push(slotHoje);
+    const manhaFiltrada = manha.filter(h => { const t = new Date(horaCG); t.setHours(h, 0, 0, 0); return t > minAntes; });
+    const tardeFiltrada = tarde.filter(h => { const t = new Date(horaCG); t.setHours(h, 0, 0, 0); return t > minAntes; });
+    slot1 = await buscarSlotDisponivel(horaCG, manhaFiltrada) || await buscarSlotDisponivel(horaCG, tardeFiltrada);
+    if (slot1) diaSlot1 = horaCG;
   }
 
-  // Opção 2: próximo dia útil (período diferente do slot de hoje)
-  const proximoDia = proximoDiaUtil(horaCG);
-  const slotManhaNP = await buscarSlotDisponivel(proximoDia, manha);
-  const slotTardeNP = await buscarSlotDisponivel(proximoDia, tarde);
-
-  // Se hoje tem slot de manhã, pegar tarde do próximo dia e vice-versa
-  if (slots.length > 0) {
-    const slotHojeLabel = slots[0].label;
-    if (slotHojeLabel.includes('9h') || slotHojeLabel.includes('10h') || slotHojeLabel.includes('11h')) {
-      if (slotTardeNP) slots.push(slotTardeNP);
-      else if (slotManhaNP) slots.push(slotManhaNP);
-    } else {
-      if (slotManhaNP) slots.push(slotManhaNP);
-      else if (slotTardeNP) slots.push(slotTardeNP);
-    }
-  } else {
-    // Sem slot hoje, pegar manhã e tarde do próximo dia útil
-    if (slotManhaNP) slots.push(slotManhaNP);
-    if (slotTardeNP) slots.push(slotTardeNP);
+  if (!slot1) {
+    const proximoDia = proximoDiaUtil(horaCG);
+    slot1 = await buscarSlotDisponivel(proximoDia, manha) || await buscarSlotDisponivel(proximoDia, tarde);
+    if (slot1) diaSlot1 = proximoDia;
   }
 
-  return slots.slice(0, 2);
+  if (!slot1) return [];
+
+  // Slot 2: obrigatoriamente no proximo dia util apos o dia do slot 1, periodo oposto
+  const horaSlot1 = new Date(slot1.inicio).getHours();
+  const slot1EhManha = horaSlot1 < 13;
+  const diaSlot2 = proximoDiaUtil(diaSlot1);
+  const periodoSlot2 = slot1EhManha ? tarde : manha;
+  const slot2 = await buscarSlotDisponivel(diaSlot2, periodoSlot2)
+             || await buscarSlotDisponivel(diaSlot2, slot1EhManha ? manha : tarde);
+
+  return slot2 ? [slot1, slot2] : [slot1];
 }
 
 async function criarEvento(nome, email, telefone, slotInicio, slotFim, resumo = '') {
@@ -222,7 +219,7 @@ app.post('/webhook', async (req, res) => {
         role: 'user',
         content: `Você é do time de atendimento da Clique e Fecha, empresa especializada em automações, chatbots e soluções de atendimento para pequenas empresas locais.
 
-Seu objetivo é qualificar o lead e agendar uma reunião no Google Meet com a equipe da Clique e Fecha.
+Seu objetivo é qualificar o lead e agendar uma consultoria gratuita com um especialista da Clique e Fecha.
 
 NÚMERO DO CLIENTE: ${userPhone}
 HORÁRIOS DISPONÍVEIS NA AGENDA: ${opcoesHorario}
@@ -238,23 +235,23 @@ SEU ROTEIRO (siga esta ordem):
 Sempre comece se apresentando: "Olá! Sou do time de atendimento da *Clique e Fecha*, empresa especializada em automações e chatbots para pequenos negócios." Depois faça apenas esta pergunta: "Para começar, como posso te chamar?"
 
 2. ENTENDER A NECESSIDADE
-Use o nome da pessoa a partir daqui. Pergunte qual é o maior desafio de atendimento da empresa hoje. Demonstre que entendeu o problema e relacione com o que a Clique e Fecha resolve.
+Use o nome da pessoa a partir daqui. Pergunte qual é o maior desafio de atendimento da empresa hoje. Se a resposta for vaga ou muito curta, aprofunde com uma segunda pergunta antes de seguir, por exemplo: "Qual parte do atendimento te gera mais dor hoje: o volume de mensagens, a demora para responder ou a falta de organização?" Demonstre que entendeu o problema e relacione com o que a Clique e Fecha resolve.
 
 3. QUALIFICAR
 Pergunte qual tipo de negócio a pessoa tem. Entenda se já usa alguma ferramenta de atendimento ou automação. Se o perfil for de pequena empresa local, avance para o agendamento.
 
 4. AGENDAR A REUNIÃO
 Siga esta sequência obrigatória, uma mensagem por vez:
-a. Primeiro pergunte se faz sentido agendar uma conversa rápida com a equipe.
+a. Primeiro pergunte se faz sentido agendar uma consultoria gratuita de 30 minutos com um especialista da Clique e Fecha.
 b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
 c. Após a escolha do horário, confirme o WhatsApp: "Posso usar o número ${userPhone} para contato, ou prefere outro?"
-d. Após confirmar o WhatsApp, peça o email. Após receber o email, não envie nenhuma mensagem. O sistema enviará a confirmação com os dados e o link do Meet automaticamente.
+d. Após confirmar o WhatsApp, peça o email com esta mensagem exata: "Ótimo! E qual é o seu email para eu registrar o agendamento?"
 
 5. CONFIRMAÇÃO
-Não envie nenhuma mensagem após receber o email do cliente. Aguarde o sistema agir. Somente retome a conversa se o cliente enviar uma nova mensagem depois da confirmação.
+Após receber o email, não envie nenhuma mensagem. Não mencione link, Meet, confirmação, agendamento ou qualquer coisa relacionada. O sistema cuidará disso automaticamente. Somente retome a conversa se o cliente enviar uma nova mensagem.
 
 6. APÓS O AGENDAMENTO
-Continue presente e disponível. Responda perguntas naturalmente. Somente se despeça quando o cliente der sinais claros de encerramento. Encerre com leveza: "Fico à disposição se precisar de mais alguma coisa. Até lá!"
+Se o cliente enviar mensagem após a confirmação do sistema, responda dúvidas naturalmente. Não se despeça por conta própria.
 
 TRATAMENTO DE OBJEÇÕES:
 
@@ -264,11 +261,11 @@ TRATAMENTO DE OBJEÇÕES:
 
 "Já tenho alguém": Respeite e explore se está satisfeito. Se insatisfeito, apresente a consultoria como oportunidade de comparar.
 
-"Não tenho tempo": "A reunião é só 30 minutos e pode ser no horário que for melhor para você."
+"Não tenho tempo": "A consultoria é só 30 minutos e pode ser no horário que for melhor para você."
 
 REGRAS DE LINGUAGEM:
 Responda sempre em português brasileiro.
-Seja humano, próximo e natural.
+Seja humano, próximo e natural. Evite frases genéricas como "Que bom te ter aqui".
 Não use emojis.
 Não use travessões.
 Não use diminutivos.
@@ -306,28 +303,42 @@ Mensagens curtas, no máximo três parágrafos.`
 
     const emailMatch = historico.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
     const emailLead = emailMatch ? emailMatch.find(e => !e.includes('cliqueefecha')) || emailMatch[0] : '';
-    const nomeMatch = historico.match(/posso te chamar\?[\s\S]{0,100}?([a-záéíóúâêîôûãõç]+)/i);
-    const nome = nomeMatch ? nomeMatch[1] : 'Lead';
 
-    // Gerar resumo da conversa com Claude
+    // Extrair nome e gerar resumo com Claude em paralelo
+    let nome = 'Lead';
     let resumoConversa = 'Resumo não disponível';
     try {
       const historicoParaResumo = conversas[userPhone].slice(0, -1);
-      const resumoResp = await axios.post(
-        'https://api.anthropic.com/v1/messages',
-        {
-          model: 'claude-sonnet-4-6',
-          max_tokens: 300,
-          messages: [
-            ...historicoParaResumo,
-            { role: 'user', content: 'Com base nessa conversa, escreva um pequeno resumo em 3 a 5 linhas sobre o lead: quem é, qual negócio tem, qual a principal dor ou desafio relatado e o que ele busca. Seja direto e objetivo, como se fosse uma anotação para o vendedor antes da reunião.' }
-          ]
-        },
-        { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
-      );
+      const [nomeResp, resumoResp] = await Promise.all([
+        axios.post(
+          'https://api.anthropic.com/v1/messages',
+          {
+            model: 'claude-sonnet-4-6',
+            max_tokens: 20,
+            messages: [
+              ...historicoParaResumo,
+              { role: 'user', content: 'Qual é o primeiro nome do cliente nessa conversa? Responda apenas o primeiro nome, sem pontuação, sem mais nada.' }
+            ]
+          },
+          { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
+        ),
+        axios.post(
+          'https://api.anthropic.com/v1/messages',
+          {
+            model: 'claude-sonnet-4-6',
+            max_tokens: 300,
+            messages: [
+              ...historicoParaResumo,
+              { role: 'user', content: 'Com base nessa conversa, escreva um pequeno resumo em 3 a 5 linhas sobre o lead: quem é, qual negócio tem, qual a principal dor ou desafio relatado e o que ele busca. Seja direto e objetivo, como se fosse uma anotação para o vendedor antes da reunião.' }
+            ]
+          },
+          { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
+        )
+      ]);
+      nome = nomeResp.data.content[0].text.trim().split(/\s+/)[0] || 'Lead';
       resumoConversa = resumoResp.data.content[0].text;
     } catch (err) {
-      console.error('Erro ao gerar resumo:', err.message);
+      console.error('Erro ao extrair nome ou gerar resumo:', err.message);
     }
 
     const meetLink = await criarEvento(nome, emailLead, userPhone, slotEscolhido.inicio, slotEscolhido.fim, resumoConversa);
@@ -344,6 +355,9 @@ Mensagens curtas, no máximo três parágrafos.`
         `Horário: ${slotEscolhido.label}\n` +
         `Link do Google Meet: ${meetLink}`
       );
+      await enviarMensagem(userPhone,
+        `Nossa equipe entrará em contato antes da reunião para confirmar os detalhes. Até lá, ${nome}!`
+      );
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\nMeet: ${meetLink}`);
     } else {
       await enviarMensagem(userPhone,
@@ -353,6 +367,9 @@ Mensagens curtas, no máximo três parágrafos.`
         `Email: ${emailLead}\n` +
         `Horário: ${slotEscolhido.label}\n\n` +
         `Atenção: o link do Google Meet não foi gerado automaticamente. Nossa equipe entrará em contato para enviar o link.`
+      );
+      await enviarMensagem(userPhone,
+        `Nossa equipe entrará em contato antes da reunião para confirmar os detalhes. Até lá, ${nome}!`
       );
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
