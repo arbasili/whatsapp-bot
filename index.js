@@ -11,6 +11,10 @@ const ultimaMensagem = {};
 const followUpStatus = {};
 const agendamentos = {};
 const leadsAgendados = new Set();
+const leadsEncerrados = new Set();
+const mensagensPendentes = {};
+const debounceTimers = {};
+const DEBOUNCE_MS = 4000;
 
 const EXPIRACAO_MS = 24 * 60 * 60 * 1000;
 const FOLLOWUP_1_MS = 2 * 60 * 60 * 1000;
@@ -188,11 +192,30 @@ app.post('/webhook', async (req, res) => {
   if (ultimaMensagem[userPhone] && agora - ultimaMensagem[userPhone] > EXPIRACAO_MS) {
     delete conversas[userPhone];
     delete agendamentos[userPhone];
+    delete mensagensPendentes[userPhone];
   }
   ultimaMensagem[userPhone] = agora;
   if (followUpStatus[userPhone]) {
     followUpStatus[userPhone] = { tentativas: 0, ultimoFollowUp: 0 };
   }
+
+  // Acumular mensagens e aguardar debounce antes de processar
+  if (!mensagensPendentes[userPhone]) mensagensPendentes[userPhone] = [];
+  mensagensPendentes[userPhone].push(userText);
+
+  if (debounceTimers[userPhone]) clearTimeout(debounceTimers[userPhone]);
+
+  debounceTimers[userPhone] = setTimeout(() => {
+    const textoAcumulado = mensagensPendentes[userPhone].join(' ');
+    delete mensagensPendentes[userPhone];
+    delete debounceTimers[userPhone];
+    processarMensagem(userPhone, textoAcumulado);
+  }, DEBOUNCE_MS);
+
+  return res.sendStatus(200);
+});
+
+async function processarMensagem(userPhone, userText) {
 
   if (!conversas[userPhone]) {
     let opcoesHorario = 'amanhã às 10h ou amanhã às 14h';
@@ -246,7 +269,10 @@ A partir da segunda mensagem do lead, responda normalmente sem o marcador "|||".
 Use o nome da pessoa a partir daqui. Vá direto para a pergunta, sem frases de transição como "Prazer" ou "Que bom falar com você". Pergunte qual é o maior desafio de atendimento da empresa hoje. Se a resposta for vaga ou muito curta, aprofunde com uma segunda pergunta antes de seguir, por exemplo: "Qual parte do atendimento te gera mais dor hoje: o volume de mensagens, a demora para responder ou a falta de organização?" Demonstre que entendeu o problema com empatia e siga em frente. Não mencione a Clique e Fecha ou o que ela resolve neste momento — isso fica para a reunião.
 
 3. QUALIFICAR
-Pergunte qual tipo de negócio a pessoa tem. Entenda se já usa alguma ferramenta de atendimento ou automação. Se o perfil for de pequena empresa local, avance para o agendamento.
+Pergunte qual tipo de negócio a pessoa tem. Entenda se já usa alguma ferramenta de atendimento ou automação.
+
+3b. URGÊNCIA
+Após entender o negócio, pergunte: "Isso está te gerando problema agora ou é algo que você quer resolver nos próximos meses?" Use a resposta para calibrar o tom — se for urgente, reforce que a consultoria pode ajudar a estruturar isso rapidamente. Se for futuro, reforce que começar cedo evita problemas maiores. Em ambos os casos, avance para o agendamento.
 
 4. AGENDAR A REUNIÃO
 Siga esta sequência obrigatória, uma mensagem por vez:
@@ -258,8 +284,11 @@ d. Após confirmar o WhatsApp, peça o email com esta mensagem exata: "E qual é
 5. CONFIRMAÇÃO
 Após receber o email, não envie nenhuma mensagem. Não mencione link, Meet, confirmação, agendamento ou qualquer coisa relacionada. O sistema cuidará disso automaticamente. Somente retome a conversa se o cliente enviar uma nova mensagem.
 
-6. APÓS O AGENDAMENTO
-Se o cliente enviar mensagem após a confirmação do sistema, responda dúvidas naturalmente. Não se despeça por conta própria.
+6. ENCERRAMENTO
+Quando o lead der sinais claros de encerramento (disse "blz", "tá bom", "até", "combinado", "ok", "entendi", "tchau", "obrigado", "valeu", "certo" ou similares) e já foi convidado a agendar ou já agendou, responda com UMA última mensagem curta e natural de despedida e inclua obrigatoriamente o marcador exato: [ENCERRAR]
+
+Exemplo: "Até mais, Thamiris! Quando quiser agendar é só chamar. [ENCERRAR]"
+Exemplo: "Combinado! Até lá. [ENCERRAR]" 
 
 TRATAMENTO DE OBJEÇÕES:
 
@@ -280,7 +309,7 @@ Não use diminutivos.
 Nunca coloque negrito em emails, números ou dados pessoais.
 Use asterisco simples para negrito: *palavra* e nunca **palavra**.
 Faça apenas uma pergunta por mensagem. Esta regra é absoluta.
-Mensagens curtas, no máximo três parágrafos.
+Mensagens curtas. No máximo dois parágrafos, preferencialmente um. Seja direto e objetivo.
 Nunca escreva instruções internas, meta-comentários ou textos entre parênteses como resposta ao cliente.`
       },
       {
@@ -380,6 +409,9 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
   } else {
+    // Ignorar se conversa já encerrada
+    if (leadsEncerrados.has(userPhone)) return;
+
     const resposta = await chamarClaude(conversas[userPhone]);
     conversas[userPhone].push({ role: 'assistant', content: resposta });
 
@@ -392,12 +424,21 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
       await new Promise(r => setTimeout(r, 3000));
       await enviarMensagem(userPhone, partes[2]);
     } else {
-      await enviarMensagem(userPhone, resposta);
+      // Detectar encerramento
+      const deveEncerrar = resposta.includes('[ENCERRAR]');
+      const respostaLimpa = resposta.replace('[ENCERRAR]', '').trim();
+      await enviarMensagem(userPhone, respostaLimpa);
+      if (deveEncerrar) {
+        leadsEncerrados.add(userPhone);
+        delete conversas[userPhone];
+        delete agendamentos[userPhone];
+        delete ultimaMensagem[userPhone];
+        delete followUpStatus[userPhone];
+      }
     }
   }
 
-  res.sendStatus(200);
-});
+}
 
 async function chamarClaude(historico) {
   try {
