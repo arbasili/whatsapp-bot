@@ -19,66 +19,90 @@ const MEU_NUMERO = '5567988885170';
 const CALENDAR_ID = 'comercial@cliqueefecha.com.br';
 
 const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
-const auth = new google.auth.GoogleAuth({
-  credentials: serviceAccountKey,
+const auth = new google.auth.JWT({
+  email: serviceAccountKey.client_email,
+  key: serviceAccountKey.private_key,
   scopes: ['https://www.googleapis.com/auth/calendar'],
+  subject: 'comercial@cliqueefecha.com.br',
 });
 const calendar = google.calendar({ version: 'v3', auth });
+
+async function buscarSlotDisponivel(dia, periodos) {
+  for (const hora of periodos) {
+    const inicio = new Date(dia);
+    inicio.setHours(hora, 0, 0, 0);
+    const fim = new Date(inicio);
+    fim.setMinutes(fim.getMinutes() + 30);
+    try {
+      const res = await calendar.freebusy.query({
+        requestBody: {
+          timeMin: inicio.toISOString(),
+          timeMax: fim.toISOString(),
+          timeZone: 'America/Campo_Grande',
+          items: [{ id: CALENDAR_ID }],
+        },
+      });
+      const ocupado = res.data.calendars[CALENDAR_ID].busy.length > 0;
+      if (!ocupado) {
+        const nomeDia = inicio.toLocaleDateString('pt-BR', {
+          weekday: 'long', day: 'numeric', month: 'long',
+          timeZone: 'America/Campo_Grande'
+        });
+        return { label: `${nomeDia} às ${hora}h`, inicio: inicio.toISOString(), fim: fim.toISOString() };
+      }
+    } catch (err) {
+      console.error('Erro ao verificar agenda:', err.message);
+    }
+  }
+  return null;
+}
+
+function proximoDiaUtil(data, offset = 1) {
+  const d = new Date(data);
+  d.setDate(d.getDate() + offset);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  return d;
+}
 
 async function buscarHorariosDisponiveis() {
   const agora = new Date();
   const horaCG = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
+  const minAntes = new Date(horaCG.getTime() + 2 * 60 * 60 * 1000);
   const slots = [];
-  let diasVerificados = 0;
-  let diaAtual = new Date(horaCG);
 
-  while (slots.length < 2 && diasVerificados < 7) {
-    const diaSemana = diaAtual.getDay();
-    if (diaSemana === 0 || diaSemana === 6) {
-      diaAtual.setDate(diaAtual.getDate() + 1);
-      diasVerificados++;
-      continue;
+  const manha = [9, 10, 11];
+  const tarde = [14, 15, 16, 17];
+
+  // Tentar hoje: um slot de manhã e um de tarde
+  const diaSemanaHoje = horaCG.getDay();
+  if (diaSemanaHoje >= 1 && diaSemanaHoje <= 5) {
+    const manhãFiltrada = manha.filter(h => { const t = new Date(horaCG); t.setHours(h,0,0,0); return t > minAntes; });
+    const tardeFiltrada = tarde.filter(h => { const t = new Date(horaCG); t.setHours(h,0,0,0); return t > minAntes; });
+
+    const slotManha = await buscarSlotDisponivel(horaCG, manhãFiltrada);
+    const slotTarde = await buscarSlotDisponivel(horaCG, tardeFiltrada);
+
+    if (slotManha && slotTarde) {
+      return [slotManha, slotTarde];
     }
-
-    const horariosCandiatos = [9, 10, 11, 14, 15, 16, 17];
-    for (const hora of horariosCandiatos) {
-      if (slots.length >= 2) break;
-      const inicio = new Date(diaAtual);
-      inicio.setHours(hora, 0, 0, 0);
-      const fim = new Date(inicio);
-      fim.setMinutes(fim.getMinutes() + 30);
-      const minAntes = new Date(horaCG.getTime() + 2 * 60 * 60 * 1000);
-      if (inicio <= minAntes) continue;
-
-      try {
-        const res = await calendar.freebusy.query({
-          requestBody: {
-            timeMin: inicio.toISOString(),
-            timeMax: fim.toISOString(),
-            timeZone: 'America/Campo_Grande',
-            items: [{ id: CALENDAR_ID }],
-          },
-        });
-        const ocupado = res.data.calendars[CALENDAR_ID].busy.length > 0;
-        if (!ocupado) {
-          const nomeDia = inicio.toLocaleDateString('pt-BR', {
-            weekday: 'long', day: 'numeric', month: 'long',
-            timeZone: 'America/Campo_Grande'
-          });
-          slots.push({
-            label: `${nomeDia} às ${hora}h`,
-            inicio: inicio.toISOString(),
-            fim: fim.toISOString(),
-          });
-        }
-      } catch (err) {
-        console.error('Erro ao verificar agenda:', err.message);
-      }
-    }
-    diaAtual.setDate(diaAtual.getDate() + 1);
-    diasVerificados++;
   }
-  return slots;
+
+  // Se não tiver 2 slots hoje, usar próximo dia útil
+  const proximoDia = proximoDiaUtil(horaCG);
+  const slotManhaNP = await buscarSlotDisponivel(proximoDia, manha);
+  const slotTardeNP = await buscarSlotDisponivel(proximoDia, tarde);
+
+  if (slotManhaNP) slots.push(slotManhaNP);
+  if (slotTardeNP) slots.push(slotTardeNP);
+
+  // Se ainda não tiver 2, tenta o dia seguinte
+  if (slots.length < 2) {
+    const outroDia = proximoDiaUtil(proximoDia);
+    const s = await buscarSlotDisponivel(outroDia, [...manha, ...tarde]);
+    if (s) slots.push(s);
+  }
+
+  return slots.slice(0, 2);
 }
 
 async function criarEvento(nome, email, telefone, slotInicio, slotFim) {
@@ -208,7 +232,7 @@ Reunião: consultoria gratuita de 30 minutos via Google Meet, sem compromisso.
 SEU ROTEIRO (siga esta ordem):
 
 1. BOAS-VINDAS
-Cumprimente de forma natural e acessível. Diga que é do time de atendimento da Clique e Fecha. Faça apenas esta pergunta: "Para começar, como posso te chamar?"
+Sempre comece se apresentando: "Olá! Sou do time de atendimento da Clique e Fecha, empresa especializada em automações e chatbots para pequenos negócios." Depois faça apenas esta pergunta: "Para começar, como posso te chamar?"
 
 2. ENTENDER A NECESSIDADE
 Use o nome da pessoa a partir daqui. Pergunte qual é o maior desafio de atendimento da empresa hoje. Demonstre que entendeu o problema e relacione com o que a Clique e Fecha resolve.
@@ -219,7 +243,7 @@ Pergunte qual tipo de negócio a pessoa tem. Entenda se já usa alguma ferrament
 4. AGENDAR A REUNIÃO
 Siga esta sequência obrigatória, uma mensagem por vez:
 a. Primeiro pergunte se faz sentido agendar uma conversa rápida com a equipe.
-b. Somente após a confirmação, ofereça os horários: "Tenho disponível ${opcoesHorario}. Qual funciona melhor para você?"
+b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
 c. Após a escolha do horário, confirme o WhatsApp: "Posso usar o número ${userPhone} para contato, ou prefere outro?"
 d. Após confirmar o WhatsApp, peça o email.
 
