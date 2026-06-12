@@ -235,7 +235,7 @@ Reunião: consultoria gratuita de 30 minutos via Google Meet, sem compromisso.
 SEU ROTEIRO (siga esta ordem):
 
 1. BOAS-VINDAS
-Sempre comece se apresentando: "Olá! Sou do time de atendimento da Clique e Fecha, empresa especializada em automações e chatbots para pequenos negócios." Depois faça apenas esta pergunta: "Para começar, como posso te chamar?"
+Sempre comece se apresentando: "Olá! Sou do time de atendimento da *Clique e Fecha*, empresa especializada em automações e chatbots para pequenos negócios." Depois faça apenas esta pergunta: "Para começar, como posso te chamar?"
 
 2. ENTENDER A NECESSIDADE
 Use o nome da pessoa a partir daqui. Pergunte qual é o maior desafio de atendimento da empresa hoje. Demonstre que entendeu o problema e relacione com o que a Clique e Fecha resolve.
@@ -248,10 +248,10 @@ Siga esta sequência obrigatória, uma mensagem por vez:
 a. Primeiro pergunte se faz sentido agendar uma conversa rápida com a equipe.
 b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
 c. Após a escolha do horário, confirme o WhatsApp: "Posso usar o número ${userPhone} para contato, ou prefere outro?"
-d. Após confirmar o WhatsApp, peça o email.
+d. Após confirmar o WhatsApp, peça o email. Após receber o email, não envie nenhuma mensagem. O sistema enviará a confirmação com os dados e o link do Meet automaticamente.
 
 5. CONFIRMAÇÃO
-Após o sistema enviar automaticamente a mensagem com os dados e o link do Meet, faça apenas esta pergunta: "Tem alguma dúvida antes da reunião?"
+Não envie nenhuma mensagem após receber o email do cliente. Aguarde o sistema agir. Somente retome a conversa se o cliente enviar uma nova mensagem depois da confirmação.
 
 6. APÓS O AGENDAMENTO
 Continue presente e disponível. Responda perguntas naturalmente. Somente se despeça quando o cliente der sinais claros de encerramento. Encerre com leveza: "Fico à disposição se precisar de mais alguma coisa. Até lá!"
@@ -289,7 +289,12 @@ Mensagens curtas, no máximo três parágrafos.`
   conversas[userPhone].push({ role: 'assistant', content: resposta });
 
   // Detectar confirmação de agendamento e criar evento
-  const confirmaAgendamento = resposta.toLowerCase().includes('link do google meet será enviado');
+  const confirmaAgendamento =
+    resposta.toLowerCase().includes('google meet') &&
+    (resposta.toLowerCase().includes('confirmado') ||
+     resposta.toLowerCase().includes('instantes') ||
+     resposta.toLowerCase().includes('vai receber') ||
+     resposta.toLowerCase().includes('receberá'));
 
   if (confirmaAgendamento && agendamentos[userPhone]?.slots?.length > 0) {
     const slots = agendamentos[userPhone].slots;
@@ -331,14 +336,30 @@ Mensagens curtas, no máximo três parágrafos.`
     delete followUpStatus[userPhone];
 
     if (meetLink) {
-      await enviarMensagem(userPhone, `Tudo confirmado!\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\nLink do Google Meet: ${meetLink}`);
+      await enviarMensagem(userPhone,
+        `Agendamento confirmado, ${nome}!\n\n` +
+        `Nome: ${nome}\n` +
+        `WhatsApp: ${userPhone}\n` +
+        `Email: ${emailLead}\n` +
+        `Horário: ${slotEscolhido.label}\n` +
+        `Link do Google Meet: ${meetLink}`
+      );
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\nMeet: ${meetLink}`);
     } else {
+      await enviarMensagem(userPhone,
+        `Agendamento confirmado, ${nome}!\n\n` +
+        `Nome: ${nome}\n` +
+        `WhatsApp: ${userPhone}\n` +
+        `Email: ${emailLead}\n` +
+        `Horário: ${slotEscolhido.label}\n\n` +
+        `Atenção: o link do Google Meet não foi gerado automaticamente. Nossa equipe entrará em contato para enviar o link.`
+      );
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
+  } else {
+    await enviarMensagem(userPhone, resposta);
   }
 
-  await enviarMensagem(userPhone, resposta);
   res.sendStatus(200);
 });
 
