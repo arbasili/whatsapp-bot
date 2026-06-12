@@ -268,6 +268,9 @@ A partir da segunda mensagem do lead, responda normalmente sem o marcador "|||".
 2. ENTENDER A NECESSIDADE
 Use o nome da pessoa a partir daqui. Vá direto para a pergunta, sem frases de transição como "Prazer" ou "Que bom falar com você". Pergunte qual é o maior desafio de atendimento da empresa hoje. Se a resposta for vaga ou muito curta, aprofunde com uma segunda pergunta antes de seguir, por exemplo: "Qual parte do atendimento te gera mais dor hoje: o volume de mensagens, a demora para responder ou a falta de organização?" Demonstre que entendeu o problema com empatia e siga em frente. Não mencione a Clique e Fecha ou o que ela resolve neste momento — isso fica para a reunião.
 
+2b. APROFUNDAR A DOR
+Após entender a dor principal, faça esta pergunta: "Só para eu entender melhor: vocês recebem muitos leads e não conseguem dar conta do volume, ou o problema é mais organizar o acompanhamento depois do primeiro contato?" Use a resposta para personalizar a abordagem — se for volume, fale em atender mais sem aumentar equipe; se for acompanhamento, fale em não deixar nenhum lead escapar.
+
 3. QUALIFICAR
 Pergunte qual tipo de negócio a pessoa tem. Entenda se já usa alguma ferramenta de atendimento ou automação.
 
@@ -336,42 +339,42 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     const emailMatch = historico.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
     const emailLead = emailMatch ? emailMatch.find(e => !e.includes('cliqueefecha')) || emailMatch[0] : '';
 
-    // Extrair nome e gerar resumo com Claude em paralelo
-    let nome = 'Lead';
+    // Extrair nome direto do histórico — primeira resposta do lead após pergunta do nome
+    let nome = '';
+    const msgs = conversas[userPhone];
+    const perguntasNome = ['qual o seu nome', 'como posso te chamar', 'como posso chamá-lo', 'como posso chamá-la'];
+    for (let i = 0; i < msgs.length - 1; i++) {
+      const conteudoBot = msgs[i].content.toLowerCase().replace(/\|\|\|/g, ' ');
+      const perguntouNome = perguntasNome.some(p => conteudoBot.includes(p));
+      if (msgs[i].role === 'assistant' && perguntouNome && msgs[i+1].role === 'user') {
+        const candidato = msgs[i+1].content.trim().split(/\s+/)[0];
+        if (candidato && !candidato.includes('@') && candidato.length > 1 && candidato.length < 30) {
+          nome = candidato.charAt(0).toUpperCase() + candidato.slice(1).toLowerCase();
+        }
+        break;
+      }
+    }
+    if (!nome) nome = '';
+
+    // Gerar resumo com Claude
     let resumoConversa = 'Resumo não disponível';
     try {
       const historicoParaResumo = conversas[userPhone].slice(0, -1);
-      const [nomeResp, resumoResp] = await Promise.all([
-        axios.post(
-          'https://api.anthropic.com/v1/messages',
-          {
-            model: 'claude-sonnet-4-6',
-            max_tokens: 20,
-            messages: [
-              ...historicoParaResumo,
-              { role: 'user', content: 'Qual é o primeiro nome do cliente nessa conversa? Responda apenas o primeiro nome, sem pontuação, sem mais nada.' }
-            ]
-          },
-          { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
-        ),
-        axios.post(
-          'https://api.anthropic.com/v1/messages',
-          {
-            model: 'claude-sonnet-4-6',
-            max_tokens: 300,
-            messages: [
-              ...historicoParaResumo,
-              { role: 'user', content: 'Com base nessa conversa, escreva um pequeno resumo em 3 a 5 linhas sobre o lead: quem é, qual negócio tem, qual a principal dor ou desafio relatado e o que ele busca. Seja direto e objetivo, como se fosse uma anotação para o vendedor antes da reunião.' }
-            ]
-          },
-          { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
-        )
-      ]);
-      const nomeExtraido = nomeResp.data.content[0].text.trim().split(/\s+/)[0] || '';
-      nome = (nomeExtraido && !nomeExtraido.includes('@')) ? nomeExtraido : 'Lead';
+      const resumoResp = await axios.post(
+        'https://api.anthropic.com/v1/messages',
+        {
+          model: 'claude-sonnet-4-6',
+          max_tokens: 300,
+          messages: [
+            ...historicoParaResumo,
+            { role: 'user', content: 'Com base nessa conversa, escreva um pequeno resumo em 3 a 5 linhas sobre o lead: quem é, qual negócio tem, qual a principal dor ou desafio relatado e o que ele busca. Seja direto e objetivo, como se fosse uma anotação para o vendedor antes da reunião.' }
+          ]
+        },
+        { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
+      );
       resumoConversa = resumoResp.data.content[0].text;
     } catch (err) {
-      console.error('Erro ao extrair nome ou gerar resumo:', err.message);
+      console.error('Erro ao gerar resumo:', err.message);
     }
 
     const meetLink = await criarEvento(nome, emailLead, userPhone, slotEscolhido.inicio, slotEscolhido.fim, resumoConversa);
@@ -379,34 +382,34 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     leadsAgendados.add(userPhone);
     delete followUpStatus[userPhone];
 
+    const saudacao = nome ? `Agendamento confirmado, ${nome}!` : `Agendamento confirmado!`;
+    const despedida = nome ? `Nossa equipe entrará em contato antes da reunião para confirmar os detalhes. Até lá, ${nome}!` : `Nossa equipe entrará em contato antes da reunião para confirmar os detalhes. Até lá!`;
+    const nomeExibicao = nome || 'Não informado';
+
     if (meetLink) {
       await enviarMensagem(userPhone,
-        `Agendamento confirmado, ${nome}!\n\n` +
-        `Nome: ${nome}\n` +
+        `${saudacao}\n\n` +
+        `Nome: ${nomeExibicao}\n` +
         `WhatsApp: ${userPhone}\n` +
         `Email: ${emailLead}\n` +
         `Horário: ${slotEscolhido.label}\n` +
         `Link do Google Meet: ${meetLink}`
       );
       await new Promise(r => setTimeout(r, 2000));
-      await enviarMensagem(userPhone,
-        `Nossa equipe entrará em contato antes da reunião para confirmar os detalhes. Até lá, ${nome}!`
-      );
-      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\nMeet: ${meetLink}`);
+      await enviarMensagem(userPhone, despedida);
+      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\nMeet: ${meetLink}`);
     } else {
       await enviarMensagem(userPhone,
-        `Agendamento confirmado, ${nome}!\n\n` +
-        `Nome: ${nome}\n` +
+        `${saudacao}\n\n` +
+        `Nome: ${nomeExibicao}\n` +
         `WhatsApp: ${userPhone}\n` +
         `Email: ${emailLead}\n` +
         `Horário: ${slotEscolhido.label}\n\n` +
         `Atenção: o link do Google Meet não foi gerado automaticamente. Nossa equipe entrará em contato para enviar o link.`
       );
       await new Promise(r => setTimeout(r, 2000));
-      await enviarMensagem(userPhone,
-        `Nossa equipe entrará em contato antes da reunião para confirmar os detalhes. Até lá, ${nome}!`
-      );
-      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nome}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
+      await enviarMensagem(userPhone, despedida);
+      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
   } else {
     // Ignorar se conversa já encerrada
