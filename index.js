@@ -147,9 +147,18 @@ setInterval(async () => {
 
     let nome = 'você';
     if (conversas[phone]) {
-      const historico = conversas[phone].map(m => m.content).join(' ');
-      const nomeMatch = historico.match(/Para começar[^?]+\?[\s\S]{0,200}?([A-ZÀ-Ú][a-zà-ú]+)/);
-      if (nomeMatch) nome = nomeMatch[1];
+      const msgs = conversas[phone];
+      const perguntasNome = ['qual o seu nome', 'como posso te chamar'];
+      for (let i = 0; i < msgs.length - 1; i++) {
+        const conteudo = msgs[i].content.toLowerCase().replace(/\|\|\|/g, ' ');
+        if (perguntasNome.some(p => conteudo.includes(p)) && msgs[i+1]?.role === 'user') {
+          const candidato = msgs[i+1].content.trim().split(/\s+/)[0];
+          if (candidato && !candidato.includes('@') && candidato.length > 1 && candidato.length < 30 && !/\d/.test(candidato)) {
+            nome = candidato.charAt(0).toUpperCase() + candidato.slice(1).toLowerCase();
+            break;
+          }
+        }
+      }
     }
 
     if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
@@ -266,10 +275,15 @@ Exemplos:
 A partir da segunda mensagem do lead, responda normalmente sem o marcador "|||"."
 
 2. ENTENDER A NECESSIDADE
-Use o nome da pessoa a partir daqui. Vá direto para a pergunta, sem frases de transição como "Prazer" ou "Que bom falar com você". Pergunte qual é o maior desafio de atendimento da empresa hoje. Se a resposta for vaga ou muito curta, aprofunde com uma segunda pergunta antes de seguir, por exemplo: "Qual parte do atendimento te gera mais dor hoje: o volume de mensagens, a demora para responder ou a falta de organização?" Demonstre que entendeu o problema com empatia e siga em frente. Não mencione a Clique e Fecha ou o que ela resolve neste momento — isso fica para a reunião.
+Use o nome da pessoa a partir daqui. Vá direto para a pergunta, sem frases de transição como "Prazer" ou "Que bom falar com você". Pergunte qual é o maior desafio de atendimento da empresa hoje. Demonstre que entendeu o problema com empatia e siga em frente. Não mencione a Clique e Fecha ou o que ela resolve neste momento — isso fica para a reunião.
 
 2b. APROFUNDAR A DOR
-Após entender a dor principal, faça esta pergunta: "Só para eu entender melhor: vocês recebem muitos leads e não conseguem dar conta do volume, ou o problema é mais organizar o acompanhamento depois do primeiro contato?" Use a resposta para personalizar a abordagem — se for volume, fale em atender mais sem aumentar equipe; se for acompanhamento, fale em não deixar nenhum lead escapar.
+Após entender a dor principal, aprofunde com uma pergunta contextual — conectada exatamente ao que o lead disse, não com opções genéricas. Exemplos:
+- Lead falou "qualidade": "Quando você fala em qualidade, é mais a falta de padronização nas respostas, a demora no atendimento ou os atendentes não terem as informações certas na hora?"
+- Lead falou "volume": "Esse volume chega mais pelo WhatsApp, telefone ou outros canais?"
+- Lead falou "demora": "Essa demora acontece mais no primeiro contato ou no acompanhamento depois?"
+- Lead falou "organização": "Vocês perdem mais leads por falta de acompanhamento ou por demora na primeira resposta?"
+Adapte a pergunta ao contexto real. Nunca use opções pré-definidas que não se conectem ao que o lead disse.
 
 3. QUALIFICAR
 Pergunte qual tipo de negócio a pessoa tem. Entenda se já usa alguma ferramenta de atendimento ou automação.
@@ -330,28 +344,39 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
 
   if (confirmaAgendamento) {
     const slots = agendamentos[userPhone].slots;
-    const historico = conversas[userPhone].map(m => m.content).join(' ').toLowerCase();
+    const historicoMsgsUsuario = conversas[userPhone]
+      .filter(m => m.role === 'user')
+      .map(m => m.content)
+      .join(' ')
+      .toLowerCase();
     let slotEscolhido = slots[0];
-    if (slots[1] && historico.includes(slots[1].label.split(' às ')[1]?.replace('h', ''))) {
-      slotEscolhido = slots[1];
+    if (slots[1]) {
+      const horaSlot1 = slots[0].label.split(' às ')[1]?.replace('h', '').trim();
+      const horaSlot2 = slots[1].label.split(' às ')[1]?.replace('h', '').trim();
+      // Verifica se o usuário mencionou a hora do slot 2 mas não do slot 1
+      const mencionouSlot2 = horaSlot2 && historicoMsgsUsuario.includes(horaSlot2 + 'h');
+      const mencionouSlot1 = horaSlot1 && historicoMsgsUsuario.includes(horaSlot1 + 'h');
+      if (mencionouSlot2 && !mencionouSlot1) slotEscolhido = slots[1];
     }
 
     const emailMatch = historico.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
     const emailLead = emailMatch ? emailMatch.find(e => !e.includes('cliqueefecha')) || emailMatch[0] : '';
 
-    // Extrair nome direto do histórico — primeira resposta do lead após pergunta do nome
+    // Extrair nome direto do histórico
+    // Estrutura: [0]=prompt(user) [1]=ack(assistant) [2]=msg1lead(user) [3]=resposta3partes(assistant) [4]=nome(user)
     let nome = '';
     const msgs = conversas[userPhone];
     const perguntasNome = ['qual o seu nome', 'como posso te chamar', 'como posso chamá-lo', 'como posso chamá-la'];
     for (let i = 0; i < msgs.length - 1; i++) {
-      const conteudoBot = msgs[i].content.toLowerCase().replace(/\|\|\|/g, ' ');
-      const perguntouNome = perguntasNome.some(p => conteudoBot.includes(p));
-      if (msgs[i].role === 'assistant' && perguntouNome && msgs[i+1].role === 'user') {
+      const conteudo = msgs[i].content.toLowerCase().replace(/\|\|\|/g, ' ');
+      const perguntouNome = perguntasNome.some(p => conteudo.includes(p));
+      // Aceitar tanto role assistant quanto user (prompt inicial tem role user)
+      if (perguntouNome && msgs[i+1] && msgs[i+1].role === 'user') {
         const candidato = msgs[i+1].content.trim().split(/\s+/)[0];
-        if (candidato && !candidato.includes('@') && candidato.length > 1 && candidato.length < 30) {
+        if (candidato && !candidato.includes('@') && candidato.length > 1 && candidato.length < 30 && !/\d/.test(candidato)) {
           nome = candidato.charAt(0).toUpperCase() + candidato.slice(1).toLowerCase();
+          break;
         }
-        break;
       }
     }
     if (!nome) nome = '';
@@ -377,13 +402,18 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
       console.error('Erro ao gerar resumo:', err.message);
     }
 
+    // Avisar que está gerando antes de processar
+    await enviarMensagem(userPhone, 'Um segundo, deixa eu confirmar aqui.');
+
     const meetLink = await criarEvento(nome, emailLead, userPhone, slotEscolhido.inicio, slotEscolhido.fim, resumoConversa);
 
     leadsAgendados.add(userPhone);
     delete followUpStatus[userPhone];
 
+    await new Promise(r => setTimeout(r, 10000));
+
     const saudacao = nome ? `Agendamento confirmado, ${nome}!` : `Agendamento confirmado!`;
-    const despedida = nome ? `Nossa equipe entrará em contato antes da reunião para confirmar os detalhes. Até lá, ${nome}!` : `Nossa equipe entrará em contato antes da reunião para confirmar os detalhes. Até lá!`;
+    const despedida = nome ? `O especialista entrará em contato antes da reunião para confirmar os detalhes. Até lá, ${nome}!` : `O especialista entrará em contato antes da reunião para confirmar os detalhes. Até lá!`;
     const nomeExibicao = nome || 'Não informado';
 
     if (meetLink) {
@@ -395,7 +425,7 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
         `Horário: ${slotEscolhido.label}\n` +
         `Link do Google Meet: ${meetLink}`
       );
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 10000));
       await enviarMensagem(userPhone, despedida);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\nMeet: ${meetLink}`);
     } else {
@@ -407,7 +437,7 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
         `Horário: ${slotEscolhido.label}\n\n` +
         `Atenção: o link do Google Meet não foi gerado automaticamente. Nossa equipe entrará em contato para enviar o link.`
       );
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 10000));
       await enviarMensagem(userPhone, despedida);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
@@ -437,6 +467,11 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
         delete agendamentos[userPhone];
         delete ultimaMensagem[userPhone];
         delete followUpStatus[userPhone];
+        delete mensagensPendentes[userPhone];
+        if (debounceTimers[userPhone]) {
+          clearTimeout(debounceTimers[userPhone]);
+          delete debounceTimers[userPhone];
+        }
       }
     }
   }
