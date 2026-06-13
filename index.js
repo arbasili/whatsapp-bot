@@ -367,7 +367,7 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
           max_tokens: 300,
           messages: [
             ...historicoParaResumo,
-            { role: 'user', content: 'Com base nessa conversa, escreva um pequeno resumo em 3 a 5 linhas sobre o lead: quem é, qual negócio tem, qual a principal dor ou desafio relatado e o que ele busca. Seja direto e objetivo, como se fosse uma anotação para o vendedor antes da reunião.' }
+            { role: 'user', content: 'Com base nessa conversa, escreva um resumo para o vendedor em 3 a 5 linhas. Inclua: tipo de negócio, principal dor relatada, se o problema é volume ou acompanhamento de leads, se a urgência é imediata ou futura, e o perfil geral do lead. Não inclua nome, email ou telefone no texto. Seja direto, como uma anotação rápida antes da reunião.' }
           ]
         },
         { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
