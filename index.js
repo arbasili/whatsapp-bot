@@ -4,7 +4,24 @@ const { google } = require('googleapis');
 require('dotenv/config');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => { req.rawBody = buf; }
+}));
+
+const crypto = require('crypto');
+
+function validarAssinatura(req) {
+  const appSecret = process.env.META_APP_SECRET;
+  if (!appSecret) return true; // se não configurado, não bloqueia (retrocompatível)
+  const assinatura = req.headers['x-hub-signature-256'];
+  if (!assinatura || !req.rawBody) return false;
+  const esperado = 'sha256=' + crypto.createHmac('sha256', appSecret).update(req.rawBody).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(assinatura), Buffer.from(esperado));
+  } catch {
+    return false;
+  }
+}
 
 const conversas = {};
 const ultimaMensagem = {};
@@ -14,7 +31,10 @@ const leadsAgendados = new Set();
 const leadsEncerrados = new Set();
 const mensagensPendentes = {};
 const debounceTimers = {};
+const processandoAgendamento = new Set();
+const agendamentosConfirmados = {}; // { phone: { nome, slotInicio, label, meetLink, lembreteEnviado } }
 const DEBOUNCE_MS = 4000;
+const LEMBRETE_ANTES_MS = 3 * 60 * 60 * 1000; // lembrete 3h antes da reunião
 
 const EXPIRACAO_MS = 24 * 60 * 60 * 1000;
 const FOLLOWUP_1_MS = 2 * 60 * 60 * 1000;
@@ -128,7 +148,20 @@ async function criarEvento(nome, email, telefone, slotInicio, slotFim, resumo = 
         }
       },
     });
-    const meetLink = res.data.conferenceData?.entryPoints?.[0]?.uri || null;
+    let meetLink = res.data.conferenceData?.entryPoints?.[0]?.uri || null;
+
+    // Retry: se o Meet não veio na resposta, buscar o evento novamente após breve espera
+    if (!meetLink && res.data.id) {
+      try {
+        await new Promise(r => setTimeout(r, 2000));
+        const evento = await calendar.events.get({ calendarId: CALENDAR_ID, eventId: res.data.id });
+        meetLink = evento.data.conferenceData?.entryPoints?.[0]?.uri
+                || evento.data.hangoutLink || null;
+      } catch (e) {
+        console.error('Erro ao rebuscar link do Meet:', e.message);
+      }
+    }
+
     console.log(`Evento criado para ${nome}. Meet: ${meetLink}`);
     return meetLink;
   } catch (err) {
@@ -141,7 +174,9 @@ async function criarEvento(nome, email, telefone, slotInicio, slotFim, resumo = 
 setInterval(async () => {
   const agora = Date.now();
   for (const phone of Object.keys(ultimaMensagem)) {
-    if (leadsAgendados.has(phone)) continue;
+   try {
+    if (leadsAgendados.has(phone) || leadsEncerrados.has(phone)) continue;
+    if (!ultimaMensagem[phone]) continue;
     const status = followUpStatus[phone] || { tentativas: 0, ultimoFollowUp: 0 };
     const tempoSemResposta = agora - ultimaMensagem[phone];
 
@@ -150,9 +185,9 @@ setInterval(async () => {
       const msgs = conversas[phone];
       const perguntasNome = ['qual o seu nome', 'como posso te chamar'];
       for (let i = 0; i < msgs.length - 1; i++) {
-        const conteudo = msgs[i].content.toLowerCase().replace(/\|\|\|/g, ' ');
+        const conteudo = textoDoConteudo(msgs[i].content).toLowerCase().replace(/\|\|\|/g, ' ');
         if (perguntasNome.some(p => conteudo.includes(p)) && msgs[i+1]?.role === 'user') {
-          const candidato = msgs[i+1].content.trim().split(/\s+/)[0];
+          const candidato = textoDoConteudo(msgs[i+1].content).trim().split(/\s+/)[0];
           if (candidato && !candidato.includes('@') && candidato.length > 1 && candidato.length < 30 && !/\d/.test(candidato)) {
             nome = candidato.charAt(0).toUpperCase() + candidato.slice(1).toLowerCase();
             break;
@@ -175,6 +210,41 @@ setInterval(async () => {
       delete followUpStatus[phone];
       delete agendamentos[phone];
     }
+   } catch (err) {
+     console.error(`Erro no follow-up de ${phone}:`, err.message);
+   }
+  }
+}, 15 * 60 * 1000);
+
+// Lembrete pré-reunião — verifica a cada 15 minutos
+setInterval(async () => {
+  const agora = Date.now();
+  for (const phone of Object.keys(agendamentosConfirmados)) {
+   try {
+    const ag = agendamentosConfirmados[phone];
+    if (!ag || ag.lembreteEnviado) continue;
+
+    const inicioMs = new Date(ag.slotInicio).getTime();
+    const tempoAteReuniao = inicioMs - agora;
+
+    // Se já passou da reunião, limpar registro
+    if (tempoAteReuniao <= 0) {
+      delete agendamentosConfirmados[phone];
+      continue;
+    }
+
+    // Enviar lembrete quando faltar LEMBRETE_ANTES_MS ou menos (mas ainda não passou)
+    if (tempoAteReuniao <= LEMBRETE_ANTES_MS) {
+      const saud = ag.nome ? `Oi ${ag.nome}, passando para lembrar` : 'Oi, passando para lembrar';
+      let msg = `${saud} da sua conversa com o especialista da Clique e Fecha: ${ag.label}.`;
+      if (ag.meetLink) msg += `\n\nLink do Google Meet: ${ag.meetLink}`;
+      msg += `\n\nNos vemos lá!`;
+      await enviarMensagem(phone, msg);
+      ag.lembreteEnviado = true;
+    }
+   } catch (err) {
+     console.error(`Erro no lembrete de ${phone}:`, err.message);
+   }
   }
 }, 15 * 60 * 1000);
 
@@ -190,12 +260,40 @@ app.get('/webhook', (req, res) => {
 });
 
 app.post('/webhook', async (req, res) => {
+  if (!validarAssinatura(req)) {
+    console.error('Assinatura do webhook inválida — requisição rejeitada.');
+    return res.sendStatus(403);
+  }
+
   const changes = req.body?.entry?.[0]?.changes?.[0]?.value;
   const message = changes?.messages?.[0];
-  if (!message || message.type !== 'text') return res.sendStatus(200);
+  if (!message) return res.sendStatus(200);
 
   const userPhone = message.from;
-  const userText = message.text.body;
+
+  // Aceitar texto e imagem; outros tipos recebem aviso amigável
+  let userText = null;
+  let imagemPendente = null;
+
+  if (message.type === 'text') {
+    userText = message.text.body;
+  } else if (message.type === 'image') {
+    const midia = await baixarMidia(message.image.id);
+    if (midia) {
+      imagemPendente = midia;
+      userText = message.image.caption || '';
+    } else {
+      await enviarMensagem(userPhone, 'Não consegui abrir a imagem. Pode tentar enviar de novo ou me explicar por texto?');
+      return res.sendStatus(200);
+    }
+  } else if (message.type === 'audio' || message.type === 'voice') {
+    await enviarMensagem(userPhone, 'No momento ainda não consigo ouvir áudios. Pode me escrever sua mensagem por texto que eu te respondo na hora.');
+    return res.sendStatus(200);
+  } else {
+    // Vídeo, documento, figurinha, etc. — ainda não suportado
+    await enviarMensagem(userPhone, 'Por enquanto consigo ler apenas texto e imagem. Pode me escrever por texto?');
+    return res.sendStatus(200);
+  }
 
   const agora = Date.now();
   if (ultimaMensagem[userPhone] && agora - ultimaMensagem[userPhone] > EXPIRACAO_MS) {
@@ -208,6 +306,24 @@ app.post('/webhook', async (req, res) => {
     followUpStatus[userPhone] = { tentativas: 0, ultimoFollowUp: 0 };
   }
 
+  // Imagem é processada imediatamente, fora do debounce de texto
+  if (imagemPendente) {
+    // Se havia texto acumulado pendente, processa junto e limpa
+    let textoAcumulado = userText || '';
+    if (mensagensPendentes[userPhone]?.length) {
+      textoAcumulado = (mensagensPendentes[userPhone].join(' ') + ' ' + textoAcumulado).trim();
+      delete mensagensPendentes[userPhone];
+    }
+    if (debounceTimers[userPhone]) {
+      clearTimeout(debounceTimers[userPhone]);
+      delete debounceTimers[userPhone];
+    }
+    processarMensagem(userPhone, textoAcumulado, imagemPendente).catch(err =>
+      console.error('Erro ao processar imagem:', err.message)
+    );
+    return res.sendStatus(200);
+  }
+
   // Acumular mensagens e aguardar debounce antes de processar
   if (!mensagensPendentes[userPhone]) mensagensPendentes[userPhone] = [];
   mensagensPendentes[userPhone].push(userText);
@@ -215,16 +331,20 @@ app.post('/webhook', async (req, res) => {
   if (debounceTimers[userPhone]) clearTimeout(debounceTimers[userPhone]);
 
   debounceTimers[userPhone] = setTimeout(() => {
-    const textoAcumulado = mensagensPendentes[userPhone].join(' ');
+    const pendentes = mensagensPendentes[userPhone];
     delete mensagensPendentes[userPhone];
     delete debounceTimers[userPhone];
-    processarMensagem(userPhone, textoAcumulado);
+    if (!pendentes || pendentes.length === 0) return;
+    const textoAcumulado = pendentes.join(' ');
+    processarMensagem(userPhone, textoAcumulado).catch(err =>
+      console.error('Erro ao processar mensagem:', err.message)
+    );
   }, DEBOUNCE_MS);
 
   return res.sendStatus(200);
 });
 
-async function processarMensagem(userPhone, userText) {
+async function processarMensagem(userPhone, userText, imagem = null) {
 
   if (!conversas[userPhone]) {
     let opcoesHorario = 'amanhã às 10h ou amanhã às 14h';
@@ -275,7 +395,7 @@ Exemplos:
 A partir da segunda mensagem do lead, responda normalmente sem o marcador "|||"."
 
 2. ENTENDER A NECESSIDADE
-Use o nome da pessoa a partir daqui. Vá direto para a pergunta, sem frases de transição como "Prazer" ou "Que bom falar com você". Pergunte qual é o maior desafio de atendimento da empresa hoje. Demonstre que entendeu o problema com empatia e siga em frente. Não mencione a Clique e Fecha ou o que ela resolve neste momento — isso fica para a reunião.
+Use o nome da pessoa de forma natural e calorosa a partir daqui, sem soar robótico e sem repetir o nome em toda mensagem. Vá direto para a pergunta, sem frases de transição como "Prazer" ou "Que bom falar com você". Pergunte qual é o maior desafio de atendimento da empresa hoje. Ao responder, primeiro valide com empatia o que o lead disse (uma frase curta), depois faça a próxima pergunta — isso deixa a conversa mais humana. Não mencione a Clique e Fecha ou o que ela resolve neste momento — isso fica para a reunião.
 
 2b. APROFUNDAR A DOR
 Após entender a dor principal, aprofunde com uma pergunta contextual — conectada exatamente ao que o lead disse, não com opções genéricas. Exemplos:
@@ -289,7 +409,7 @@ Adapte a pergunta ao contexto real. Nunca use opções pré-definidas que não s
 Pergunte qual tipo de negócio a pessoa tem. Entenda se já usa alguma ferramenta de atendimento ou automação.
 
 3b. URGÊNCIA
-Após entender o negócio, pergunte: "Isso está te gerando problema agora ou é algo que você quer resolver nos próximos meses?"
+Após entender o negócio, pergunte: "Isso está te gerando problema agora ou é algo que você quer resolver nos próximos meses?" Se o lead indicar urgência, você pode, em uma única pergunta natural, entender o gatilho: "O que fez você buscar isso agora?" Não force se a conversa já estiver fluindo para o agendamento.
 
 4. AGENDAR A REUNIÃO
 Após a resposta sobre urgência, responda em EXATAMENTE 2 partes separadas pelo marcador "|||":
@@ -297,7 +417,7 @@ Após a resposta sobre urgência, responda em EXATAMENTE 2 partes separadas pelo
 
 A partir daqui, siga esta sequência obrigatória, uma mensagem por vez:
 b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
-c. Após a escolha do horário, confirme o WhatsApp: "Posso usar o número ${userPhone} para contato, ou prefere outro?"
+c. Após a escolha do horário, reforce o compromisso e confirme o WhatsApp em uma única mensagem: "Perfeito, vou reservar esse horário com o especialista. Posso usar o número ${userPhone} para contato, ou prefere outro?"
 d. Após confirmar o WhatsApp, peça o email com esta mensagem exata: "E qual é o seu email para eu registrar o agendamento?"
 
 5. CONFIRMAÇÃO
@@ -309,7 +429,12 @@ Quando o lead der sinais claros de encerramento (disse "blz", "tá bom", "até",
 Exemplo: "Até mais, Thamiris! Quando quiser agendar é só chamar. [ENCERRAR]"
 Exemplo: "Combinado! Até lá. [ENCERRAR]" 
 
+PERGUNTAS FORA DO ROTEIRO:
+Se o lead fizer uma pergunta no meio da qualificação (preço, localização, como funciona, prazo, etc.), responda de forma breve e honesta, e em seguida retome naturalmente de onde parou — sem reiniciar o roteiro. Para perguntas de preço, explique que os valores são apresentados na conversa com o especialista, conforme cada caso. Nunca invente informações que você não tem; se não souber, diga que o especialista poderá detalhar na conversa.
+
 TRATAMENTO DE OBJEÇÕES:
+
+"Vou pensar" / "Depois eu vejo": Não pressione. Mantenha a porta aberta com leveza: "Claro, sem problema. Se quiser, posso já deixar um horário reservado e você confirma depois, ou prefere que eu deixe você pensar com calma?" Respeite a resposta.
 
 "Agora não" / "Não tenho tempo": Investigue o motivo antes de aceitar. "Entendo. Só para eu saber, tem alguma coisa que ficou sem resposta ou posso esclarecer algo agora?"
 
@@ -338,17 +463,36 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     ];
   }
 
-  conversas[userPhone].push({ role: 'user', content: userText });
+  // Montar a mensagem do usuário — com imagem (multimodal) ou só texto
+  if (imagem) {
+    const conteudoMultimodal = [
+      {
+        type: 'image',
+        source: { type: 'base64', media_type: imagem.mimeType, data: imagem.base64 }
+      }
+    ];
+    if (userText && userText.trim()) {
+      conteudoMultimodal.push({ type: 'text', text: userText });
+    } else {
+      conteudoMultimodal.push({ type: 'text', text: '[O cliente enviou uma imagem]' });
+    }
+    conversas[userPhone].push({ role: 'user', content: conteudoMultimodal });
+  } else {
+    conversas[userPhone].push({ role: 'user', content: userText });
+  }
 
   // Verificar email ANTES de chamar o Claude — se for agendamento, Claude não fala
-  const emailNaMensagem = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.test(userText);
-  const confirmaAgendamento = emailNaMensagem && agendamentos[userPhone]?.slots?.length > 0 && !leadsAgendados.has(userPhone);
+  const emailNaMensagem = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.test(userText || '');
+  const confirmaAgendamento = emailNaMensagem && agendamentos[userPhone]?.slots?.length > 0 && !leadsAgendados.has(userPhone) && !processandoAgendamento.has(userPhone);
 
   if (confirmaAgendamento) {
+    // Lock: marca como em processamento para evitar evento duplicado
+    processandoAgendamento.add(userPhone);
+   try {
     const slots = agendamentos[userPhone].slots;
     const historicoMsgsUsuario = conversas[userPhone]
       .filter(m => m.role === 'user')
-      .map(m => m.content)
+      .map(m => textoDoConteudo(m.content))
       .join(' ')
       .toLowerCase();
     let slotEscolhido = slots[0];
@@ -370,11 +514,11 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     const msgs = conversas[userPhone];
     const perguntasNome = ['qual o seu nome', 'como posso te chamar', 'como posso chamá-lo', 'como posso chamá-la'];
     for (let i = 0; i < msgs.length - 1; i++) {
-      const conteudo = msgs[i].content.toLowerCase().replace(/\|\|\|/g, ' ');
+      const conteudo = textoDoConteudo(msgs[i].content).toLowerCase().replace(/\|\|\|/g, ' ');
       const perguntouNome = perguntasNome.some(p => conteudo.includes(p));
       // Aceitar tanto role assistant quanto user (prompt inicial tem role user)
       if (perguntouNome && msgs[i+1] && msgs[i+1].role === 'user') {
-        const candidato = msgs[i+1].content.trim().split(/\s+/)[0];
+        const candidato = textoDoConteudo(msgs[i+1].content).trim().split(/\s+/)[0];
         if (candidato && !candidato.includes('@') && candidato.length > 1 && candidato.length < 30 && !/\d/.test(candidato)) {
           nome = candidato.charAt(0).toUpperCase() + candidato.slice(1).toLowerCase();
           break;
@@ -412,6 +556,15 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     leadsAgendados.add(userPhone);
     delete followUpStatus[userPhone];
 
+    // Registrar para lembrete pré-reunião
+    agendamentosConfirmados[userPhone] = {
+      nome,
+      slotInicio: slotEscolhido.inicio,
+      label: slotEscolhido.label,
+      meetLink,
+      lembreteEnviado: false
+    };
+
     await new Promise(r => setTimeout(r, 10000));
 
     const saudacao = nome ? `Agendamento confirmado, ${nome}!` : `Agendamento confirmado!`;
@@ -443,6 +596,11 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
       await enviarMensagem(userPhone, despedida);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
+   } catch (err) {
+     console.error('Erro no processamento do agendamento:', err.message);
+   } finally {
+     processandoAgendamento.delete(userPhone);
+   }
   } else {
     // Ignorar se conversa já encerrada
     if (leadsEncerrados.has(userPhone)) return;
@@ -450,35 +608,38 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     const resposta = await chamarClaude(conversas[userPhone]);
     conversas[userPhone].push({ role: 'assistant', content: resposta });
 
-    // Detectar abertura em 3 partes (primeira mensagem do lead)
-    const partes = resposta.split('|||').map(p => p.trim()).filter(Boolean);
+    // Encerramento pode vir em qualquer formato — detectar antes de tudo
+    const deveEncerrar = resposta.includes('[ENCERRAR]');
+    const respostaSemMarcador = resposta.replace('[ENCERRAR]', '').trim();
+
+    const partes = respostaSemMarcador.split('|||').map(p => p.trim()).filter(Boolean);
     if (partes.length === 3) {
+      // Abertura: saudação + apresentação + pergunta do nome
       await enviarMensagem(userPhone, partes[0]);
       await new Promise(r => setTimeout(r, 1500));
       await enviarMensagem(userPhone, partes[1]);
       await new Promise(r => setTimeout(r, 3000));
       await enviarMensagem(userPhone, partes[2]);
     } else if (partes.length === 2) {
-      // Validação da urgência + proposta de conversa
+      // Validação + proposta de conversa
       await enviarMensagem(userPhone, partes[0]);
       await new Promise(r => setTimeout(r, 10000));
       await enviarMensagem(userPhone, partes[1]);
     } else {
-      // Detectar encerramento
-      const deveEncerrar = resposta.includes('[ENCERRAR]');
-      const respostaLimpa = resposta.replace('[ENCERRAR]', '').trim();
-      await enviarMensagem(userPhone, respostaLimpa);
-      if (deveEncerrar) {
-        leadsEncerrados.add(userPhone);
-        delete conversas[userPhone];
-        delete agendamentos[userPhone];
-        delete ultimaMensagem[userPhone];
-        delete followUpStatus[userPhone];
-        delete mensagensPendentes[userPhone];
-        if (debounceTimers[userPhone]) {
-          clearTimeout(debounceTimers[userPhone]);
-          delete debounceTimers[userPhone];
-        }
+      await enviarMensagem(userPhone, respostaSemMarcador);
+    }
+
+    if (deveEncerrar) {
+      leadsEncerrados.add(userPhone);
+      delete conversas[userPhone];
+      delete agendamentos[userPhone];
+      delete ultimaMensagem[userPhone];
+      delete followUpStatus[userPhone];
+      delete mensagensPendentes[userPhone];
+      // não apaga agendamentosConfirmados: o lembrete ainda precisa ser enviado
+      if (debounceTimers[userPhone]) {
+        clearTimeout(debounceTimers[userPhone]);
+        delete debounceTimers[userPhone];
       }
     }
   }
@@ -502,6 +663,36 @@ async function chamarClaude(historico) {
   } catch (err) {
     console.error('Erro Claude:', err.response?.data || err.message);
     return 'Desculpe, tive um problema técnico. Pode tentar novamente em instantes?';
+  }
+}
+
+function textoDoConteudo(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.filter(c => c.type === 'text').map(c => c.text).join(' ');
+  }
+  return '';
+}
+
+async function baixarMidia(mediaId) {
+  try {
+    // 1. Obter a URL temporária da mídia
+    const metaRes = await axios.get(`https://graph.facebook.com/v19.0/${mediaId}`, {
+      headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` }
+    });
+    const mediaUrl = metaRes.data.url;
+    const mimeType = metaRes.data.mime_type || 'image/jpeg';
+
+    // 2. Baixar o conteúdo binário (precisa do token também)
+    const binRes = await axios.get(mediaUrl, {
+      headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
+      responseType: 'arraybuffer'
+    });
+    const base64 = Buffer.from(binRes.data).toString('base64');
+    return { base64, mimeType };
+  } catch (err) {
+    console.error('Erro ao baixar mídia:', err.response?.data || err.message);
+    return null;
   }
 }
 
