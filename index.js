@@ -47,10 +47,110 @@ const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
 const auth = new google.auth.JWT({
   email: serviceAccountKey.client_email,
   key: serviceAccountKey.private_key,
-  scopes: ['https://www.googleapis.com/auth/calendar'],
+  scopes: [
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/spreadsheets'
+  ],
   subject: 'comercial@cliqueefecha.com.br',
 });
 const calendar = google.calendar({ version: 'v3', auth });
+const sheets = google.sheets({ version: 'v4', auth });
+const SHEET_ID = '18n8-s1pXQCszT_rYWNEmtBY5OzBvfJi0jownohlAgF0';
+const SHEET_ABA = 'Leads';
+
+const COLUNAS_SHEET = ['Data', 'WhatsApp', 'Nome', 'Email', 'Tipo de Negócio', 'Dor', 'Urgência', 'Horário', 'Link Meet', 'Status', 'Resumo'];
+
+// Garante que a primeira linha tenha o cabeçalho
+async function garantirCabecalho() {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_ABA}!A1:K1`,
+    });
+    if (!res.data.values || res.data.values.length === 0) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${SHEET_ABA}!A1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [COLUNAS_SHEET] },
+      });
+    }
+  } catch (err) {
+    console.error('Erro ao garantir cabeçalho da planilha:', err.message);
+  }
+}
+
+// Encontra o número da linha (1-indexed) de um lead pelo WhatsApp; retorna null se não existir
+async function encontrarLinhaLead(phone) {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_ABA}!B:B`,
+    });
+    const valores = res.data.values || [];
+    for (let i = 0; i < valores.length; i++) {
+      if (valores[i][0] === phone) return i + 1;
+    }
+    return null;
+  } catch (err) {
+    console.error('Erro ao buscar linha do lead:', err.message);
+    return null;
+  }
+}
+
+// Cria a linha inicial do lead quando ele inicia a conversa
+async function registrarLeadInicial(phone) {
+  try {
+    await garantirCabecalho();
+    const jaExiste = await encontrarLinhaLead(phone);
+    if (jaExiste) return; // não duplica
+
+    const dataAgora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Campo_Grande' });
+    const linha = [dataAgora, phone, '', '', '', '', '', '', '', 'Em conversa', ''];
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_ABA}!A:K`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [linha] },
+    });
+  } catch (err) {
+    console.error('Erro ao registrar lead inicial:', err.message);
+  }
+}
+
+// Atualiza campos específicos do lead (recebe objeto com chaves = nome da coluna)
+async function atualizarLead(phone, dados) {
+  try {
+    const linha = await encontrarLinhaLead(phone);
+    if (!linha) {
+      // Se não existir ainda, cria primeiro
+      await registrarLeadInicial(phone);
+      return atualizarLead(phone, dados);
+    }
+    // Lê a linha atual para mesclar
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_ABA}!A${linha}:K${linha}`,
+    });
+    const atual = (res.data.values && res.data.values[0]) || new Array(COLUNAS_SHEET.length).fill('');
+    while (atual.length < COLUNAS_SHEET.length) atual.push('');
+
+    for (const [coluna, valor] of Object.entries(dados)) {
+      const idx = COLUNAS_SHEET.indexOf(coluna);
+      if (idx >= 0 && valor !== undefined && valor !== null && valor !== '') atual[idx] = valor;
+    }
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${SHEET_ABA}!A${linha}:K${linha}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [atual] },
+    });
+  } catch (err) {
+    console.error('Erro ao atualizar lead na planilha:', err.message);
+  }
+}
 
 async function buscarSlotDisponivel(dia, periodos) {
   for (const hora of periodos) {
@@ -205,6 +305,8 @@ setInterval(async () => {
     } else if (status.tentativas === 2 && agora - status.ultimoFollowUp > ENCERRAMENTO_MS) {
       await enviarMensagem(phone, `Olá ${nome}, como não tivemos retorno, vou encerrar nosso atendimento por aqui. Se precisar de algo futuramente, é só me chamar. Será um prazer!`);
       await enviarMensagem(MEU_NUMERO, `*Lead encerrado*\n\nNome: ${nome}\nWhatsApp: ${phone}\n\nNão respondeu após 2 tentativas de follow-up.`);
+      atualizarLead(phone, { 'Status': 'Encerrado por inatividade' })
+        .catch(e => console.error('atualizarLead inatividade:', e.message));
       delete conversas[phone];
       delete ultimaMensagem[phone];
       delete followUpStatus[phone];
@@ -365,6 +467,9 @@ async function processarMensagem(userPhone, userText, imagem = null) {
     }
 
     agendamentos[userPhone] = { slots: slotsDisponiveis };
+
+    // Registrar lead na planilha (início da conversa)
+    registrarLeadInicial(userPhone).catch(e => console.error('registrarLeadInicial:', e.message));
 
     conversas[userPhone] = [
       {
@@ -527,23 +632,36 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     }
     if (!nome) nome = '';
 
-    // Gerar resumo com Claude
+    // Gerar resumo + campos estruturados com Claude
     let resumoConversa = 'Resumo não disponível';
+    let tipoNegocio = '';
+    let dorPrincipal = '';
+    let urgenciaLead = '';
     try {
       const historicoParaResumo = conversas[userPhone].slice(0, -1);
       const resumoResp = await axios.post(
         'https://api.anthropic.com/v1/messages',
         {
           model: 'claude-sonnet-4-6',
-          max_tokens: 300,
+          max_tokens: 400,
           messages: [
             ...historicoParaResumo,
-            { role: 'user', content: 'Com base nessa conversa, escreva um resumo para o vendedor em 3 a 5 linhas. Inclua: tipo de negócio, principal dor relatada, se o problema é volume ou acompanhamento de leads, se a urgência é imediata ou futura, e o perfil geral do lead. Não inclua nome, email ou telefone no texto. Seja direto, como uma anotação rápida antes da reunião.' }
+            { role: 'user', content: 'Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "...", "dor": "...", "urgencia": "imediata ou futura", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}. Se algum campo não estiver claro na conversa, use string vazia.' }
           ]
         },
         { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
       );
-      resumoConversa = resumoResp.data.content[0].text;
+      const textoResp = resumoResp.data.content[0].text.trim().replace(/```json|```/g, '').trim();
+      try {
+        const dados = JSON.parse(textoResp);
+        tipoNegocio = dados.tipo_negocio || '';
+        dorPrincipal = dados.dor || '';
+        urgenciaLead = dados.urgencia || '';
+        resumoConversa = dados.resumo || 'Resumo não disponível';
+      } catch {
+        // Se não vier JSON válido, usa o texto como resumo
+        resumoConversa = textoResp;
+      }
     } catch (err) {
       console.error('Erro ao gerar resumo:', err.message);
     }
@@ -564,6 +682,19 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
       meetLink,
       lembreteEnviado: false
     };
+
+    // Atualizar planilha com os dados do agendamento
+    atualizarLead(userPhone, {
+      'Nome': nome || 'Não informado',
+      'Email': emailLead,
+      'Tipo de Negócio': tipoNegocio,
+      'Dor': dorPrincipal,
+      'Urgência': urgenciaLead,
+      'Horário': slotEscolhido.label,
+      'Link Meet': meetLink || 'Não gerado',
+      'Status': 'Agendado',
+      'Resumo': resumoConversa
+    }).catch(e => console.error('atualizarLead agendamento:', e.message));
 
     await new Promise(r => setTimeout(r, 10000));
 
@@ -631,6 +762,11 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
 
     if (deveEncerrar) {
       leadsEncerrados.add(userPhone);
+      // Marca como encerrado na planilha apenas se não tiver agendado
+      if (!leadsAgendados.has(userPhone)) {
+        atualizarLead(userPhone, { 'Status': 'Encerrado sem agendar' })
+          .catch(e => console.error('atualizarLead encerramento:', e.message));
+      }
       delete conversas[userPhone];
       delete agendamentos[userPhone];
       delete ultimaMensagem[userPhone];
