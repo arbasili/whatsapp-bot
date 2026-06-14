@@ -9,6 +9,98 @@ app.use(express.json({
 }));
 
 const crypto = require('crypto');
+const { Pool } = require('pg');
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway.internal')
+    ? false
+    : { rejectUnauthorized: false }
+});
+
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS leads (
+      phone TEXT PRIMARY KEY,
+      conversas JSONB,
+      ultima_mensagem BIGINT,
+      follow_up_status JSONB,
+      agendamentos JSONB,
+      lead_agendado BOOLEAN DEFAULT FALSE,
+      lead_encerrado BOOLEAN DEFAULT FALSE,
+      agendamento_confirmado JSONB,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  console.log('Tabela "leads" pronta.');
+}
+
+// Remove imagens (base64) do histórico antes de persistir, mantendo um placeholder
+function prepararConversaParaPersistencia(conversa) {
+  if (!conversa) return null;
+  return conversa.map(m => {
+    if (Array.isArray(m.content)) {
+      return {
+        role: m.role,
+        content: m.content.map(c =>
+          c.type === 'image' ? { type: 'text', text: '[imagem enviada pelo cliente]' } : c
+        )
+      };
+    }
+    return m;
+  });
+}
+
+// Salva o estado atual de um lead no banco (upsert)
+async function persistirLead(phone) {
+  try {
+    await pool.query(
+      `INSERT INTO leads (phone, conversas, ultima_mensagem, follow_up_status, agendamentos, lead_agendado, lead_encerrado, agendamento_confirmado, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8, NOW())
+       ON CONFLICT (phone) DO UPDATE SET
+         conversas = $2,
+         ultima_mensagem = $3,
+         follow_up_status = $4,
+         agendamentos = $5,
+         lead_agendado = $6,
+         lead_encerrado = $7,
+         agendamento_confirmado = $8,
+         updated_at = NOW()`,
+      [
+        phone,
+        conversas[phone] ? JSON.stringify(prepararConversaParaPersistencia(conversas[phone])) : null,
+        ultimaMensagem[phone] || null,
+        followUpStatus[phone] ? JSON.stringify(followUpStatus[phone]) : null,
+        agendamentos[phone] ? JSON.stringify(agendamentos[phone]) : null,
+        leadsAgendados.has(phone),
+        leadsEncerrados.has(phone),
+        agendamentosConfirmados[phone] ? JSON.stringify(agendamentosConfirmados[phone]) : null,
+      ]
+    );
+  } catch (err) {
+    console.error(`Erro ao persistir lead ${phone}:`, err.message);
+  }
+}
+
+// Carrega todos os leads do banco para a memória ao iniciar
+async function carregarLeads() {
+  try {
+    const res = await pool.query('SELECT * FROM leads');
+    for (const row of res.rows) {
+      const phone = row.phone;
+      if (row.conversas) conversas[phone] = row.conversas;
+      if (row.ultima_mensagem) ultimaMensagem[phone] = Number(row.ultima_mensagem);
+      if (row.follow_up_status) followUpStatus[phone] = row.follow_up_status;
+      if (row.agendamentos) agendamentos[phone] = row.agendamentos;
+      if (row.lead_agendado) leadsAgendados.add(phone);
+      if (row.lead_encerrado) leadsEncerrados.add(phone);
+      if (row.agendamento_confirmado) agendamentosConfirmados[phone] = row.agendamento_confirmado;
+    }
+    console.log(`Carregados ${res.rows.length} leads do banco.`);
+  } catch (err) {
+    console.error('Erro ao carregar leads do banco:', err.message);
+  }
+}
 
 function validarAssinatura(req) {
   const appSecret = process.env.META_APP_SECRET;
@@ -306,9 +398,11 @@ setInterval(async () => {
     if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
       await enviarMensagem(phone, `Oi ${nome}, tudo bem? Ficou alguma dúvida sobre nossa conversa? Estou por aqui.`);
       followUpStatus[phone] = { tentativas: 1, ultimoFollowUp: agora };
+      await persistirLead(phone);
     } else if (status.tentativas === 1 && agora - status.ultimoFollowUp > FOLLOWUP_2_MS) {
       await enviarMensagem(phone, `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`);
       followUpStatus[phone] = { tentativas: 2, ultimoFollowUp: agora };
+      await persistirLead(phone);
     } else if (status.tentativas === 2 && agora - status.ultimoFollowUp > ENCERRAMENTO_MS) {
       await enviarMensagem(phone, `Olá ${nome}, como não tivemos retorno, vou encerrar nosso atendimento por aqui. Se precisar de algo futuramente, é só me chamar. Será um prazer!`);
       await enviarMensagem(MEU_NUMERO, `*Lead encerrado*\n\nNome: ${nome}\nWhatsApp: ${phone}\n\nNão respondeu após 2 tentativas de follow-up.`);
@@ -318,6 +412,7 @@ setInterval(async () => {
       delete ultimaMensagem[phone];
       delete followUpStatus[phone];
       delete agendamentos[phone];
+      await persistirLead(phone);
     }
    } catch (err) {
      console.error(`Erro no follow-up de ${phone}:`, err.message);
@@ -339,6 +434,7 @@ setInterval(async () => {
     // Se já passou da reunião, limpar registro
     if (tempoAteReuniao <= 0) {
       delete agendamentosConfirmados[phone];
+      await persistirLead(phone);
       continue;
     }
 
@@ -350,6 +446,7 @@ setInterval(async () => {
       msg += `\n\nNos vemos lá!`;
       await enviarMensagem(phone, msg);
       ag.lembreteEnviado = true;
+      await persistirLead(phone);
     }
    } catch (err) {
      console.error(`Erro no lembrete de ${phone}:`, err.message);
@@ -846,6 +943,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     }
   }
 
+  // Persiste o estado atual do lead no banco
+  await persistirLead(userPhone);
 }
 
 async function chamarClaude(historico) {
@@ -930,4 +1029,12 @@ async function enviarMensagem(para, texto) {
   }
 }
 
-app.listen(process.env.PORT || 3000, () => console.log('Bot rodando!'));
+(async () => {
+  try {
+    await initDb();
+    await carregarLeads();
+  } catch (err) {
+    console.error('Erro na inicialização do banco (seguindo sem persistência):', err.message);
+  }
+  app.listen(process.env.PORT || 3000, () => console.log('Bot rodando!'));
+})();
