@@ -490,12 +490,12 @@ SEU ROTEIRO (siga esta ordem):
 
 1. BOAS-VINDAS
 Na primeira mensagem do lead, responda em EXATAMENTE 3 partes separadas pelo marcador "|||". Siga este formato obrigatório:
-[resposta à saudação do lead, natural e breve]|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Qual o seu nome?
+[resposta à saudação do lead, natural e breve]|||Sou do time da *Clique e Fecha*, a gente ajuda pequenos negócios a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
 
 Exemplos:
-- Lead diz "oi": Olá!|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Qual o seu nome?
-- Lead diz "bom dia": Bom dia!|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Qual o seu nome?
-- Lead diz "boa tarde, tudo bem?": Boa tarde! Tudo bem, obrigado.|||Sou do time de atendimento da *Clique e Fecha*, especializada em automações e chatbots para pequenos negócios.|||Qual o seu nome?
+- Lead diz "oi": Olá!|||Sou do time da *Clique e Fecha*, a gente ajuda pequenos negócios a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
+- Lead diz "bom dia": Bom dia!|||Sou do time da *Clique e Fecha*, a gente ajuda pequenos negócios a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
+- Lead diz "boa tarde, tudo bem?": Boa tarde! Tudo bem, obrigado.|||Sou do time da *Clique e Fecha*, a gente ajuda pequenos negócios a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
 
 A partir da segunda mensagem do lead, responda normalmente sem o marcador "|||"."
 
@@ -610,7 +610,7 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
       if (mencionouSlot2 && !mencionouSlot1) slotEscolhido = slots[1];
     }
 
-    const emailMatch = historico.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
+    const emailMatch = historicoMsgsUsuario.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
     const emailLead = emailMatch ? emailMatch.find(e => !e.includes('cliqueefecha')) || emailMatch[0] : '';
 
     // Extrair nome direto do histórico
@@ -729,6 +729,14 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     }
    } catch (err) {
      console.error('Erro no processamento do agendamento:', err.message);
+     // Tranquiliza o lead e sinaliza para a equipe finalizar manualmente
+     await enviarMensagem(userPhone, 'Recebi seus dados! Tive uma instabilidade aqui para gerar o link automaticamente, mas pode ficar tranquilo: alguém do nosso time vai finalizar o seu agendamento e te enviar o link da reunião em breve. Até lá!')
+       .catch(() => {});
+     await enviarMensagem(MEU_NUMERO, `*Agendamento pendente — finalizar manualmente!*\n\nWhatsApp: ${userPhone}\nErro: ${err.message}\n\nO lead recebeu seus dados mas o link não foi gerado. Finalize o agendamento e envie o link.`)
+       .catch(() => {});
+     // Marca na planilha como pendente para acompanhamento
+     atualizarLead(userPhone, { 'Status': 'Pendente de agendamento' })
+       .catch(e => console.error('atualizarLead pendente:', e.message));
    } finally {
      processandoAgendamento.delete(userPhone);
    }
@@ -754,7 +762,7 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     } else if (partes.length === 2) {
       // Validação + proposta de conversa
       await enviarMensagem(userPhone, partes[0]);
-      await new Promise(r => setTimeout(r, 10000));
+      await new Promise(r => setTimeout(r, 5000));
       await enviarMensagem(userPhone, partes[1]);
     } else {
       await enviarMensagem(userPhone, respostaSemMarcador);
