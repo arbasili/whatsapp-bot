@@ -230,12 +230,13 @@ async function buscarHorariosDisponiveis() {
 
 async function criarEvento(nome, email, telefone, slotInicio, slotFim, resumo = '') {
   try {
+    const tituloNome = nome && nome.trim() ? ` - ${nome}` : '';
     const res = await calendar.events.insert({
       calendarId: CALENDAR_ID,
       conferenceDataVersion: 1,
       requestBody: {
-        summary: `Consultoria Clique e Fecha - ${nome}`,
-        description: `Nome: ${nome}\nWhatsApp: ${telefone}\nEmail: ${email}\n\n${resumo}`,
+        summary: `Conversa Clique e Fecha${tituloNome}`,
+        description: `Nome: ${nome || 'Não informado'}\nWhatsApp: ${telefone}\nEmail: ${email || 'Não informado'}\n\n${resumo}`,
         start: { dateTime: slotInicio, timeZone: 'America/Campo_Grande' },
         end: { dateTime: slotFim, timeZone: 'America/Campo_Grande' },
         attendees: email ? [{ email }] : [],
@@ -638,7 +639,14 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
     let dorPrincipal = '';
     let urgenciaLead = '';
     try {
-      const historicoParaResumo = conversas[userPhone].slice(0, -1);
+      // Remove o prompt inicial (roteiro) e o ack, deixando só a conversa real
+      let historicoParaResumo = conversas[userPhone].slice(2, -1)
+        .map(m => ({ role: m.role, content: textoDoConteudo(m.content) }))
+        .filter(m => m.content && m.content.trim());
+      // A API exige que o primeiro turno seja 'user'
+      while (historicoParaResumo.length && historicoParaResumo[0].role !== 'user') {
+        historicoParaResumo.shift();
+      }
       const resumoResp = await axios.post(
         'https://api.anthropic.com/v1/messages',
         {
@@ -651,15 +659,22 @@ Nunca escreva instruções internas, meta-comentários ou textos entre parêntes
         },
         { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
       );
-      const textoResp = resumoResp.data.content[0].text.trim().replace(/```json|```/g, '').trim();
-      try {
-        const dados = JSON.parse(textoResp);
-        tipoNegocio = dados.tipo_negocio || '';
-        dorPrincipal = dados.dor || '';
-        urgenciaLead = dados.urgencia || '';
-        resumoConversa = dados.resumo || 'Resumo não disponível';
-      } catch {
-        // Se não vier JSON válido, usa o texto como resumo
+      const textoResp = resumoResp.data.content[0].text.trim();
+      // Extrai o primeiro bloco JSON do texto (mesmo que venha com texto ao redor)
+      const jsonMatch = textoResp.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const dados = JSON.parse(jsonMatch[0]);
+          tipoNegocio = dados.tipo_negocio || '';
+          dorPrincipal = dados.dor || '';
+          urgenciaLead = dados.urgencia || '';
+          resumoConversa = dados.resumo || 'Resumo não disponível';
+        } catch (e) {
+          console.error('JSON do resumo inválido:', e.message, '| texto:', textoResp.slice(0, 200));
+          resumoConversa = textoResp.replace(/\{[\s\S]*\}/, '').trim() || 'Resumo não disponível';
+        }
+      } else {
+        // Não veio JSON — usa o texto como resumo
         resumoConversa = textoResp;
       }
     } catch (err) {
