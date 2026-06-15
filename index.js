@@ -124,12 +124,13 @@ const leadsEncerrados = new Set();
 const mensagensPendentes = {};
 const debounceTimers = {};
 const processandoAgendamento = new Set();
-const agendamentosConfirmados = {}; // { phone: { nome, slotInicio, label, meetLink, lembreteEnviado } }
+const agendamentosConfirmados = {}; // { phone: { nome, slotInicio, label, meetLink, lembrete2hEnviado, lembrete30minEnviado } }
 const rateLimit = {}; // { phone: { count, windowStart } }
 const RATE_LIMIT_MAX = 15; // máximo de mensagens por janela
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // janela de 1 minuto
 const DEBOUNCE_MS = 4000;
-const LEMBRETE_ANTES_MS = 3 * 60 * 60 * 1000; // lembrete 3h antes da reunião
+const LEMBRETE_2H_MS = 2 * 60 * 60 * 1000;   // primeiro lembrete: 2h antes
+const LEMBRETE_30MIN_MS = 30 * 60 * 1000;     // segundo lembrete: 30min antes (com link)
 
 const EXPIRACAO_MS = 24 * 60 * 60 * 1000;
 const FOLLOWUP_1_MS = 2 * 60 * 60 * 1000;
@@ -381,18 +382,8 @@ setInterval(async () => {
 
     let nome = 'você';
     if (conversas[phone]) {
-      const msgs = conversas[phone];
-      const perguntasNome = ['qual o seu nome', 'como posso te chamar'];
-      for (let i = 0; i < msgs.length - 1; i++) {
-        const conteudo = textoDoConteudo(msgs[i].content).toLowerCase().replace(/\|\|\|/g, ' ');
-        if (perguntasNome.some(p => conteudo.includes(p)) && msgs[i+1]?.role === 'user') {
-          const candidato = textoDoConteudo(msgs[i+1].content).trim().split(/\s+/)[0];
-          if (candidato && !candidato.includes('@') && candidato.length > 1 && candidato.length < 30 && !/\d/.test(candidato)) {
-            nome = candidato.charAt(0).toUpperCase() + candidato.slice(1).toLowerCase();
-            break;
-          }
-        }
-      }
+      const nomeExtraido = extrairNomeLead(conversas[phone]);
+      if (nomeExtraido) nome = nomeExtraido;
     }
 
     if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
@@ -426,7 +417,8 @@ setInterval(async () => {
   for (const phone of Object.keys(agendamentosConfirmados)) {
    try {
     const ag = agendamentosConfirmados[phone];
-    if (!ag || ag.lembreteEnviado) continue;
+    if (!ag) continue;
+    if (ag.lembrete2hEnviado && ag.lembrete30minEnviado) continue;
 
     const inicioMs = new Date(ag.slotInicio).getTime();
     const tempoAteReuniao = inicioMs - agora;
@@ -438,21 +430,31 @@ setInterval(async () => {
       continue;
     }
 
-    // Enviar lembrete quando faltar LEMBRETE_ANTES_MS ou menos (mas ainda não passou)
-    if (tempoAteReuniao <= LEMBRETE_ANTES_MS) {
-      const saud = ag.nome ? `Oi ${ag.nome}, passando para lembrar` : 'Oi, passando para lembrar';
-      let msg = `${saud} da sua conversa com o especialista da Clique e Fecha: ${ag.label}.`;
-      if (ag.meetLink) msg += `\n\nLink do Google Meet: ${ag.meetLink}`;
-      msg += `\n\nNos vemos lá!`;
+    const saud = ag.nome ? `Oi ${ag.nome}` : 'Oi';
+
+    // Lembrete 30 min antes (com link) — tem prioridade se ambos estiverem pendentes
+    if (tempoAteReuniao <= LEMBRETE_30MIN_MS && !ag.lembrete30minEnviado) {
+      let msg = `${saud}! Sua conversa com o especialista da Clique e Fecha começa em instantes (${ag.label}).`;
+      if (ag.meetLink) msg += `\n\nÉ só entrar pelo link do Google Meet: ${ag.meetLink}`;
+      msg += `\n\nTe espero lá!`;
       await enviarMensagem(phone, msg);
-      ag.lembreteEnviado = true;
+      ag.lembrete30minEnviado = true;
+      ag.lembrete2hEnviado = true; // se já está em cima da hora, não faz sentido o de 2h
+      await persistirLead(phone);
+    }
+    // Lembrete 2h antes (organização)
+    else if (tempoAteReuniao <= LEMBRETE_2H_MS && !ag.lembrete2hEnviado) {
+      let msg = `${saud}! Passando para lembrar da sua conversa com o especialista da Clique e Fecha hoje, ${ag.label}.`;
+      msg += `\n\nDaqui a pouco te envio o link para entrar. Até já!`;
+      await enviarMensagem(phone, msg);
+      ag.lembrete2hEnviado = true;
       await persistirLead(phone);
     }
    } catch (err) {
      console.error(`Erro no lembrete de ${phone}:`, err.message);
    }
   }
-}, 15 * 60 * 1000);
+}, 5 * 60 * 1000);
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -739,39 +741,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const emailLead = emailMatch ? emailMatch.find(e => !e.includes('cliqueefecha')) || emailMatch[0] : '';
 
     // Extrair nome direto do histórico
-    // Estrutura: [0]=prompt(user) [1]=ack(assistant) [2]=msg1lead(user) [3]=resposta3partes(assistant) [4]=nome(user)
-    let nome = '';
-    const msgs = conversas[userPhone];
-    const perguntasNome = ['qual o seu nome', 'como posso te chamar', 'como posso chamá-lo', 'como posso chamá-la'];
-    // Palavras que não são nomes (a pessoa responde com frase em vez do nome direto)
-    const naoNome = new Set([
-      'sou', 'eu', 'meu', 'minha', 'me', 'chamo', 'nome', 'é', 'o', 'a', 'da', 'do', 'de',
-      'aqui', 'oi', 'ola', 'olá', 'bom', 'boa', 'dia', 'tarde', 'noite', 'tudo', 'bem',
-      'proprietario', 'proprietaria', 'dono', 'dona', 'sócio', 'socio', 'gerente', 'responsavel',
-      'pode', 'chamar', 'falar', 'com', 'senhor', 'senhora', 'sr', 'sra'
-    ]);
-    for (let i = 0; i < msgs.length - 1; i++) {
-      const conteudo = textoDoConteudo(msgs[i].content).toLowerCase().replace(/\|\|\|/g, ' ');
-      const perguntouNome = perguntasNome.some(p => conteudo.includes(p));
-      if (perguntouNome && msgs[i+1] && msgs[i+1].role === 'user') {
-        const palavras = textoDoConteudo(msgs[i+1].content).trim().split(/\s+/);
-        // Procura a primeira palavra que pareça um nome (não está na lista de exclusão)
-        for (const palavra of palavras) {
-          const limpa = palavra.replace(/[.,!?;:]/g, '');
-          const ehNome = limpa &&
-            !limpa.includes('@') &&
-            limpa.length > 1 && limpa.length < 30 &&
-            !/\d/.test(limpa) &&
-            !naoNome.has(limpa.toLowerCase());
-          if (ehNome) {
-            nome = limpa.charAt(0).toUpperCase() + limpa.slice(1).toLowerCase();
-            break;
-          }
-        }
-        if (nome) break;
-      }
-    }
-    if (!nome) nome = '';
+    const nome = extrairNomeLead(conversas[userPhone]);
 
     // Gerar resumo + campos estruturados com Claude
     let resumoConversa = 'Resumo não disponível';
@@ -835,7 +805,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       slotInicio: slotEscolhido.inicio,
       label: slotEscolhido.label,
       meetLink,
-      lembreteEnviado: false
+      lembrete2hEnviado: false,
+      lembrete30minEnviado: false
     };
 
     // Atualizar planilha com os dados do agendamento
@@ -981,6 +952,40 @@ function textoDoConteudo(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
     return content.filter(c => c.type === 'text').map(c => c.text).join(' ');
+  }
+  return '';
+}
+
+const PERGUNTAS_NOME = ['qual o seu nome', 'como posso te chamar', 'como posso chamá-lo', 'como posso chamá-la'];
+// Palavras que não são nomes (a pessoa responde com frase em vez do nome direto)
+const PALAVRAS_NAO_NOME = new Set([
+  'sou', 'eu', 'meu', 'minha', 'me', 'chamo', 'nome', 'é', 'o', 'a', 'da', 'do', 'de',
+  'aqui', 'oi', 'ola', 'olá', 'bom', 'boa', 'dia', 'tarde', 'noite', 'tudo', 'bem',
+  'proprietario', 'proprietaria', 'dono', 'dona', 'sócio', 'socio', 'gerente', 'responsavel',
+  'pode', 'chamar', 'falar', 'com', 'senhor', 'senhora', 'sr', 'sra',
+  'uso', 'use', 'usando', 'usar', 'utilizo', 'utilizando'
+]);
+
+// Extrai o nome do lead a partir do histórico da conversa, ignorando palavras que não são nomes
+function extrairNomeLead(conversa) {
+  if (!conversa) return '';
+  for (let i = 0; i < conversa.length - 1; i++) {
+    const conteudo = textoDoConteudo(conversa[i].content).toLowerCase().replace(/\|\|\|/g, ' ');
+    const perguntouNome = PERGUNTAS_NOME.some(p => conteudo.includes(p));
+    if (perguntouNome && conversa[i+1] && conversa[i+1].role === 'user') {
+      const palavras = textoDoConteudo(conversa[i+1].content).trim().split(/\s+/);
+      for (const palavra of palavras) {
+        const limpa = palavra.replace(/[.,!?;:]/g, '');
+        const ehNome = limpa &&
+          !limpa.includes('@') &&
+          limpa.length > 1 && limpa.length < 30 &&
+          !/\d/.test(limpa) &&
+          !PALAVRAS_NAO_NOME.has(limpa.toLowerCase());
+        if (ehNome) {
+          return limpa.charAt(0).toUpperCase() + limpa.slice(1).toLowerCase();
+        }
+      }
+    }
   }
   return '';
 }
