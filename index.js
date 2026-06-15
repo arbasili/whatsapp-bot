@@ -363,10 +363,29 @@ async function criarEvento(nome, email, telefone, slotInicio, slotFim, resumo = 
     }
 
     console.log(`Evento criado para ${nome}. Meet: ${meetLink}`);
-    return meetLink;
+    return { meetLink, eventId: res.data.id };
   } catch (err) {
     console.error('Erro ao criar evento:', err.message);
-    return null;
+    return { meetLink: null, eventId: null };
+  }
+}
+
+// Remarca um evento existente para um novo horário, mantendo o mesmo link do Meet
+async function remarcarEvento(eventId, novoInicio, novoFim) {
+  try {
+    await calendar.events.patch({
+      calendarId: CALENDAR_ID,
+      eventId,
+      sendUpdates: 'none',
+      requestBody: {
+        start: { dateTime: novoInicio, timeZone: 'America/Campo_Grande' },
+        end: { dateTime: novoFim, timeZone: 'America/Campo_Grande' },
+      },
+    });
+    return true;
+  } catch (err) {
+    console.error('Erro ao remarcar evento:', err.message);
+    return false;
   }
 }
 
@@ -570,6 +589,114 @@ app.post('/webhook', async (req, res) => {
   return res.sendStatus(200);
 });
 
+// Trata respostas de um lead que já agendou (confirmar presença, remarcar, dúvida)
+// Retorna true se já resolveu a mensagem; false se deve seguir o fluxo normal
+async function tratarPosAgendamento(userPhone, userText) {
+  const ag = agendamentosConfirmados[userPhone];
+  if (!ag) return false;
+
+  // Se está no meio de uma remarcação, verifica se o lead escolheu um novo horário
+  if (ag.remarcando && ag.novosSlots?.length) {
+    const texto = (userText || '').toLowerCase();
+    let escolhido = null;
+    for (const slot of ag.novosSlots) {
+      const hora = slot.label.split(' às ')[1]?.replace('h', '').trim();
+      if (hora && texto.includes(hora + 'h')) { escolhido = slot; break; }
+    }
+    // Se mencionou "primeir"/"1" ou "segund"/"2" como atalho
+    if (!escolhido) {
+      if (/primeir|1[ªao]?\b/.test(texto) && ag.novosSlots[0]) escolhido = ag.novosSlots[0];
+      else if (/segund|2[ªao]?\b/.test(texto) && ag.novosSlots[1]) escolhido = ag.novosSlots[1];
+    }
+
+    if (escolhido) {
+      const ok = await remarcarEvento(ag.eventId, escolhido.inicio, escolhido.fim);
+      if (ok) {
+        ag.slotInicio = escolhido.inicio;
+        ag.label = escolhido.label;
+        ag.remarcando = false;
+        ag.novosSlots = null;
+        ag.lembrete2hEnviado = false;
+        ag.lembrete30minEnviado = false;
+        await atualizarLead(userPhone, { 'Horário': escolhido.label, 'Status': 'Reagendado' });
+        let msg = `Prontinho, remarcado para ${escolhido.label}.`;
+        if (ag.meetLink) msg += ` O link do Google Meet continua o mesmo: ${ag.meetLink}`;
+        msg += `\n\nQualquer coisa é só me chamar. Até lá!`;
+        await enviarMensagem(userPhone, msg);
+      } else {
+        await enviarMensagem(userPhone, 'Tive um problema para remarcar aqui. Nossa equipe vai entrar em contato para ajustar com você.');
+        await atualizarLead(userPhone, { 'Status': 'Remarcação pendente' });
+        ag.remarcando = false;
+      }
+      return true;
+    } else {
+      // Não entendeu o horário — repete as opções
+      const opcoes = ag.novosSlots.map(s => s.label).join(' ou ');
+      await enviarMensagem(userPhone, `Só para confirmar, qual desses fica melhor: ${opcoes}?`);
+      return true;
+    }
+  }
+
+  // Classificar a intenção da mensagem via Claude
+  let intencao = 'duvida';
+  try {
+    const resp = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 10,
+        messages: [{
+          role: 'user',
+          content: `Um cliente tem uma reunião agendada e enviou esta mensagem: "${userText}".\n\nClassifique a intenção dele em UMA palavra, escolhendo entre:\n- CONFIRMAR (ele confirma que vai comparecer)\n- REMARCAR (ele não pode ir, quer cancelar, remarcar ou mudar o horário)\n- DUVIDA (qualquer outra coisa, pergunta ou comentário)\n\nResponda apenas a palavra.`
+        }]
+      },
+      { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
+    );
+    const r = resp.data.content[0].text.trim().toUpperCase();
+    if (r.includes('CONFIRMAR')) intencao = 'confirmar';
+    else if (r.includes('REMARCAR')) intencao = 'remarcar';
+    else intencao = 'duvida';
+  } catch (err) {
+    console.error('Erro ao classificar intenção pós-agendamento:', err.message);
+    return false; // em caso de erro, deixa o fluxo normal seguir
+  }
+
+  if (intencao === 'confirmar') {
+    await atualizarLead(userPhone, { 'Status': 'Presença confirmada' });
+    const saud = ag.nome ? `Combinado, ${ag.nome}!` : 'Combinado!';
+    await enviarMensagem(userPhone, `${saud} Sua presença está confirmada. Te espero na nossa conversa. Até lá!`);
+    return true;
+  }
+
+  if (intencao === 'remarcar') {
+    // Buscar novos horários disponíveis
+    let novosSlots = [];
+    try {
+      novosSlots = await buscarHorariosDisponiveis();
+    } catch (err) {
+      console.error('Erro ao buscar horários para remarcação:', err.message);
+    }
+    if (novosSlots.length === 0) {
+      await enviarMensagem(userPhone, 'Sem problema! No momento não consegui localizar novos horários automaticamente, mas nossa equipe vai entrar em contato para remarcar com você.');
+      await atualizarLead(userPhone, { 'Status': 'Remarcação pendente' });
+      return true;
+    }
+    ag.remarcando = true;
+    ag.novosSlots = novosSlots;
+    await atualizarLead(userPhone, { 'Status': 'Remarcando' });
+    const opcoes = novosSlots.length >= 2
+      ? `${novosSlots[0].label} ou ${novosSlots[1].label}`
+      : novosSlots[0].label;
+    await enviarMensagem(userPhone, 'Sem problema! Vamos remarcar então.');
+    await new Promise(r => setTimeout(r, 1500));
+    await enviarMensagem(userPhone, `Tenho estes horários disponíveis: ${opcoes}. Qual funciona melhor para você?`);
+    return true;
+  }
+
+  // Dúvida: deixa o fluxo normal responder (o Claude trata como conversa)
+  return false;
+}
+
 async function processarMensagem(userPhone, userText, imagem = null) {
 
   if (!conversas[userPhone]) {
@@ -713,6 +840,16 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     conversas[userPhone].push({ role: 'user', content: userText });
   }
 
+  // MODO PÓS-AGENDAMENTO: lead já agendou e está respondendo (ex: a um lembrete)
+  if (leadsAgendados.has(userPhone) && agendamentosConfirmados[userPhone]) {
+    const tratou = await tratarPosAgendamento(userPhone, userText);
+    if (tratou) {
+      await persistirLead(userPhone);
+      return;
+    }
+    // se não tratou (ex: ainda no meio de uma remarcação), segue o fluxo normal abaixo
+  }
+
   // Verificar email ANTES de chamar o Claude — se for agendamento, Claude não fala
   const emailNaMensagem = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.test(userText || '');
   const confirmaAgendamento = emailNaMensagem && agendamentos[userPhone]?.slots?.length > 0 && !leadsAgendados.has(userPhone) && !processandoAgendamento.has(userPhone);
@@ -794,7 +931,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     // Avisar que está gerando antes de processar
     await enviarMensagem(userPhone, 'Um segundo, deixa eu confirmar aqui.');
 
-    const meetLink = await criarEvento(nome, emailLead, userPhone, slotEscolhido.inicio, slotEscolhido.fim, resumoConversa);
+    const { meetLink, eventId } = await criarEvento(nome, emailLead, userPhone, slotEscolhido.inicio, slotEscolhido.fim, resumoConversa);
 
     leadsAgendados.add(userPhone);
     delete followUpStatus[userPhone];
@@ -802,9 +939,11 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     // Registrar para lembrete pré-reunião
     agendamentosConfirmados[userPhone] = {
       nome,
+      email: emailLead,
       slotInicio: slotEscolhido.inicio,
       label: slotEscolhido.label,
       meetLink,
+      eventId,
       lembrete2hEnviado: false,
       lembrete30minEnviado: false
     };
