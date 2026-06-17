@@ -324,6 +324,94 @@ async function buscarHorariosDisponiveis() {
   return slot2 ? [slot1, slot2] : [slot1];
 }
 
+// Interpreta um pedido de data/hora específico do lead.
+// Retorna { tipo, ... } indicando o que foi entendido:
+//  - { tipo: 'completo', slot }      -> dia + hora identificados e LIVRES
+//  - { tipo: 'ocupado' }             -> dia + hora identificados mas OCUPADOS/inválidos
+//  - { tipo: 'sohdia', dia, periodo} -> só o dia (ou dia+período) sem hora exata
+//  - { tipo: 'nada' }                -> não identificou pedido de data específico
+async function interpretarPedidoData(texto) {
+  if (!texto) return { tipo: 'nada' };
+  const t = texto.toLowerCase();
+
+  const manha = [9, 10, 11];
+  const tarde = [14, 15, 16, 17];
+  const todos = [...manha, ...tarde];
+
+  const diasMap = { 'domingo':0,'segunda':1,'terça':2,'terca':2,'quarta':3,'quinta':4,'sexta':5,'sábado':6,'sabado':6 };
+
+  const agora = new Date();
+  const horaCG = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
+  const LIMITE_DIAS = 15;
+
+  // 1. Descobrir o DIA pedido (dia da semana ou "dia N")
+  let diaAlvo = null;
+
+  // a) dia da semana
+  for (const [nome, num] of Object.entries(diasMap)) {
+    if (t.includes(nome)) {
+      // próxima ocorrência desse dia da semana (a partir de amanhã)
+      const d = new Date(horaCG);
+      for (let i = 1; i <= LIMITE_DIAS; i++) {
+        const cand = new Date(d);
+        cand.setDate(cand.getDate() + i);
+        if (cand.getDay() === num) { diaAlvo = cand; break; }
+      }
+      break;
+    }
+  }
+
+  // b) "dia N" (dia do mês)
+  if (!diaAlvo) {
+    const m = t.match(/\bdia\s+(\d{1,2})\b/) || t.match(/\b(\d{1,2})\s+de\s+\w+/);
+    if (m) {
+      const numDia = parseInt(m[1], 10);
+      const d = new Date(horaCG);
+      for (let i = 0; i <= LIMITE_DIAS; i++) {
+        const cand = new Date(d);
+        cand.setDate(cand.getDate() + i);
+        if (cand.getDate() === numDia) { diaAlvo = cand; break; }
+      }
+    }
+  }
+
+  if (!diaAlvo) return { tipo: 'nada' };
+
+  // Não permitir fim de semana
+  if (diaAlvo.getDay() === 0 || diaAlvo.getDay() === 6) {
+    return { tipo: 'ocupado' };
+  }
+
+  // 2. Descobrir a HORA pedida (se houver)
+  let horaAlvo = null;
+  const mh = t.match(/\b(\d{1,2})\s*h\b/) || t.match(/\bàs\s+(\d{1,2})\b/) || t.match(/\b(\d{1,2})\s+horas?\b/);
+  if (mh) horaAlvo = parseInt(mh[1], 10);
+
+  // Período mencionado
+  const pediuManha = /manh[ãa]/.test(t);
+  const pediuTarde = /tarde/.test(t);
+
+  // 3. Decidir o retorno
+  if (horaAlvo !== null) {
+    // tem hora específica: validar se está na grade e livre
+    if (!todos.includes(horaAlvo)) return { tipo: 'ocupado' };
+    // Não permitir horário que já passou (com margem de 2h para preparação)
+    const inicioAlvo = new Date(diaAlvo);
+    inicioAlvo.setHours(horaAlvo, 0, 0, 0);
+    const minAntes = new Date(horaCG.getTime() + 2 * 60 * 60 * 1000);
+    if (inicioAlvo < minAntes) return { tipo: 'ocupado' };
+    const slot = await buscarSlotDisponivel(diaAlvo, [horaAlvo]);
+    if (slot) return { tipo: 'completo', slot };
+    return { tipo: 'ocupado' };
+  }
+
+  // sem hora exata: só o dia (eventualmente com período)
+  let periodo = null;
+  if (pediuManha) periodo = 'manhã';
+  else if (pediuTarde) periodo = 'tarde';
+  return { tipo: 'sohdia', dia: diaAlvo.toISOString(), periodo };
+}
+
 async function criarEvento(nome, email, telefone, slotInicio, slotFim, resumo = '') {
   try {
     const tituloNome = nome && nome.trim() ? ` - ${nome}` : '';
@@ -597,17 +685,7 @@ async function tratarPosAgendamento(userPhone, userText) {
 
   // Se está no meio de uma remarcação, verifica se o lead escolheu um novo horário
   if (ag.remarcando && ag.novosSlots?.length) {
-    const texto = (userText || '').toLowerCase();
-    let escolhido = null;
-    for (const slot of ag.novosSlots) {
-      const hora = slot.label.split(' às ')[1]?.replace('h', '').trim();
-      if (hora && texto.includes(hora + 'h')) { escolhido = slot; break; }
-    }
-    // Se mencionou "primeir"/"1" ou "segund"/"2" como atalho
-    if (!escolhido) {
-      if (/primeir|1[ªao]?\b/.test(texto) && ag.novosSlots[0]) escolhido = ag.novosSlots[0];
-      else if (/segund|2[ªao]?\b/.test(texto) && ag.novosSlots[1]) escolhido = ag.novosSlots[1];
-    }
+    const escolhido = escolherSlot(userText, ag.novosSlots);
 
     if (escolhido) {
       const ok = await remarcarEvento(ag.eventId, escolhido.inicio, escolhido.fim);
@@ -773,6 +851,9 @@ Após a resposta sobre urgência, responda em EXATAMENTE 2 partes separadas pelo
 
 A partir daqui, siga esta sequência obrigatória, uma mensagem por vez:
 b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
+
+DATA ESPECÍFICA PEDIDA PELO LEAD: se em qualquer momento da etapa de agendamento o lead pedir um dia ou horário específico diferente das opções oferecidas (por exemplo "pode ser sexta?", "prefiro quinta às 15h", "dia 20 de manhã", "tem na segunda?"), NÃO responda você mesmo sobre disponibilidade. Em vez disso, responda APENAS com o marcador no formato exato: [VERIFICAR_DATA: texto do que o lead pediu]. Exemplo: se o lead diz "pode ser sexta às 15h", responda somente "[VERIFICAR_DATA: sexta às 15h]". O sistema vai checar a agenda real e cuidar da resposta. Não escreva mais nada junto com esse marcador.
+
 c. Após a escolha do horário, reforce o compromisso e confirme o WhatsApp em uma única mensagem: "Perfeito, vou reservar esse horário com o especialista. Posso usar o número ${userPhone} para contato, ou prefere outro?"
 d. Após confirmar o WhatsApp, peça o email com esta mensagem exata: "E qual é o seu email para eu registrar o agendamento?"
 
@@ -866,12 +947,14 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       .toLowerCase();
     let slotEscolhido = slots[0];
     if (slots[1]) {
-      const horaSlot1 = slots[0].label.split(' às ')[1]?.replace('h', '').trim();
-      const horaSlot2 = slots[1].label.split(' às ')[1]?.replace('h', '').trim();
-      // Verifica se o usuário mencionou a hora do slot 2 mas não do slot 1
-      const mencionouSlot2 = horaSlot2 && historicoMsgsUsuario.includes(horaSlot2 + 'h');
-      const mencionouSlot1 = horaSlot1 && historicoMsgsUsuario.includes(horaSlot1 + 'h');
-      if (mencionouSlot2 && !mencionouSlot1) slotEscolhido = slots[1];
+      // Procura a escolha do lead nas mensagens dele (da mais recente para a mais antiga)
+      const msgsUsuario = conversas[userPhone]
+        .filter(m => m.role === 'user')
+        .map(m => textoDoConteudo(m.content));
+      for (let i = msgsUsuario.length - 1; i >= 0; i--) {
+        const escolha = escolherSlot(msgsUsuario[i], slots);
+        if (escolha) { slotEscolhido = escolha; break; }
+      }
     }
 
     const emailMatch = historicoMsgsUsuario.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
@@ -1012,6 +1095,51 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const resposta = await chamarClaude(conversas[userPhone]);
     conversas[userPhone].push({ role: 'assistant', content: resposta });
 
+    // Detectar pedido de verificação de data específica
+    const matchVerificar = resposta.match(/\[VERIFICAR_DATA:\s*([^\]]+)\]/i);
+    if (matchVerificar) {
+      const pedido = matchVerificar[1].trim();
+      const resultado = await interpretarPedidoData(pedido);
+
+      // Garante que a estrutura de agendamento exista
+      if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
+
+      if (resultado.tipo === 'completo') {
+        // Dia e hora livres: adiciona como opção escolhível e confirma
+        agendamentos[userPhone].slots = [resultado.slot];
+        await enviarMensagem(userPhone, `Tenho ${resultado.slot.label} disponível. Posso reservar esse horário para você?`);
+      } else if (resultado.tipo === 'sohdia') {
+        // Só o dia (ou período): pergunta o horário exato
+        const dia = new Date(resultado.dia);
+        const nomeDia = dia.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Campo_Grande' });
+        let pergunta;
+        if (resultado.periodo === 'manhã') {
+          pergunta = `Para ${nomeDia} de manhã, tenho horários às 9h, 10h ou 11h. Qual prefere?`;
+        } else if (resultado.periodo === 'tarde') {
+          pergunta = `Para ${nomeDia} à tarde, tenho horários às 14h, 15h, 16h ou 17h. Qual prefere?`;
+        } else {
+          pergunta = `Para ${nomeDia}, qual horário fica melhor para você? Atendo das 9h às 11h e das 14h às 17h.`;
+        }
+        await enviarMensagem(userPhone, pergunta);
+      } else {
+        // Ocupado ou indisponível: oferece as 2 opções padrão como alternativa
+        let alternativas = [];
+        try { alternativas = await buscarHorariosDisponiveis(); } catch (e) { console.error(e.message); }
+        if (alternativas.length >= 2) {
+          agendamentos[userPhone].slots = alternativas;
+          await enviarMensagem(userPhone, `Nesse horário eu não tenho disponibilidade. As opções mais próximas que tenho são: ${alternativas[0].label} ou ${alternativas[1].label}. Alguma funciona para você?`);
+        } else if (alternativas.length === 1) {
+          agendamentos[userPhone].slots = alternativas;
+          await enviarMensagem(userPhone, `Nesse horário eu não tenho disponibilidade. O horário mais próximo que tenho é ${alternativas[0].label}. Funciona para você?`);
+        } else {
+          await enviarMensagem(userPhone, 'Nesse horário eu não tenho disponibilidade no momento. Pode me sugerir outro dia ou horário?');
+        }
+      }
+
+      await persistirLead(userPhone);
+      return;
+    }
+
     // Encerramento pode vir em qualquer formato — detectar antes de tudo
     const deveEncerrar = resposta.includes('[ENCERRAR]');
     const respostaSemMarcador = resposta.replace('[ENCERRAR]', '').trim();
@@ -1106,6 +1234,57 @@ const PALAVRAS_NAO_NOME = new Set([
 ]);
 
 // Extrai o nome do lead a partir do histórico da conversa, ignorando palavras que não são nomes
+// Identifica qual slot o lead escolheu, cruzando dia da semana, data (dia do mês) e hora
+// Retorna o slot escolhido ou null se não conseguir identificar
+function escolherSlot(texto, slots) {
+  if (!texto || !slots || slots.length === 0) return null;
+  const t = texto.toLowerCase();
+
+  // Mapa de dias da semana (com e sem acento, formas curtas)
+  const diasSemana = {
+    'segunda': 'segunda', 'segunda-feira': 'segunda', 'segundafeira': 'segunda',
+    'terça': 'terça', 'terca': 'terça', 'terça-feira': 'terça', 'terca-feira': 'terça',
+    'quarta': 'quarta', 'quarta-feira': 'quarta', 'quartafeira': 'quarta',
+    'quinta': 'quinta', 'quinta-feira': 'quinta', 'quintafeira': 'quinta',
+    'sexta': 'sexta', 'sexta-feira': 'sexta', 'sextafeira': 'sexta',
+  };
+
+  // 1. Tentar por dia da semana mencionado no texto
+  let diaMencionado = null;
+  for (const [chave, valor] of Object.entries(diasSemana)) {
+    if (t.includes(chave)) { diaMencionado = valor; break; }
+  }
+  if (diaMencionado) {
+    const match = slots.find(s => s.label.toLowerCase().includes(diaMencionado));
+    if (match) return match;
+  }
+
+  // 2. Tentar por dia do mês ("dia 18", "18 de junho", "no 18")
+  const matchDia = t.match(/\bdia\s+(\d{1,2})\b/) || t.match(/\b(\d{1,2})\s+de\s+\w+/);
+  if (matchDia) {
+    const numDia = matchDia[1];
+    const match = slots.find(s => {
+      const labelDia = s.label.match(/(\d{1,2})\s+de\s+\w+/);
+      return labelDia && labelDia[1] === numDia;
+    });
+    if (match) return match;
+  }
+
+  // 3. Tentar por hora ("9h", "às 14", "14 horas")
+  for (const slot of slots) {
+    const hora = slot.label.split(' às ')[1]?.replace('h', '').trim();
+    if (hora && (t.includes(hora + 'h') || t.includes(hora + ' h') || t.includes('às ' + hora) || t.includes(hora + ' hora'))) {
+      return slot;
+    }
+  }
+
+  // 4. Tentar por ordem ("primeira/primeiro/1", "segunda opção/2")
+  if (/\bprimeir|1[ªao]?\b|op[çc][ãa]o 1/.test(t) && slots[0]) return slots[0];
+  if (/\bsegund|2[ªao]?\b|op[çc][ãa]o 2/.test(t) && slots[1]) return slots[1];
+
+  return null;
+}
+
 function extrairNomeLead(conversa) {
   if (!conversa) return '';
   for (let i = 0; i < conversa.length - 1; i++) {
