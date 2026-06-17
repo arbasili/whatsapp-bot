@@ -602,11 +602,23 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
   } else if (message.type === 'audio' || message.type === 'voice') {
-    await enviarMensagem(userPhone, 'No momento ainda não consigo ouvir áudios. Pode me escrever sua mensagem por texto que eu te respondo na hora.');
-    return res.sendStatus(200);
+    const midiaAudio = await baixarMidia(message.audio?.id || message.voice?.id);
+    if (midiaAudio && midiaAudio.buffer) {
+      const transcricao = await transcreverAudio(midiaAudio.buffer, midiaAudio.mimeType);
+      if (transcricao) {
+        userText = transcricao;
+        console.log(`Áudio transcrito de ${userPhone}: "${transcricao.slice(0, 80)}"`);
+      } else {
+        await enviarMensagem(userPhone, 'Não consegui entender o áudio dessa vez. Pode tentar de novo ou me escrever por texto?');
+        return res.sendStatus(200);
+      }
+    } else {
+      await enviarMensagem(userPhone, 'Não consegui abrir o áudio. Pode tentar de novo ou me escrever por texto?');
+      return res.sendStatus(200);
+    }
   } else {
     // Vídeo, documento, figurinha, etc. — ainda não suportado
-    await enviarMensagem(userPhone, 'Por enquanto consigo ler apenas texto e imagem. Pode me escrever por texto?');
+    await enviarMensagem(userPhone, 'Por enquanto consigo ler apenas texto, áudio e imagem. Pode me escrever por texto?');
     return res.sendStatus(200);
   }
 
@@ -1322,10 +1334,53 @@ async function baixarMidia(mediaId) {
       headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
       responseType: 'arraybuffer'
     });
-    const base64 = Buffer.from(binRes.data).toString('base64');
-    return { base64, mimeType };
+    const buffer = Buffer.from(binRes.data);
+    const base64 = buffer.toString('base64');
+    return { base64, mimeType, buffer };
   } catch (err) {
     console.error('Erro ao baixar mídia:', err.response?.data || err.message);
+    return null;
+  }
+}
+
+// Transcreve um áudio usando o Whisper da Groq. Retorna o texto ou null.
+async function transcreverAudio(buffer, mimeType) {
+  if (!process.env.GROQ_API_KEY) {
+    console.error('GROQ_API_KEY não configurada.');
+    return null;
+  }
+  try {
+    // O WhatsApp manda áudio em ogg/opus. A Groq aceita esse formato.
+    const extensao = mimeType.includes('mpeg') ? 'mp3'
+                   : mimeType.includes('mp4') || mimeType.includes('m4a') ? 'm4a'
+                   : mimeType.includes('wav') ? 'wav'
+                   : 'ogg';
+
+    const FormData = require('form-data');
+    const form = new FormData();
+    form.append('file', buffer, { filename: `audio.${extensao}`, contentType: mimeType });
+    form.append('model', 'whisper-large-v3-turbo');
+    form.append('language', 'pt');
+    form.append('response_format', 'text');
+
+    const resp = await axios.post(
+      'https://api.groq.com/openai/v1/audio/transcriptions',
+      form,
+      {
+        headers: {
+          ...form.getHeaders(),
+          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        timeout: 30000,
+      }
+    );
+    // response_format 'text' retorna a transcrição direta
+    const texto = typeof resp.data === 'string' ? resp.data.trim() : (resp.data?.text || '').trim();
+    return texto || null;
+  } catch (err) {
+    console.error('Erro ao transcrever áudio:', err.response?.data || err.message);
     return null;
   }
 }
