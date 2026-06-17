@@ -250,9 +250,13 @@ async function atualizarLead(phone, dados) {
 }
 
 async function buscarSlotDisponivel(dia, periodos) {
+  const agoraMs = Date.now();
+  const margemMs = 2 * 60 * 60 * 1000; // exige 2h de antecedência mínima
   for (const hora of periodos) {
     const inicio = new Date(dia);
     inicio.setHours(hora, 0, 0, 0);
+    // Proteção central: nunca oferecer horário que já passou ou está em cima da hora
+    if (inicio.getTime() - agoraMs < margemMs) continue;
     const fim = new Date(inicio);
     fim.setMinutes(fim.getMinutes() + 30);
     try {
@@ -761,7 +765,8 @@ async function tratarPosAgendamento(userPhone, userText) {
   if (intencao === 'confirmar') {
     await atualizarLead(userPhone, { 'Status': 'Presença confirmada' });
     const saud = ag.nome ? `Combinado, ${ag.nome}!` : 'Combinado!';
-    await enviarMensagem(userPhone, `${saud} Sua presença está confirmada. Te espero na nossa conversa. Até lá!`);
+    const refHorario = ag.label ? ` Nossa conversa está confirmada para ${ag.label}.` : ' Sua reunião está confirmada.';
+    await enviarMensagem(userPhone, `${saud}${refHorario} Te espero lá!`);
     return true;
   }
 
@@ -784,7 +789,9 @@ async function tratarPosAgendamento(userPhone, userText) {
     const opcoes = novosSlots.length >= 2
       ? `${novosSlots[0].label} ou ${novosSlots[1].label}`
       : novosSlots[0].label;
-    await enviarMensagem(userPhone, 'Sem problema! Vamos remarcar então.');
+    // Referencia o agendamento atual para contextualizar a remarcação
+    const refAtual = ag.label ? `Sua conversa está marcada para ${ag.label}.` : 'Sem problema!';
+    await enviarMensagem(userPhone, `${refAtual} Vamos remarcar então.`);
     await new Promise(r => setTimeout(r, 1500));
     await enviarMensagem(userPhone, `Tenho estes horários disponíveis: ${opcoes}. Qual funciona melhor para você?`);
     return true;
@@ -805,6 +812,11 @@ async function processarMensagem(userPhone, userText, imagem = null) {
   }
 
   if (!conversas[userPhone]) {
+    // Conversa nova: limpa qualquer estado de agendamento anterior para evitar
+    // que o lead caia em modo pós-agendamento por engano.
+    leadsAgendados.delete(userPhone);
+    delete agendamentosConfirmados[userPhone];
+
     let opcoesHorario = 'amanhã às 10h ou amanhã às 14h';
     let slotsDisponiveis = [];
 
@@ -1135,18 +1147,44 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
         agendamentos[userPhone].slots = [resultado.slot];
         await enviarMensagem(userPhone, `Tenho ${resultado.slot.label} disponível. Posso reservar esse horário para você?`);
       } else if (resultado.tipo === 'sohdia') {
-        // Só o dia (ou período): pergunta o horário exato
+        // Só o dia (ou período): oferecer horários concretos disponíveis nesse dia
         const dia = new Date(resultado.dia);
         const nomeDia = dia.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'America/Campo_Grande' });
-        let pergunta;
+        const manha = [9, 10, 11];
+        const tarde = [14, 15, 16, 17];
+
+        let opcoesDia = [];
         if (resultado.periodo === 'manhã') {
-          pergunta = `Para ${nomeDia} de manhã, tenho horários às 9h, 10h ou 11h. Qual prefere?`;
+          const s = await buscarSlotDisponivel(dia, manha);
+          if (s) opcoesDia.push(s);
         } else if (resultado.periodo === 'tarde') {
-          pergunta = `Para ${nomeDia} à tarde, tenho horários às 14h, 15h, 16h ou 17h. Qual prefere?`;
+          const s = await buscarSlotDisponivel(dia, tarde);
+          if (s) opcoesDia.push(s);
         } else {
-          pergunta = `Para ${nomeDia}, qual horário fica melhor para você? Atendo das 9h às 11h e das 14h às 17h.`;
+          // Sem período: 1 de manhã + 1 de tarde
+          const sm = await buscarSlotDisponivel(dia, manha);
+          const st = await buscarSlotDisponivel(dia, tarde);
+          if (sm) opcoesDia.push(sm);
+          if (st) opcoesDia.push(st);
         }
-        await enviarMensagem(userPhone, pergunta);
+
+        if (opcoesDia.length >= 2) {
+          agendamentos[userPhone].slots = opcoesDia;
+          await enviarMensagem(userPhone, `Para ${nomeDia}, tenho ${opcoesDia[0].label.split(' às ')[1]} ou ${opcoesDia[1].label.split(' às ')[1]}. Qual funciona melhor para você?`);
+        } else if (opcoesDia.length === 1) {
+          agendamentos[userPhone].slots = opcoesDia;
+          await enviarMensagem(userPhone, `Para ${nomeDia}, tenho disponível às ${opcoesDia[0].label.split(' às ')[1]}. Posso reservar para você?`);
+        } else {
+          // Nenhum horário livre nesse dia: oferece alternativas gerais
+          let alternativas = [];
+          try { alternativas = await buscarHorariosDisponiveis(); } catch (e) { console.error(e.message); }
+          if (alternativas.length >= 2) {
+            agendamentos[userPhone].slots = alternativas;
+            await enviarMensagem(userPhone, `Nesse dia eu não tenho horário livre. As opções mais próximas são: ${alternativas[0].label} ou ${alternativas[1].label}. Alguma funciona para você?`);
+          } else {
+            await enviarMensagem(userPhone, 'Nesse dia eu não tenho horário livre. Pode me sugerir outro dia?');
+          }
+        }
       } else {
         // Ocupado ou indisponível: oferece as 2 opções padrão como alternativa
         let alternativas = [];
