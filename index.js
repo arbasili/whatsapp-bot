@@ -134,6 +134,16 @@ const rateLimit = {}; // { phone: { count, windowStart } }
 const RATE_LIMIT_MAX = 15; // máximo de mensagens por janela
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // janela de 1 minuto
 
+const DEBOUNCE_MS = 4000;
+const LEMBRETE_2H_MS = 2 * 60 * 60 * 1000;
+const LEMBRETE_30MIN_MS = 30 * 60 * 1000;
+const LEMBRETE_24H_MS = 24 * 60 * 60 * 1000;
+const EXPIRACAO_MS = 24 * 60 * 60 * 1000;
+const EXPIRACAO_ENCERRADO_MS = 30 * 24 * 60 * 60 * 1000;
+const FOLLOWUP_1_MS = 2 * 60 * 60 * 1000;
+const FOLLOWUP_2_MS = 24 * 60 * 60 * 1000;
+const ENCERRAMENTO_MS = 24 * 60 * 60 * 1000;
+
 // Limpa entradas antigas do rateLimit a cada 10 minutos para evitar crescimento indefinido
 setInterval(() => {
   const agora = Date.now();
@@ -160,16 +170,9 @@ setInterval(() => {
     }
   }
 }, 60 * 60 * 1000);
-const DEBOUNCE_MS = 4000;
-const LEMBRETE_2H_MS = 2 * 60 * 60 * 1000;   // primeiro lembrete: 2h antes
-const LEMBRETE_30MIN_MS = 30 * 60 * 1000;     // segundo lembrete: 30min antes (com link)
-const LEMBRETE_24H_MS = 24 * 60 * 60 * 1000;  // confirmação de presença: 24h antes
 
-const EXPIRACAO_MS = 24 * 60 * 60 * 1000;
-const EXPIRACAO_ENCERRADO_MS = 30 * 24 * 60 * 60 * 1000; // histórico de lead encerrado: 30 dias
-const FOLLOWUP_1_MS = 2 * 60 * 60 * 1000;
-const FOLLOWUP_2_MS = 24 * 60 * 60 * 1000;
-const ENCERRAMENTO_MS = 24 * 60 * 60 * 1000;
+const MEU_NUMERO = '5567988885170';
+const CALENDAR_ID = 'comercial@cliqueefecha.com.br';
 
 // Horário de silêncio: não envia mensagens entre 20h e 8h (Campo Grande)
 const SILENCIO_INICIO = 20;
@@ -180,19 +183,6 @@ function dentroDoHorarioSilencio() {
   const hora = parseInt(agora.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/Campo_Grande' }), 10);
   return hora >= SILENCIO_INICIO || hora < SILENCIO_FIM;
 }
-
-// Retorna o timestamp do próximo momento fora do silêncio (8h do próximo dia útil)
-function proximoHorarioPermitido() {
-  const agora = new Date();
-  const cg = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
-  cg.setHours(SILENCIO_FIM, 0, 0, 0);
-  if (cg <= agora) cg.setDate(cg.getDate() + 1);
-  // Se cair no fim de semana, avança para segunda
-  while (cg.getDay() === 0 || cg.getDay() === 6) cg.setDate(cg.getDate() + 1);
-  return cg;
-}
-const MEU_NUMERO = '5567988885170';
-const CALENDAR_ID = 'comercial@cliqueefecha.com.br';
 
 let serviceAccountKey;
 try {
@@ -660,7 +650,7 @@ setInterval(async () => {
    try {
     const ag = agendamentosConfirmados[phone];
     if (!ag) continue;
-    if (ag.lembrete2hEnviado && ag.lembrete30minEnviado) continue;
+    if (ag.lembrete24hEnviado && ag.lembrete2hEnviado && ag.lembrete30minEnviado) continue;
 
     const inicioMs = new Date(ag.slotInicio).getTime();
     const tempoAteReuniao = inicioMs - agora;
