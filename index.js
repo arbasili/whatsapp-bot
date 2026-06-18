@@ -104,7 +104,10 @@ async function carregarLeads() {
 
 function validarAssinatura(req) {
   const appSecret = process.env.META_APP_SECRET;
-  if (!appSecret) return true; // se não configurado, não bloqueia (retrocompatível)
+  if (!appSecret) {
+    console.error('META_APP_SECRET não configurado — rejeitando webhook por segurança.');
+    return false;
+  }
   const assinatura = req.headers['x-hub-signature-256'];
   if (!assinatura || !req.rawBody) return false;
   const esperado = 'sha256=' + crypto.createHmac('sha256', appSecret).update(req.rawBody).digest('hex');
@@ -128,6 +131,33 @@ const agendamentosConfirmados = {}; // { phone: { nome, slotInicio, label, meetL
 const rateLimit = {}; // { phone: { count, windowStart } }
 const RATE_LIMIT_MAX = 15; // máximo de mensagens por janela
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // janela de 1 minuto
+
+// Limpa entradas antigas do rateLimit a cada 10 minutos para evitar crescimento indefinido
+setInterval(() => {
+  const agora = Date.now();
+  for (const phone of Object.keys(rateLimit)) {
+    if (agora - rateLimit[phone].windowStart > RATE_LIMIT_WINDOW_MS * 2) {
+      delete rateLimit[phone];
+    }
+  }
+}, 10 * 60 * 1000);
+
+// Limpeza periódica de leads inativos em memória (evita memory leak).
+// Remove conversas/ultimaMensagem/followUpStatus para leads sem atividade há mais que EXPIRACAO_MS
+// e que não estão com agendamento ativo.
+setInterval(() => {
+  const agora = Date.now();
+  for (const phone of Object.keys(ultimaMensagem)) {
+    if (agendamentosConfirmados[phone]) continue;
+    if (agora - ultimaMensagem[phone] > EXPIRACAO_MS) {
+      delete conversas[phone];
+      delete ultimaMensagem[phone];
+      delete followUpStatus[phone];
+      delete agendamentos[phone];
+      delete mensagensPendentes[phone];
+    }
+  }
+}, 60 * 60 * 1000);
 const DEBOUNCE_MS = 4000;
 const LEMBRETE_2H_MS = 2 * 60 * 60 * 1000;   // primeiro lembrete: 2h antes
 const LEMBRETE_30MIN_MS = 30 * 60 * 1000;     // segundo lembrete: 30min antes (com link)
@@ -140,7 +170,14 @@ const ENCERRAMENTO_MS = 24 * 60 * 60 * 1000;
 const MEU_NUMERO = '5567988885170';
 const CALENDAR_ID = 'comercial@cliqueefecha.com.br';
 
-const serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+let serviceAccountKey;
+try {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY não definida.');
+  serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+} catch (err) {
+  console.error('ERRO FATAL: não foi possível carregar a service account do Google:', err.message);
+  process.exit(1);
+}
 const auth = new google.auth.JWT({
   email: serviceAccountKey.client_email,
   key: serviceAccountKey.private_key,
@@ -349,11 +386,22 @@ async function interpretarPedidoData(texto) {
   const horaCG = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
   const LIMITE_DIAS = 15;
 
-  // 1. Descobrir o DIA pedido (dia da semana ou "dia N")
+  // 1. Descobrir o DIA pedido (hoje/amanhã, dia da semana ou "dia N")
   let diaAlvo = null;
 
-  // a) dia da semana
-  for (const [nome, num] of Object.entries(diasMap)) {
+  // a) hoje / amanhã / depois de amanhã
+  if (/\bhoje\b/.test(t)) {
+    diaAlvo = new Date(horaCG);
+  } else if (/\bdepois\s+de\s+amanh[ãa]\b/.test(t)) {
+    diaAlvo = new Date(horaCG);
+    diaAlvo.setDate(diaAlvo.getDate() + 2);
+  } else if (/\bamanh[ãa]\b/.test(t)) {
+    diaAlvo = new Date(horaCG);
+    diaAlvo.setDate(diaAlvo.getDate() + 1);
+  }
+
+  // b) dia da semana
+  if (!diaAlvo) for (const [nome, num] of Object.entries(diasMap)) {
     if (t.includes(nome)) {
       // próxima ocorrência desse dia da semana (a partir de amanhã)
       const d = new Date(horaCG);
@@ -366,13 +414,13 @@ async function interpretarPedidoData(texto) {
     }
   }
 
-  // b) "dia N" (dia do mês)
+  // c) "dia N" (dia do mês) — busca até 60 dias para cobrir o próximo mês
   if (!diaAlvo) {
     const m = t.match(/\bdia\s+(\d{1,2})\b/) || t.match(/\b(\d{1,2})\s+de\s+\w+/);
     if (m) {
       const numDia = parseInt(m[1], 10);
       const d = new Date(horaCG);
-      for (let i = 0; i <= LIMITE_DIAS; i++) {
+      for (let i = 0; i <= 60; i++) {
         const cand = new Date(d);
         cand.setDate(cand.getDate() + i);
         if (cand.getDate() === numDia) { diaAlvo = cand; break; }
@@ -465,6 +513,10 @@ async function criarEvento(nome, email, telefone, slotInicio, slotFim, resumo = 
 
 // Remarca um evento existente para um novo horário, mantendo o mesmo link do Meet
 async function remarcarEvento(eventId, novoInicio, novoFim) {
+  if (!eventId) {
+    console.error('remarcarEvento: eventId ausente — não é possível remarcar.');
+    return false;
+  }
   try {
     await calendar.events.patch({
       calendarId: CALENDAR_ID,
@@ -744,7 +796,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-4-20250514',
         max_tokens: 10,
         messages: [{
           role: 'user',
@@ -992,9 +1044,20 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       const msgsUsuario = conversas[userPhone]
         .filter(m => m.role === 'user')
         .map(m => textoDoConteudo(m.content));
+      let encontrou = false;
       for (let i = msgsUsuario.length - 1; i >= 0; i--) {
         const escolha = escolherSlot(msgsUsuario[i], slots);
-        if (escolha) { slotEscolhido = escolha; break; }
+        if (escolha) { slotEscolhido = escolha; encontrou = true; break; }
+      }
+      if (!encontrou) {
+        // Fallback: tenta encontrar em todo o histórico concatenado como última tentativa
+        const textoCompleto = msgsUsuario.join(' ');
+        const escolhaGlobal = escolherSlot(textoCompleto, slots);
+        if (escolhaGlobal) {
+          slotEscolhido = escolhaGlobal;
+        } else {
+          console.warn(`[${userPhone}] Slot não identificado explicitamente — usando slots[0] como fallback: ${slots[0].label}`);
+        }
       }
     }
 
@@ -1021,7 +1084,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       const resumoResp = await axios.post(
         'https://api.anthropic.com/v1/messages',
         {
-          model: 'claude-sonnet-4-6',
+          model: 'claude-sonnet-4-20250514',
           max_tokens: 400,
           messages: [
             ...historicoParaResumo,
@@ -1263,7 +1326,7 @@ async function chamarClaude(historico) {
     }
     const response = await axios.post(
       'https://api.anthropic.com/v1/messages',
-      { model: 'claude-sonnet-4-6', max_tokens: 500, messages: historicoEnviado },
+      { model: 'claude-sonnet-4-20250514', max_tokens: 500, messages: historicoEnviado },
       {
         headers: {
           'x-api-key': process.env.ANTHROPIC_API_KEY,
@@ -1468,3 +1531,26 @@ async function enviarMensagem(para, texto) {
   }
   app.listen(process.env.PORT || 3000, () => console.log('Bot rodando!'));
 })();
+
+
+// ============= Graceful Shutdown =============
+async function shutdown(signal) {
+  console.log(`Recebido ${signal} — encerrando graciosamente...`);
+  try {
+    if (typeof pool !== 'undefined' && pool && pool.end) {
+      await pool.end();
+      console.log('Pool do PostgreSQL fechado.');
+    }
+  } catch (e) {
+    console.error('Erro ao fechar pool:', e.message);
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
