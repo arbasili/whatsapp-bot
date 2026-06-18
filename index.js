@@ -163,6 +163,7 @@ setInterval(() => {
 const DEBOUNCE_MS = 4000;
 const LEMBRETE_2H_MS = 2 * 60 * 60 * 1000;   // primeiro lembrete: 2h antes
 const LEMBRETE_30MIN_MS = 30 * 60 * 1000;     // segundo lembrete: 30min antes (com link)
+const LEMBRETE_24H_MS = 24 * 60 * 60 * 1000;  // confirmação de presença: 24h antes
 
 const EXPIRACAO_MS = 24 * 60 * 60 * 1000;
 const EXPIRACAO_ENCERRADO_MS = 30 * 24 * 60 * 60 * 1000; // histórico de lead encerrado: 30 dias
@@ -694,6 +695,7 @@ setInterval(async () => {
       await enviarMensagem(phone, msg);
       ag.lembrete30minEnviado = true;
       ag.lembrete2hEnviado = true; // se já está em cima da hora, não faz sentido o de 2h
+      ag.lembrete24hEnviado = true;
       await persistirLead(phone);
     }
     // Lembrete 2h antes (organização) — respeita horário de silêncio
@@ -702,6 +704,15 @@ setInterval(async () => {
       msg += `\n\nDaqui a pouco te envio o link para entrar. Até já!`;
       await enviarMensagem(phone, msg);
       ag.lembrete2hEnviado = true;
+      ag.lembrete24hEnviado = true;
+      await persistirLead(phone);
+    }
+    // Confirmação de presença 24h antes — só se reunião estiver a mais de 24h do agendamento
+    // e respeita horário de silêncio
+    else if (tempoAteReuniao <= LEMBRETE_24H_MS && !ag.lembrete24hEnviado && !dentroDoHorarioSilencio()) {
+      const msg = `${saud}! Passando para confirmar sua conversa com o especialista da Clique e Fecha amanhã, ${ag.label}. Você consegue comparecer?`;
+      await enviarMensagem(phone, msg);
+      ag.lembrete24hEnviado = true;
       await persistirLead(phone);
     }
    } catch (err) {
@@ -709,6 +720,32 @@ setInterval(async () => {
    }
   }
 }, 5 * 60 * 1000);
+
+const BOT_START_TIME = Date.now();
+let ultimaMensagemProcessada = null; // timestamp da última mensagem processada com sucesso
+
+app.get('/health', (req, res) => {
+  const uptime = Math.floor((Date.now() - BOT_START_TIME) / 1000);
+  const uptimeStr = `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${uptime % 60}s`;
+  const leadsAtivos = Object.keys(ultimaMensagem).length;
+  const leadsAgendadosCount = leadsAgendados.size;
+  const lembretesPendentes = Object.keys(agendamentosConfirmados).length;
+  const ultimaAtividade = ultimaMensagemProcessada
+    ? `${Math.floor((Date.now() - ultimaMensagemProcessada) / 60000)} min atrás`
+    : 'nenhuma desde o início';
+
+  res.json({
+    status: 'ok',
+    uptime: uptimeStr,
+    leads: {
+      ativos: leadsAtivos,
+      agendados: leadsAgendadosCount,
+      lembretesPendentes
+    },
+    ultimaAtividade,
+    timestamp: new Date().toISOString()
+  });
+});
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -874,6 +911,9 @@ async function tratarPosAgendamento(userPhone, userText) {
         ag.label = escolhido.label;
         ag.remarcando = false;
         ag.novosSlots = null;
+        // Recalcula se o novo horário está a menos de 24h
+        const msAteNovoSlot = new Date(escolhido.inicio).getTime() - Date.now();
+        ag.lembrete24hEnviado = msAteNovoSlot < LEMBRETE_24H_MS;
         ag.lembrete2hEnviado = false;
         ag.lembrete30minEnviado = false;
         await atualizarLead(userPhone, { 'Horário': escolhido.label, 'Status': 'Reagendado' });
@@ -928,6 +968,16 @@ async function tratarPosAgendamento(userPhone, userText) {
   }
 
   if (intencao === 'remarcar') {
+    // Limite de remarcações: máximo 2 vezes
+    const totalRemarcacoes = ag.totalRemarcacoes || 0;
+    if (totalRemarcacoes >= 2) {
+      log(userPhone, 'warn', `Limite de remarcações atingido (${totalRemarcacoes})`);
+      await enviarMensagem(userPhone, 'Entendo! Como já remarcamos algumas vezes, vou pedir para nossa equipe entrar em contato diretamente para encontrar o melhor horário para você.');
+      await enviarMensagem(MEU_NUMERO, `*Limite de remarcações atingido*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário atual: ${ag.label}\n\nLead tentou remarcar pela ${totalRemarcacoes + 1}ª vez. Tratar manualmente.`);
+      await atualizarLead(userPhone, { 'Status': 'Remarcação manual necessária' });
+      return true;
+    }
+
     // Buscar novos horários disponíveis
     let novosSlots = [];
     try {
@@ -942,11 +992,11 @@ async function tratarPosAgendamento(userPhone, userText) {
     }
     ag.remarcando = true;
     ag.novosSlots = novosSlots;
+    ag.totalRemarcacoes = totalRemarcacoes + 1;
     await atualizarLead(userPhone, { 'Status': 'Remarcando' });
     const opcoes = novosSlots.length >= 2
       ? `${novosSlots[0].label} ou ${novosSlots[1].label}`
       : novosSlots[0].label;
-    // Referencia o agendamento atual para contextualizar a remarcação
     const refAtual = ag.label ? `Sua conversa está marcada para ${ag.label}.` : 'Sem problema!';
     await enviarMensagem(userPhone, `${refAtual} Vamos remarcar então.`);
     await new Promise(r => setTimeout(r, 1500));
@@ -968,6 +1018,30 @@ function log(phone, nivel, ...args) {
 
 async function processarMensagem(userPhone, userText, imagem = null) {
   log(userPhone, 'info', `Mensagem recebida: "${(userText || '').slice(0, 80)}"${imagem ? ' [+imagem]' : ''}`);
+
+  // Detecção de abuso/spam — antes de qualquer processamento
+  if (userText) {
+    const t = userText.trim();
+    const padraoSpam =
+      // Mensagem muito curta repetida (ex: "aaa", "kkkkk", "...")
+      /^(.)\1{9,}$/.test(t) ||
+      // Injeção de prompt — tentativas de manipular o bot
+      /ignore.{0,30}(instructions?|rules?|prompt)/i.test(t) ||
+      /forget (everything|your|all)/i.test(t) ||
+      /you are now|act as|pretend (you are|to be)|jailbreak/i.test(t) ||
+      /\[system\]|\[prompt\]|\[instrução\]/i.test(t) ||
+      // Mensagem só de caracteres especiais/aleatórios (>10 chars, sem letra)
+      (t.length > 10 && !/[a-záàãâéêíóôõúüçA-Z]/.test(t));
+
+    if (padraoSpam) {
+      log(userPhone, 'warn', `Padrão de abuso detectado — mensagem ignorada: "${t.slice(0, 60)}"`);
+      // Encerra silenciosamente sem responder ao abusador
+      leadsEncerrados.add(userPhone);
+      persistirLead(userPhone).catch(() => {});
+      enviarMensagem(MEU_NUMERO, `*Possível abuso detectado*\n\nWhatsApp: ${userPhone}\nMensagem: "${t.slice(0, 100)}"\n\nLead bloqueado automaticamente.`).catch(() => {});
+      return;
+    }
+  }
 
   // Se o lead estava encerrado e mandou mensagem nova, reativa MANTENDO o histórico
   // para que o bot responda com contexto (remarcar, negociar, dúvida, etc.)
@@ -1239,6 +1313,10 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     delete followUpStatus[userPhone];
 
     // Registrar para lembrete pré-reunião
+    // Verifica se a reunião está a menos de 24h (ex: agendou agora para amanhã cedo)
+    const msAteReuniao = new Date(slotEscolhido.inicio).getTime() - Date.now();
+    const reuniaoEmMenos24h = msAteReuniao < LEMBRETE_24H_MS;
+
     agendamentosConfirmados[userPhone] = {
       nome,
       email: emailLead,
@@ -1246,6 +1324,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       label: slotEscolhido.label,
       meetLink,
       eventId,
+      lembrete24hEnviado: reuniaoEmMenos24h, // se já está em menos de 24h, pula essa etapa
       lembrete2hEnviado: false,
       lembrete30minEnviado: false
     };
@@ -1317,6 +1396,25 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const nomeAtual = extrairNomeLead(conversas[userPhone]);
     if (nomeAtual) {
       atualizarLead(userPhone, { 'Nome': nomeAtual }).catch(e => console.error(`[${userPhone}] atualizarLead nome:`, e.message));
+    }
+
+    // Atualiza status intermediário no funil conforme a etapa da conversa
+    // Detecta pela resposta do bot qual etapa acabou de acontecer
+    const respostaTexto = resposta.toLowerCase();
+    let statusIntermediario = null;
+    if (/faria sentido|marcar uma conversa|conversa rápida/.test(respostaTexto)) {
+      statusIntermediario = 'Proposta feita';
+    } else if (/horários disponíveis|tenho duas opções|qual funciona melhor/.test(respostaTexto)) {
+      statusIntermediario = 'Horários oferecidos';
+    } else if (/posso usar o número|prefere outro/.test(respostaTexto)) {
+      statusIntermediario = 'Confirmando contato';
+    } else if (/qual é o seu email|email para eu registrar/.test(respostaTexto)) {
+      statusIntermediario = 'Aguardando email';
+    } else if (nomeAtual && conversas[userPhone].filter(m => m.role === 'user').length <= 3) {
+      statusIntermediario = 'Qualificando';
+    }
+    if (statusIntermediario) {
+      atualizarLead(userPhone, { 'Status': statusIntermediario }).catch(e => console.error(`[${userPhone}] atualizarLead status:`, e.message));
     }
 
     // Detectar pedido de verificação de data específica
@@ -1447,6 +1545,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
   // Persiste o estado atual do lead no banco
   await persistirLead(userPhone);
+  ultimaMensagemProcessada = Date.now();
 }
 
 async function chamarClaude(historico) {
