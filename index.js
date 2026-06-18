@@ -169,6 +169,27 @@ const EXPIRACAO_ENCERRADO_MS = 30 * 24 * 60 * 60 * 1000; // histórico de lead e
 const FOLLOWUP_1_MS = 2 * 60 * 60 * 1000;
 const FOLLOWUP_2_MS = 24 * 60 * 60 * 1000;
 const ENCERRAMENTO_MS = 24 * 60 * 60 * 1000;
+
+// Horário de silêncio: não envia mensagens entre 20h e 8h (Campo Grande)
+const SILENCIO_INICIO = 20;
+const SILENCIO_FIM = 8;
+
+function dentroDoHorarioSilencio() {
+  const agora = new Date();
+  const hora = parseInt(agora.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/Campo_Grande' }), 10);
+  return hora >= SILENCIO_INICIO || hora < SILENCIO_FIM;
+}
+
+// Retorna o timestamp do próximo momento fora do silêncio (8h do próximo dia útil)
+function proximoHorarioPermitido() {
+  const agora = new Date();
+  const cg = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
+  cg.setHours(SILENCIO_FIM, 0, 0, 0);
+  if (cg <= agora) cg.setDate(cg.getDate() + 1);
+  // Se cair no fim de semana, avança para segunda
+  while (cg.getDay() === 0 || cg.getDay() === 6) cg.setDate(cg.getDate() + 1);
+  return cg;
+}
 const MEU_NUMERO = '5567988885170';
 const CALENDAR_ID = 'comercial@cliqueefecha.com.br';
 
@@ -599,6 +620,8 @@ setInterval(async () => {
       }
     }
 
+    if (dentroDoHorarioSilencio()) continue; // não envia entre 20h e 8h
+
     if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
       const msg = await gerarMsgFollowUp(1);
       await enviarMensagem(phone, msg);
@@ -663,7 +686,7 @@ setInterval(async () => {
 
     const saud = ag.nome ? `Oi ${ag.nome}` : 'Oi';
 
-    // Lembrete 30 min antes (com link) — tem prioridade se ambos estiverem pendentes
+    // Lembrete 30 min antes (com link) — tem prioridade, ignora horário de silêncio
     if (tempoAteReuniao <= LEMBRETE_30MIN_MS && !ag.lembrete30minEnviado) {
       let msg = `${saud}! Sua conversa com o especialista da Clique e Fecha começa em instantes (${ag.label}).`;
       if (ag.meetLink) msg += `\n\nÉ só entrar pelo link do Google Meet: ${ag.meetLink}`;
@@ -673,8 +696,8 @@ setInterval(async () => {
       ag.lembrete2hEnviado = true; // se já está em cima da hora, não faz sentido o de 2h
       await persistirLead(phone);
     }
-    // Lembrete 2h antes (organização)
-    else if (tempoAteReuniao <= LEMBRETE_2H_MS && !ag.lembrete2hEnviado) {
+    // Lembrete 2h antes (organização) — respeita horário de silêncio
+    else if (tempoAteReuniao <= LEMBRETE_2H_MS && !ag.lembrete2hEnviado && !dentroDoHorarioSilencio()) {
       let msg = `${saud}! Passando para lembrar da sua conversa com o especialista da Clique e Fecha hoje, ${ag.label}.`;
       msg += `\n\nDaqui a pouco te envio o link para entrar. Até já!`;
       await enviarMensagem(phone, msg);
@@ -935,7 +958,16 @@ async function tratarPosAgendamento(userPhone, userText) {
   return false;
 }
 
+// Helper de log estruturado por lead
+function log(phone, nivel, ...args) {
+  const tag = `[${phone}]`;
+  if (nivel === 'error') console.error(tag, ...args);
+  else if (nivel === 'warn') console.warn(tag, ...args);
+  else console.log(tag, ...args);
+}
+
 async function processarMensagem(userPhone, userText, imagem = null) {
+  log(userPhone, 'info', `Mensagem recebida: "${(userText || '').slice(0, 80)}"${imagem ? ' [+imagem]' : ''}`);
 
   // Se o lead estava encerrado e mandou mensagem nova, reativa MANTENDO o histórico
   // para que o bot responda com contexto (remarcar, negociar, dúvida, etc.)
@@ -1197,11 +1229,13 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     }
 
     // Avisar que está gerando antes de processar
+    log(userPhone, 'info', `Iniciando agendamento — slot: ${slotEscolhido.label} | email: ${emailLead} | nome: ${nome || 'não identificado'}`);
     await enviarMensagem(userPhone, 'Um segundo, deixa eu confirmar aqui.');
 
     const { meetLink, eventId } = await criarEvento(nome, emailLead, userPhone, slotEscolhido.inicio, slotEscolhido.fim, resumoConversa);
 
     leadsAgendados.add(userPhone);
+    log(userPhone, 'info', `Agendamento confirmado — Meet: ${meetLink || 'não gerado'} | eventId: ${eventId || 'sem id'}`);
     delete followUpStatus[userPhone];
 
     // Registrar para lembrete pré-reunião
@@ -1274,8 +1308,16 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
      processandoAgendamento.delete(userPhone);
    }
   } else {
+    log(userPhone, 'info', `Chamando Claude — histórico: ${conversas[userPhone].length} msgs`);
     const resposta = await chamarClaude(conversas[userPhone]);
+    log(userPhone, 'info', `Resposta Claude: "${resposta.slice(0, 100)}"`);
     conversas[userPhone].push({ role: 'assistant', content: resposta });
+
+    // Atualiza o nome na planilha assim que for identificado (não espera o agendamento)
+    const nomeAtual = extrairNomeLead(conversas[userPhone]);
+    if (nomeAtual) {
+      atualizarLead(userPhone, { 'Nome': nomeAtual }).catch(e => console.error(`[${userPhone}] atualizarLead nome:`, e.message));
+    }
 
     // Detectar pedido de verificação de data específica
     const matchVerificar = resposta.match(/\[VERIFICAR_DATA:\s*([^\]]+)\]/i);
@@ -1352,6 +1394,19 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const deveEncerrar = resposta.includes('[ENCERRAR]');
     const respostaSemMarcador = resposta.replace('[ENCERRAR]', '').trim();
 
+    // Proteção: só encerra se o agendamento já foi oferecido ou o lead já agendou
+    // Evita encerramento prematuro quando o lead diz "obrigado" no início da conversa
+    const agendamentoFoiOferecido = leadsAgendados.has(userPhone) ||
+      (conversas[userPhone] || []).some(m =>
+        m.role === 'assistant' &&
+        /faria sentido|marcar uma conversa|horários disponíveis|posso usar o número|qual é o seu email/i.test(textoDoConteudo(m.content))
+      );
+
+    const encerrarEfetivo = deveEncerrar && agendamentoFoiOferecido;
+    if (deveEncerrar && !agendamentoFoiOferecido) {
+      console.warn(`[${userPhone}] [ENCERRAR] ignorado — agendamento ainda não foi oferecido nesta conversa.`);
+    }
+
     const partes = respostaSemMarcador.split('|||').map(p => p.trim()).filter(Boolean);
     if (partes.length === 3) {
       // Abertura: saudação + apresentação + pergunta do nome
@@ -1369,7 +1424,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       await enviarMensagem(userPhone, respostaSemMarcador);
     }
 
-    if (deveEncerrar) {
+    if (encerrarEfetivo) {
+      log(userPhone, 'info', 'Conversa encerrada.');
       leadsEncerrados.add(userPhone);
       // Marca como encerrado na planilha apenas se não tiver agendado
       if (!leadsAgendados.has(userPhone)) {
@@ -1591,6 +1647,9 @@ async function transcreverAudio(buffer, mimeType) {
   }
 }
 
+// Códigos de erro da Meta que indicam número inválido/inacessível permanentemente
+const ERROS_NUMERO_INVALIDO = new Set([131026, 131047, 131051, 131052]);
+
 async function enviarMensagem(para, texto) {
   try {
     await axios.post(
@@ -1609,7 +1668,20 @@ async function enviarMensagem(para, texto) {
       }
     );
   } catch (err) {
-    console.error('Erro WhatsApp:', err.response?.data || err.message);
+    const codigoErro = err.response?.data?.error?.code;
+    if (codigoErro && ERROS_NUMERO_INVALIDO.has(codigoErro)) {
+      console.warn(`[${para}] Número inválido ou inacessível (código ${codigoErro}) — marcando como inativo.`);
+      // Limpa o lead da memória para não continuar tentando
+      leadsEncerrados.add(para);
+      delete followUpStatus[para];
+      persistirLead(para).catch(() => {});
+      // Notifica o dono apenas se não for uma mensagem para o próprio dono
+      if (para !== MEU_NUMERO) {
+        enviarMensagem(MEU_NUMERO, `*Número inválido detectado*\n\nWhatsApp: ${para}\nCódigo: ${codigoErro}\n\nLead marcado como inativo automaticamente.`).catch(() => {});
+      }
+    } else {
+      console.error(`[${para}] Erro WhatsApp:`, err.response?.data || err.message);
+    }
   }
 }
 
