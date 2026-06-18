@@ -127,6 +127,8 @@ const leadsEncerrados = new Set();
 const mensagensPendentes = {};
 const debounceTimers = {};
 const processandoAgendamento = new Set();
+const mensagensProcessadas = new Set(); // deduplicação de webhooks repetidos da Meta
+const MENSAGENS_PROCESSADAS_MAX = 500; // evita crescimento indefinido
 const agendamentosConfirmados = {}; // { phone: { nome, slotInicio, label, meetLink, lembrete2hEnviado, lembrete30minEnviado } }
 const rateLimit = {}; // { phone: { count, windowStart } }
 const RATE_LIMIT_MAX = 15; // máximo de mensagens por janela
@@ -542,6 +544,8 @@ setInterval(async () => {
     if (leadsAgendados.has(phone) || leadsEncerrados.has(phone)) continue;
     if (!ultimaMensagem[phone]) continue;
     const status = followUpStatus[phone] || { tentativas: 0, ultimoFollowUp: 0 };
+    // Garante que o status está salvo (corrige leads carregados do banco sem followUpStatus)
+    if (!followUpStatus[phone]) followUpStatus[phone] = status;
     const tempoSemResposta = agora - ultimaMensagem[phone];
 
     let nome = 'você';
@@ -550,16 +554,66 @@ setInterval(async () => {
       if (nomeExtraido) nome = nomeExtraido;
     }
 
+    // Gera mensagem de follow-up contextual via Claude
+    async function gerarMsgFollowUp(tentativa) {
+      try {
+        const historico = conversas[phone];
+        if (!historico || historico.length < 3) {
+          // Sem histórico suficiente: mensagem genérica
+          return tentativa === 1
+            ? `Oi ${nome}, tudo bem? Ainda estou por aqui caso queira continuar.`
+            : `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`;
+        }
+        // Pega só a conversa real (sem prompt e ack iniciais), limitada às últimas 10 msgs
+        const historicoReal = historico.slice(2).slice(-10)
+          .map(m => ({ role: m.role, content: textoDoConteudo(m.content) }))
+          .filter(m => m.content && m.content.trim());
+        while (historicoReal.length && historicoReal[0].role !== 'user') historicoReal.shift();
+        if (!historicoReal.length) throw new Error('histórico vazio');
+
+        const instrucao = tentativa === 1
+          ? `Você é o Lucas, do time da Clique e Fecha. O lead parou de responder. Com base na conversa, escreva UMA mensagem curta e natural de follow-up — sem emojis, sem travessão, sem diminutivo. A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases. Assine como Lucas apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
+          : `Você é o Lucas, do time da Clique e Fecha. Esta é a segunda tentativa de retomar contato com o lead que não respondeu. Escreva UMA mensagem curta, calorosa e sem pressão — diferente da primeira tentativa. Sem emojis, sem travessão. Máximo 2 frases. Responda APENAS com o texto da mensagem, sem aspas.`;
+
+        const resp = await axios.post(
+          'https://api.anthropic.com/v1/messages',
+          {
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 120,
+            messages: [
+              ...historicoReal,
+              { role: 'user', content: instrucao }
+            ]
+          },
+          {
+            headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+            timeout: 15000
+          }
+        );
+        return resp.data.content[0].text.trim();
+      } catch (err) {
+        console.error(`Erro ao gerar follow-up contextual (tentativa ${tentativa}):`, err.message);
+        return tentativa === 1
+          ? `Oi ${nome}, tudo bem? Ainda estou por aqui caso queira continuar.`
+          : `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`;
+      }
+    }
+
     if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
-      await enviarMensagem(phone, `Oi ${nome}, tudo bem? Ficou alguma dúvida sobre nossa conversa? Estou por aqui.`);
+      const msg = await gerarMsgFollowUp(1);
+      await enviarMensagem(phone, msg);
       followUpStatus[phone] = { tentativas: 1, ultimoFollowUp: agora };
       await persistirLead(phone);
     } else if (status.tentativas === 1 && agora - status.ultimoFollowUp > FOLLOWUP_2_MS) {
-      await enviarMensagem(phone, `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`);
+      const msg = await gerarMsgFollowUp(2);
+      await enviarMensagem(phone, msg);
       followUpStatus[phone] = { tentativas: 2, ultimoFollowUp: agora };
       await persistirLead(phone);
     } else if (status.tentativas === 2 && agora - status.ultimoFollowUp > ENCERRAMENTO_MS) {
-      await enviarMensagem(phone, `Olá ${nome}, como não tivemos retorno, vou encerrar nosso atendimento por aqui. Se precisar de algo futuramente, é só me chamar. Será um prazer!`);
+      const despedida = nome !== 'você'
+        ? `Olá ${nome}, como não tivemos retorno, vou encerrar nosso atendimento por aqui. Se precisar de algo futuramente, é só me chamar. Será um prazer!`
+        : `Como não tivemos retorno, vou encerrar nosso atendimento por aqui. Se precisar de algo futuramente, é só me chamar!`;
+      await enviarMensagem(phone, despedida);
       await enviarMensagem(MEU_NUMERO, `*Lead encerrado*\n\nNome: ${nome}\nWhatsApp: ${phone}\n\nNão respondeu após 2 tentativas de follow-up.`);
       atualizarLead(phone, { 'Status': 'Encerrado por inatividade' })
         .catch(e => console.error('atualizarLead inatividade:', e.message));
@@ -587,10 +641,23 @@ setInterval(async () => {
     const inicioMs = new Date(ag.slotInicio).getTime();
     const tempoAteReuniao = inicioMs - agora;
 
-    // Se já passou da reunião, limpar registro
+    // Se já passou da reunião — verificar no-show
     if (tempoAteReuniao <= 0) {
-      delete agendamentosConfirmados[phone];
-      await persistirLead(phone);
+      const minutosApos = (agora - inicioMs) / 60000;
+      // Janela de 30–90 min após o início: envia follow-up de no-show uma única vez
+      if (minutosApos >= 30 && minutosApos < 90 && !ag.noShowEnviado) {
+        const saudNS = ag.nome ? `Oi ${ag.nome}` : 'Oi';
+        await enviarMensagem(phone, `${saudNS}, sentimos sua falta na conversa de hoje. Aconteceu alguma coisa? Se quiser remarcar, é só me falar e a gente encontra um novo horário.`);
+        await enviarMensagem(MEU_NUMERO, `*Possível no-show*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${phone}\nHorário: ${ag.label}\n\nLead não apareceu na reunião. Mensagem de retomada enviada automaticamente.`);
+        atualizarLead(phone, { 'Status': 'No-show' }).catch(e => console.error('atualizarLead no-show:', e.message));
+        ag.noShowEnviado = true;
+        await persistirLead(phone);
+      }
+      // Após 90 min: limpa o registro de agendamento
+      if (minutosApos >= 90) {
+        delete agendamentosConfirmados[phone];
+        await persistirLead(phone);
+      }
       continue;
     }
 
@@ -640,6 +707,21 @@ app.post('/webhook', async (req, res) => {
   const changes = req.body?.entry?.[0]?.changes?.[0]?.value;
   const message = changes?.messages?.[0];
   if (!message) return res.sendStatus(200);
+
+  // Deduplicação: a Meta pode entregar o mesmo webhook mais de uma vez
+  const msgId = message.id;
+  if (msgId) {
+    if (mensagensProcessadas.has(msgId)) {
+      console.log(`Webhook duplicado ignorado: ${msgId}`);
+      return res.sendStatus(200);
+    }
+    mensagensProcessadas.add(msgId);
+    // Limpa o Set quando ficar grande demais
+    if (mensagensProcessadas.size > MENSAGENS_PROCESSADAS_MAX) {
+      const arr = [...mensagensProcessadas];
+      arr.slice(0, 100).forEach(id => mensagensProcessadas.delete(id));
+    }
+  }
 
   const userPhone = message.from;
 
@@ -710,9 +792,9 @@ app.post('/webhook', async (req, res) => {
     delete agendamentosConfirmados[userPhone];
   }
   ultimaMensagem[userPhone] = agora;
-  if (followUpStatus[userPhone]) {
-    followUpStatus[userPhone] = { tentativas: 0, ultimoFollowUp: 0 };
-  }
+  // Sempre inicializa/reseta o followUpStatus ao receber mensagem
+  // (antes só resetava se já existia — bug que impedia o primeiro follow-up)
+  followUpStatus[userPhone] = { tentativas: 0, ultimoFollowUp: 0 };
 
   // Imagem é processada imediatamente, fora do debounce de texto
   if (imagemPendente) {
@@ -803,7 +885,7 @@ async function tratarPosAgendamento(userPhone, userText) {
           content: `Um cliente tem uma reunião agendada e enviou esta mensagem: "${userText}".\n\nClassifique a intenção dele em UMA palavra, escolhendo entre:\n- CONFIRMAR (ele confirma que vai comparecer)\n- REMARCAR (ele não pode ir, quer cancelar, remarcar ou mudar o horário)\n- DUVIDA (qualquer outra coisa, pergunta ou comentário)\n\nResponda apenas a palavra.`
         }]
       },
-      { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
+      { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 15000 }
     );
     const r = resp.data.content[0].text.trim().toUpperCase();
     if (r.includes('CONFIRMAR')) intencao = 'confirmar';
@@ -1091,10 +1173,9 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
             { role: 'user', content: 'Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "...", "dor": "...", "urgencia": "imediata ou futura", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}. Se algum campo não estiver claro na conversa, use string vazia.' }
           ]
         },
-        { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' } }
+        { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 20000 }
       );
       const textoResp = resumoResp.data.content[0].text.trim();
-      // Extrai o primeiro bloco JSON do texto (mesmo que venha com texto ao redor)
       const jsonMatch = textoResp.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         try {
@@ -1313,32 +1394,42 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 }
 
 async function chamarClaude(historico) {
-  try {
-    // Limita o histórico para controlar custo/memória: mantém o prompt inicial (2 primeiras)
-    // e as últimas mensagens da conversa.
-    const MAX_MSGS_RECENTES = 30;
-    let historicoEnviado = historico;
-    if (historico.length > MAX_MSGS_RECENTES + 2) {
-      historicoEnviado = [
-        ...historico.slice(0, 2),
-        ...historico.slice(-(MAX_MSGS_RECENTES))
-      ];
-    }
-    const response = await axios.post(
-      'https://api.anthropic.com/v1/messages',
-      { model: 'claude-sonnet-4-20250514', max_tokens: 500, messages: historicoEnviado },
-      {
-        headers: {
-          'x-api-key': process.env.ANTHROPIC_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json'
+  const MAX_MSGS_RECENTES = 30;
+  let historicoEnviado = historico;
+  if (historico.length > MAX_MSGS_RECENTES + 2) {
+    historicoEnviado = [
+      ...historico.slice(0, 2),
+      ...historico.slice(-(MAX_MSGS_RECENTES))
+    ];
+  }
+
+  const MAX_TENTATIVAS = 3;
+  for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+    try {
+      const response = await axios.post(
+        'https://api.anthropic.com/v1/messages',
+        { model: 'claude-sonnet-4-20250514', max_tokens: 500, messages: historicoEnviado },
+        {
+          headers: {
+            'x-api-key': process.env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json'
+          },
+          timeout: 25000
         }
+      );
+      return response.data.content[0].text;
+    } catch (err) {
+      const status = err.response?.status;
+      const reintentavel = !status || status === 429 || status >= 500;
+      console.error(`Erro Claude (tentativa ${tentativa}/${MAX_TENTATIVAS}):`, err.response?.data || err.message);
+      if (tentativa < MAX_TENTATIVAS && reintentavel) {
+        const espera = tentativa * 2000; // 2s, 4s
+        await new Promise(r => setTimeout(r, espera));
+        continue;
       }
-    );
-    return response.data.content[0].text;
-  } catch (err) {
-    console.error('Erro Claude:', err.response?.data || err.message);
-    return 'Desculpe, tive um problema técnico. Pode tentar novamente em instantes?';
+      return 'Desculpe, tive um problema técnico. Pode tentar novamente em instantes?';
+    }
   }
 }
 
