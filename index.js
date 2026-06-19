@@ -1114,7 +1114,11 @@ NÚMERO DO CLIENTE: ${userPhone}
 NOME DO PERFIL DO WHATSAPP: ${nomeDoWebhook || 'não disponível'}
 HORÁRIOS DISPONÍVEIS NA AGENDA: ${opcoesHorario}
 
-${nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o nome do lead pode ser "${nomeDoWebhook}" (vindo do perfil do WhatsApp). Na primeira mensagem, em vez de perguntar o nome, use o formato de 3 partes com "|||" mas substitua a última parte por: "Posso te chamar de ${nomeDoWebhook}?" — Se o lead confirmar, use esse nome. Se corrigir, use o nome que ele informar.` : ''}
+MARCADOR DE NOME — OBRIGATÓRIO:
+Assim que souber o nome do lead (seja porque ele informou, confirmou ou corrigiu), inclua na sua resposta o marcador exato: [NOME: PrimeiroNome]
+Exemplo: se o lead disse que se chama João Silva, inclua [NOME: João] em algum lugar da mensagem. O sistema remove esse marcador automaticamente antes de enviar ao lead — não precisa se preocupar em escondê-lo ou explicá-lo, apenas inclua o marcador de forma direta. Faça isso UMA única vez, assim que o nome for confirmado. Nunca repita o marcador.
+
+${nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o nome do lead pode ser "${nomeDoWebhook}" (vindo do perfil do WhatsApp). Na primeira mensagem, em vez de perguntar o nome, use o formato de 3 partes com "|||" mas substitua a última parte por: "Posso te chamar de ${nomeDoWebhook}?" — Se o lead confirmar, inclua [NOME: ${nomeDoWebhook}] na resposta. Se corrigir, use o nome que ele informar e inclua [NOME: NomeCorrigido].` : ''}
 
 SOBRE A EMPRESA:
 Serviços: automações de processos, chatbots personalizados e soluções de atendimento automatizado.
@@ -1157,6 +1161,9 @@ Após a resposta sobre urgência, responda em EXATAMENTE 2 partes separadas pelo
 
 A partir daqui, siga esta sequência obrigatória, uma mensagem por vez:
 b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
+
+MARCADOR DE SLOT — OBRIGATÓRIO: Quando o lead escolher um horário (qualquer resposta indicando preferência por um dos slots, mesmo indireta como "pode ser" ou "esse mesmo"), inclua na sua resposta o marcador exato com o horário completo escolhido: [SLOT: label completo do slot escolhido]
+Exemplo: se os slots são "quinta-feira, 19 de junho às 9h" e "sexta-feira, 20 de junho às 14h", e o lead escolheu o segundo, inclua [SLOT: sexta-feira, 20 de junho às 14h]. Use o label EXATO como foi oferecido, sem alterar texto. O sistema remove esse marcador automaticamente antes de enviar ao lead. Faça isso UMA única vez, logo após o lead confirmar o horário — é essencial mesmo que a confirmação seja vaga (ex: "pode sim", "tá bom"), pois é o que garante que o agendamento real bata com o horário correto.
 
 DATA ESPECÍFICA PEDIDA PELO LEAD: se em qualquer momento da etapa de agendamento o lead pedir um dia ou horário específico diferente das opções oferecidas (por exemplo "pode ser sexta?", "prefiro quinta às 15h", "dia 20 de manhã", "tem na segunda?"), NÃO responda você mesmo sobre disponibilidade. Em vez disso, responda APENAS com o marcador no formato exato: [VERIFICAR_DATA: texto do que o lead pediu]. Exemplo: se o lead diz "pode ser sexta às 15h", responda somente "[VERIFICAR_DATA: sexta às 15h]". O sistema vai checar a agenda real e cuidar da resposta. Não escreva mais nada junto com esse marcador.
 
@@ -1253,9 +1260,16 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       .map(m => textoDoConteudo(m.content))
       .join(' ')
       .toLowerCase();
-    let slotEscolhido = slots[0];
-    if (slots[1]) {
-      // Procura a escolha do lead nas mensagens dele (da mais recente para a mais antiga)
+    // Fonte primária: slot confirmado via marcador [SLOT: X] durante a conversa
+    // Fallback: heurística por texto das mensagens do lead
+    let slotEscolhido = agendamentos[userPhone]?.slotConfirmado || slots[0];
+    if (!agendamentos[userPhone]?.slotConfirmado && slots.length === 1) {
+      // Só há um slot disponível (ex: veio de uma data específica via VERIFICAR_DATA)
+      slotEscolhido = slots[0];
+      log(userPhone, 'info', `Único slot disponível, selecionado automaticamente: ${slotEscolhido.label}`);
+    } else if (!agendamentos[userPhone]?.slotConfirmado && slots[1]) {
+      // Procura a escolha do lead APENAS nas mensagens dele (nunca do bot)
+      // Evita confundir horários que o bot mencionou na oferta com a escolha real do lead
       const msgsUsuario = conversas[userPhone]
         .filter(m => m.role === 'user')
         .map(m => textoDoConteudo(m.content));
@@ -1265,14 +1279,25 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
         if (escolha) { slotEscolhido = escolha; encontrou = true; break; }
       }
       if (!encontrou) {
-        // Fallback: tenta encontrar em todo o histórico concatenado como última tentativa
+        // Fallback 1: texto completo das mensagens do lead
         const textoCompleto = msgsUsuario.join(' ');
         const escolhaGlobal = escolherSlot(textoCompleto, slots);
         if (escolhaGlobal) {
           slotEscolhido = escolhaGlobal;
-        } else {
-          console.warn(`[${userPhone}] Slot não identificado explicitamente — usando slots[0] como fallback: ${slots[0].label}`);
+          encontrou = true;
         }
+      }
+      if (!encontrou) {
+        // Fallback 2: lead confirmou sem mencionar horário (ex: "pode ser", "sim", "pode")
+        // Neste caso, usa a última menção de horário nas mensagens do BOT
+        const msgsBot = conversas[userPhone]
+          .filter(m => m.role === 'assistant')
+          .map(m => textoDoConteudo(m.content));
+        for (let i = msgsBot.length - 1; i >= 0; i--) {
+          const escolha = escolherSlot(msgsBot[i], slots);
+          if (escolha) { slotEscolhido = escolha; break; }
+        }
+        log(userPhone, 'warn', `Slot não identificado nas msgs do lead — usando última menção do bot: ${slotEscolhido.label}`);
       }
     }
 
@@ -1280,7 +1305,9 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const emailLead = emailMatch ? emailMatch.find(e => !e.includes('cliqueefecha')) || emailMatch[0] : '';
 
     // Extrair nome direto do histórico
-    const nome = extrairNomeLead(conversas[userPhone]);
+    // Fonte primária: nome capturado via marcador [NOME: X] durante a conversa
+    // Fallback: extração por heurística do histórico
+    const nome = agendamentos[userPhone]?.nomeConfirmado || extrairNomeLead(conversas[userPhone]);
 
     // Gerar resumo + campos estruturados com Claude
     let resumoConversa = 'Resumo não disponível';
@@ -1444,6 +1471,31 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       atualizarLead(userPhone, { 'Status': statusIntermediario }).catch(e => console.error(`[${userPhone}] atualizarLead status:`, e.message));
     }
 
+    // Detectar marcador de nome [NOME: X] emitido pelo Claude
+    const matchNome = resposta.match(/\[NOME:\s*([^\]]+)\]/i);
+    if (matchNome) {
+      const nomeCapturado = matchNome[1].trim();
+      log(userPhone, 'info', `Nome capturado via marcador: ${nomeCapturado}`);
+      if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
+      agendamentos[userPhone].nomeConfirmado = nomeCapturado;
+      atualizarLead(userPhone, { 'Nome': nomeCapturado }).catch(e => console.error(`[${userPhone}] atualizarLead nome marcador:`, e.message));
+    }
+
+    // Detectar marcador de slot [SLOT: label] emitido pelo Claude
+    const matchSlot = resposta.match(/\[SLOT:\s*([^\]]+)\]/i);
+    if (matchSlot) {
+      const labelEscolhido = matchSlot[1].trim();
+      const slots = agendamentos[userPhone]?.slots || [];
+      const slotEncontrado = slots.find(s => s.label.toLowerCase() === labelEscolhido.toLowerCase());
+      if (slotEncontrado) {
+        if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
+        agendamentos[userPhone].slotConfirmado = slotEncontrado;
+        log(userPhone, 'info', `Slot confirmado via marcador: ${slotEncontrado.label}`);
+      } else {
+        log(userPhone, 'warn', `Slot do marcador não encontrado nos slots disponíveis: ${labelEscolhido}`);
+      }
+    }
+
     // Detectar pedido de verificação de data específica
     const matchVerificar = resposta.match(/\[VERIFICAR_DATA:\s*([^\]]+)\]/i);
     if (matchVerificar) {
@@ -1452,6 +1504,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
       // Garante que a estrutura de agendamento exista
       if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
+      // Limpa slotConfirmado anterior: os slots vão mudar, qualquer confirmação prévia é inválida
+      delete agendamentos[userPhone].slotConfirmado;
 
       if (resultado.tipo === 'completo') {
         // Dia e hora livres: adiciona como opção escolhível e confirma
@@ -1517,7 +1571,12 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
     // Encerramento pode vir em qualquer formato — detectar antes de tudo
     const deveEncerrar = resposta.includes('[ENCERRAR]');
-    const respostaSemMarcador = resposta.replace('[ENCERRAR]', '').trim();
+    const respostaSemMarcador = resposta
+      .replace('[ENCERRAR]', '')
+      .replace(/\[NOME:\s*[^\]]+\]/gi, '')
+      .replace(/\[SLOT:\s*[^\]]+\]/gi, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
 
     // Proteção: só encerra se o agendamento já foi oferecido ou o lead já agendou
     // Evita encerramento prematuro quando o lead diz "obrigado" no início da conversa
@@ -1687,18 +1746,47 @@ function escolherSlot(texto, slots) {
 
 function extrairNomeLead(conversa) {
   if (!conversa) return '';
+
+  // Palavras de confirmação — quando o lead responde isso após "posso te chamar de X",
+  // significa que confirmou o nome X, não que seu nome é a palavra de confirmação
+  const CONFIRMACOES = new Set(['sim', 'pode', 'claro', 'isso', 'correto', 'exato', 'isso mesmo',
+    'pode sim', 'com certeza', 'ok', 'isso aí', 'perfeito', 'certo', 'é isso', 'é']);
+
   for (let i = 0; i < conversa.length - 1; i++) {
     const conteudo = textoDoConteudo(conversa[i].content).toLowerCase().replace(/\|\|\|/g, ' ');
     const perguntouNome = PERGUNTAS_NOME.some(p => conteudo.includes(p));
     if (perguntouNome && conversa[i+1] && conversa[i+1].role === 'user') {
-      const palavras = textoDoConteudo(conversa[i+1].content).trim().split(/\s+/);
+      const respostaLead = textoDoConteudo(conversa[i+1].content).trim();
+      const respostaLower = respostaLead.toLowerCase();
+
+      // Se a pergunta foi "posso te chamar de X?" e o lead confirmou,
+      // extrai o nome X diretamente da pergunta do bot
+      if (conteudo.includes('posso te chamar de')) {
+        const ehConfirmacaoPura = CONFIRMACOES.has(respostaLower) ||
+          (respostaLower.split(/\s+/).length <= 2 &&
+           [...CONFIRMACOES].some(c => respostaLower.startsWith(c)) &&
+           !respostaLower.match(/[a-záàãâéêíóôõúüç]{3,}/g)?.some(p => !CONFIRMACOES.has(p)));
+        if (ehConfirmacaoPura) {
+          // Lead confirmou o nome sugerido — extrai da pergunta do bot
+          const matchNome = conteudo.match(/posso te chamar de ([a-záàãâéêíóôõúüç]+)/i);
+          if (matchNome) {
+            const nomeConfirmado = matchNome[1].trim();
+            return nomeConfirmado.charAt(0).toUpperCase() + nomeConfirmado.slice(1).toLowerCase();
+          }
+        }
+        // Se não foi confirmação pura, cai no fluxo normal abaixo (extrai da resposta do lead)
+      }
+
+      // Caso normal: extrai o nome da resposta do lead
+      const palavras = respostaLead.split(/\s+/);
       for (const palavra of palavras) {
         const limpa = palavra.replace(/[.,!?;:]/g, '');
         const ehNome = limpa &&
           !limpa.includes('@') &&
           limpa.length > 1 && limpa.length < 30 &&
           !/\d/.test(limpa) &&
-          !PALAVRAS_NAO_NOME.has(limpa.toLowerCase());
+          !PALAVRAS_NAO_NOME.has(limpa.toLowerCase()) &&
+          !CONFIRMACOES.has(limpa.toLowerCase());
         if (ehNome) {
           return limpa.charAt(0).toUpperCase() + limpa.slice(1).toLowerCase();
         }
