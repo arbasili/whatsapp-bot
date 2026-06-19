@@ -310,12 +310,25 @@ async function atualizarLead(phone, dados) {
   }
 }
 
+// Campo Grande (Mato Grosso do Sul) é UTC-04:00 o ano todo — sem horário de verão desde 2019.
+// Constrói um Date correto para uma data + hora local de Campo Grande,
+// independente do fuso do servidor (Railway roda em UTC).
+const OFFSET_CG = '-04:00';
+function horarioCampoGrande(dia, hora) {
+  // Extrai ano, mês e dia no fuso de Campo Grande
+  const ano = dia.toLocaleString('en-US', { year: 'numeric', timeZone: 'America/Campo_Grande' });
+  const mes = dia.toLocaleString('en-US', { month: '2-digit', timeZone: 'America/Campo_Grande' });
+  const diaMes = dia.toLocaleString('en-US', { day: '2-digit', timeZone: 'America/Campo_Grande' });
+  const horaStr = String(hora).padStart(2, '0');
+  // Monta ISO com offset explícito de Campo Grande
+  return new Date(`${ano}-${mes}-${diaMes}T${horaStr}:00:00${OFFSET_CG}`);
+}
+
 async function buscarSlotDisponivel(dia, periodos) {
   const agoraMs = Date.now();
   const margemMs = 2 * 60 * 60 * 1000; // exige 2h de antecedência mínima
   for (const hora of periodos) {
-    const inicio = new Date(dia);
-    inicio.setHours(hora, 0, 0, 0);
+    const inicio = horarioCampoGrande(dia, hora);
     // Proteção central: nunca oferecer horário que já passou ou está em cima da hora
     if (inicio.getTime() - agoraMs < margemMs) continue;
     const fim = new Date(inicio);
@@ -354,7 +367,6 @@ function proximoDiaUtil(data, offset = 1) {
 async function buscarHorariosDisponiveis() {
   const agora = new Date();
   const horaCG = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
-  const minAntes = new Date(horaCG.getTime() + 2 * 60 * 60 * 1000);
 
   const manha = [9, 10, 11];
   const tarde = [14, 15, 16, 17];
@@ -365,9 +377,8 @@ async function buscarHorariosDisponiveis() {
 
   const diaSemanaHoje = horaCG.getDay();
   if (diaSemanaHoje >= 1 && diaSemanaHoje <= 5) {
-    const manhaFiltrada = manha.filter(h => { const t = new Date(horaCG); t.setHours(h, 0, 0, 0); return t > minAntes; });
-    const tardeFiltrada = tarde.filter(h => { const t = new Date(horaCG); t.setHours(h, 0, 0, 0); return t > minAntes; });
-    slot1 = await buscarSlotDisponivel(horaCG, manhaFiltrada) || await buscarSlotDisponivel(horaCG, tardeFiltrada);
+    // buscarSlotDisponivel já filtra horários com menos de 2h de antecedência internamente
+    slot1 = await buscarSlotDisponivel(horaCG, manha) || await buscarSlotDisponivel(horaCG, tarde);
     if (slot1) diaSlot1 = horaCG;
   }
 
@@ -473,8 +484,7 @@ async function interpretarPedidoData(texto) {
     // tem hora específica: validar se está na grade e livre
     if (!todos.includes(horaAlvo)) return { tipo: 'ocupado' };
     // Não permitir horário que já passou (com margem de 2h para preparação)
-    const inicioAlvo = new Date(diaAlvo);
-    inicioAlvo.setHours(horaAlvo, 0, 0, 0);
+    const inicioAlvo = horarioCampoGrande(diaAlvo, horaAlvo);
     const minAntes = new Date(horaCG.getTime() + 2 * 60 * 60 * 1000);
     if (inicioAlvo < minAntes) return { tipo: 'ocupado' };
     const slot = await buscarSlotDisponivel(diaAlvo, [horaAlvo]);
@@ -1162,8 +1172,9 @@ Após a resposta sobre urgência, responda em EXATAMENTE 2 partes separadas pelo
 A partir daqui, siga esta sequência obrigatória, uma mensagem por vez:
 b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
 
-MARCADOR DE SLOT — OBRIGATÓRIO: Quando o lead escolher um horário (qualquer resposta indicando preferência por um dos slots, mesmo indireta como "pode ser" ou "esse mesmo"), inclua na sua resposta o marcador exato com o horário completo escolhido: [SLOT: label completo do slot escolhido]
-Exemplo: se os slots são "quinta-feira, 19 de junho às 9h" e "sexta-feira, 20 de junho às 14h", e o lead escolheu o segundo, inclua [SLOT: sexta-feira, 20 de junho às 14h]. Use o label EXATO como foi oferecido, sem alterar texto. O sistema remove esse marcador automaticamente antes de enviar ao lead. Faça isso UMA única vez, logo após o lead confirmar o horário — é essencial mesmo que a confirmação seja vaga (ex: "pode sim", "tá bom"), pois é o que garante que o agendamento real bata com o horário correto.
+MARCADOR DE SLOT — OBRIGATÓRIO: Quando o lead escolher ou confirmar um horário (qualquer resposta indicando aceitação de um slot, mesmo indireta como "pode ser", "esse mesmo", "pode", "tá bom"), inclua na sua resposta o marcador exato com o horário completo escolhido: [SLOT: label completo do slot escolhido]
+Exemplo: se os slots são "quinta-feira, 19 de junho às 9h" e "sexta-feira, 20 de junho às 14h", e o lead escolheu o segundo, inclua [SLOT: sexta-feira, 20 de junho às 14h]. Use o label EXATO como foi oferecido, sem alterar texto. O sistema remove esse marcador automaticamente antes de enviar ao lead. Faça isso UMA única vez, logo após o lead confirmar o horário — é essencial mesmo que a confirmação seja vaga (ex: "pode sim", "tá bom", "pode"), pois é o que garante que o agendamento real bata com o horário correto.
+IMPORTANTE: isso também vale quando o SISTEMA ofereceu um horário específico na mensagem anterior (ex: "Tenho segunda-feira, 22 de junho às 14h disponível. Posso reservar?") e o lead confirmou. Nesse caso, emita [SLOT: segunda-feira, 22 de junho às 14h] com o horário que foi oferecido, e avance para confirmar o WhatsApp. NUNCA volte a oferecer horários que já foram aceitos.
 
 DATA ESPECÍFICA PEDIDA PELO LEAD: se em qualquer momento da etapa de agendamento o lead pedir um dia ou horário específico diferente das opções oferecidas (por exemplo "pode ser sexta?", "prefiro quinta às 15h", "dia 20 de manhã", "tem na segunda?"), NÃO responda você mesmo sobre disponibilidade. Em vez disso, responda APENAS com o marcador no formato exato: [VERIFICAR_DATA: texto do que o lead pediu]. Exemplo: se o lead diz "pode ser sexta às 15h", responda somente "[VERIFICAR_DATA: sexta às 15h]". O sistema vai checar a agenda real e cuidar da resposta. Não escreva mais nada junto com esse marcador.
 
@@ -1510,7 +1521,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       if (resultado.tipo === 'completo') {
         // Dia e hora livres: adiciona como opção escolhível e confirma
         agendamentos[userPhone].slots = [resultado.slot];
-        await enviarMensagem(userPhone, `Tenho ${resultado.slot.label} disponível. Posso reservar esse horário para você?`);
+        await enviarERegistrar(userPhone, `Tenho ${resultado.slot.label} disponível. Posso reservar esse horário para você?`);
       } else if (resultado.tipo === 'sohdia') {
         // Só o dia (ou período): oferecer horários concretos disponíveis nesse dia
         const dia = new Date(resultado.dia);
@@ -1535,19 +1546,19 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
         if (opcoesDia.length >= 2) {
           agendamentos[userPhone].slots = opcoesDia;
-          await enviarMensagem(userPhone, `Para ${nomeDia}, tenho ${opcoesDia[0].label.split(' às ')[1]} ou ${opcoesDia[1].label.split(' às ')[1]}. Qual funciona melhor para você?`);
+          await enviarERegistrar(userPhone, `Para ${nomeDia}, tenho ${opcoesDia[0].label.split(' às ')[1]} ou ${opcoesDia[1].label.split(' às ')[1]}. Qual funciona melhor para você?`);
         } else if (opcoesDia.length === 1) {
           agendamentos[userPhone].slots = opcoesDia;
-          await enviarMensagem(userPhone, `Para ${nomeDia}, tenho disponível às ${opcoesDia[0].label.split(' às ')[1]}. Posso reservar para você?`);
+          await enviarERegistrar(userPhone, `Para ${nomeDia}, tenho disponível às ${opcoesDia[0].label.split(' às ')[1]}. Posso reservar para você?`);
         } else {
           // Nenhum horário livre nesse dia: oferece alternativas gerais
           let alternativas = [];
           try { alternativas = await buscarHorariosDisponiveis(); } catch (e) { console.error(e.message); }
           if (alternativas.length >= 2) {
             agendamentos[userPhone].slots = alternativas;
-            await enviarMensagem(userPhone, `Nesse dia eu não tenho horário livre. As opções mais próximas são: ${alternativas[0].label} ou ${alternativas[1].label}. Alguma funciona para você?`);
+            await enviarERegistrar(userPhone, `Nesse dia eu não tenho horário livre. As opções mais próximas são: ${alternativas[0].label} ou ${alternativas[1].label}. Alguma funciona para você?`);
           } else {
-            await enviarMensagem(userPhone, 'Nesse dia eu não tenho horário livre. Pode me sugerir outro dia?');
+            await enviarERegistrar(userPhone, 'Nesse dia eu não tenho horário livre. Pode me sugerir outro dia?');
           }
         }
       } else {
@@ -1556,12 +1567,12 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
         try { alternativas = await buscarHorariosDisponiveis(); } catch (e) { console.error(e.message); }
         if (alternativas.length >= 2) {
           agendamentos[userPhone].slots = alternativas;
-          await enviarMensagem(userPhone, `Nesse horário eu não tenho disponibilidade. As opções mais próximas que tenho são: ${alternativas[0].label} ou ${alternativas[1].label}. Alguma funciona para você?`);
+          await enviarERegistrar(userPhone, `Nesse horário eu não tenho disponibilidade. As opções mais próximas que tenho são: ${alternativas[0].label} ou ${alternativas[1].label}. Alguma funciona para você?`);
         } else if (alternativas.length === 1) {
           agendamentos[userPhone].slots = alternativas;
-          await enviarMensagem(userPhone, `Nesse horário eu não tenho disponibilidade. O horário mais próximo que tenho é ${alternativas[0].label}. Funciona para você?`);
+          await enviarERegistrar(userPhone, `Nesse horário eu não tenho disponibilidade. O horário mais próximo que tenho é ${alternativas[0].label}. Funciona para você?`);
         } else {
-          await enviarMensagem(userPhone, 'Nesse horário eu não tenho disponibilidade no momento. Pode me sugerir outro dia ou horário?');
+          await enviarERegistrar(userPhone, 'Nesse horário eu não tenho disponibilidade no momento. Pode me sugerir outro dia ou horário?');
         }
       }
 
@@ -1863,6 +1874,16 @@ async function transcreverAudio(buffer, mimeType) {
 
 // Códigos de erro da Meta que indicam número inválido/inacessível permanentemente
 const ERROS_NUMERO_INVALIDO = new Set([131026, 131047, 131051, 131052]);
+
+// Envia uma mensagem ao lead E registra no histórico da conversa como assistant.
+// Usado quando o CÓDIGO (não o Claude) gera a mensagem — garante que o Claude
+// tenha contexto do que foi dito e não repita ofertas ou se perca no fluxo.
+async function enviarERegistrar(userPhone, texto) {
+  await enviarMensagem(userPhone, texto);
+  if (conversas[userPhone]) {
+    conversas[userPhone].push({ role: 'assistant', content: texto });
+  }
+}
 
 async function enviarMensagem(para, texto) {
   try {
