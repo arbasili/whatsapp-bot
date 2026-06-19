@@ -774,6 +774,8 @@ app.post('/webhook', async (req, res) => {
   }
 
   const userPhone = message.from;
+  // Nome do perfil do WhatsApp — vem no campo contacts[0].profile.name
+  const nomePerfilWhatsApp = changes?.contacts?.[0]?.profile?.name || '';
 
   // Aceitar texto e imagem; outros tipos recebem aviso amigável
   let userText = null;
@@ -858,7 +860,7 @@ app.post('/webhook', async (req, res) => {
       clearTimeout(debounceTimers[userPhone]);
       delete debounceTimers[userPhone];
     }
-    processarMensagem(userPhone, textoAcumulado, imagemPendente).catch(err =>
+    processarMensagem(userPhone, textoAcumulado, imagemPendente, nomePerfilWhatsApp).catch(err =>
       console.error('Erro ao processar imagem:', err.message)
     );
     return res.sendStatus(200);
@@ -876,7 +878,7 @@ app.post('/webhook', async (req, res) => {
     delete debounceTimers[userPhone];
     if (!pendentes || pendentes.length === 0) return;
     const textoAcumulado = pendentes.join(' ');
-    processarMensagem(userPhone, textoAcumulado).catch(err =>
+    processarMensagem(userPhone, textoAcumulado, null, nomePerfilWhatsApp).catch(err =>
       console.error('Erro ao processar mensagem:', err.message)
     );
   }, DEBOUNCE_MS);
@@ -1006,8 +1008,21 @@ function log(phone, nivel, ...args) {
   else console.log(tag, ...args);
 }
 
-async function processarMensagem(userPhone, userText, imagem = null) {
-  log(userPhone, 'info', `Mensagem recebida: "${(userText || '').slice(0, 80)}"${imagem ? ' [+imagem]' : ''}`);
+async function processarMensagem(userPhone, userText, imagem = null, nomePerfil = '') {
+  log(userPhone, 'info', `Mensagem recebida: "${(userText || '').slice(0, 80)}"${imagem ? ' [+imagem]' : ''}${nomePerfil ? ` | perfil: ${nomePerfil}` : ''}`);
+
+  // Valida o nome vindo do perfil do WhatsApp
+  // Considera inválido: vazio, muito curto, só números, nomes genéricos de dispositivo
+  const NOMES_GENERICOS = new Set(['iphone', 'android', 'samsung', 'motorola', 'xiaomi', 'whatsapp', 'meu whatsapp', 'celular', 'smartphone']);
+  function nomePerfilValido(nome) {
+    if (!nome || nome.trim().length < 2) return false;
+    const n = nome.trim().toLowerCase();
+    if (/^\d+$/.test(n)) return false;
+    if (NOMES_GENERICOS.has(n)) return false;
+    if (n.length > 50) return false;
+    return true;
+  }
+  const nomeDoWebhook = nomePerfilValido(nomePerfil) ? nomePerfil.trim().split(' ')[0] : '';
 
   // Detecção de abuso/spam — antes de qualquer processamento
   if (userText) {
@@ -1077,7 +1092,10 @@ async function processarMensagem(userPhone, userText, imagem = null) {
 Seu objetivo é qualificar o lead e agendar uma conversa gratuita com um especialista da Clique e Fecha.
 
 NÚMERO DO CLIENTE: ${userPhone}
+NOME DO PERFIL DO WHATSAPP: ${nomeDoWebhook || 'não disponível'}
 HORÁRIOS DISPONÍVEIS NA AGENDA: ${opcoesHorario}
+
+${nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o nome do lead pode ser "${nomeDoWebhook}" (vindo do perfil do WhatsApp). Na primeira mensagem, em vez de perguntar o nome, use o formato de 3 partes com "|||" mas substitua a última parte por: "Posso te chamar de ${nomeDoWebhook}?" — Se o lead confirmar, use esse nome. Se corrigir, use o nome que ele informar.` : ''}
 
 SOBRE A EMPRESA:
 Serviços: automações de processos, chatbots personalizados e soluções de atendimento automatizado.
@@ -1586,7 +1604,7 @@ function textoDoConteudo(content) {
   return '';
 }
 
-const PERGUNTAS_NOME = ['qual o seu nome', 'como posso te chamar', 'como posso chamá-lo', 'como posso chamá-la'];
+const PERGUNTAS_NOME = ['qual o seu nome', 'como posso te chamar', 'como posso chamá-lo', 'como posso chamá-la', 'posso te chamar de'];
 // Palavras que não são nomes (a pessoa responde com frase em vez do nome direto)
 const PALAVRAS_NAO_NOME = new Set([
   'sou', 'eu', 'meu', 'minha', 'me', 'chamo', 'nome', 'é', 'o', 'a', 'da', 'do', 'de',
