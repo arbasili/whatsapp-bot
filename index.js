@@ -1012,14 +1012,24 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
   log(userPhone, 'info', `Mensagem recebida: "${(userText || '').slice(0, 80)}"${imagem ? ' [+imagem]' : ''}${nomePerfil ? ` | perfil: ${nomePerfil}` : ''}`);
 
   // Valida o nome vindo do perfil do WhatsApp
-  // Considera inválido: vazio, muito curto, só números, nomes genéricos de dispositivo
+  // Considera inválido: vazio, muito curto, só números, nomes genéricos, frases/slogans
   const NOMES_GENERICOS = new Set(['iphone', 'android', 'samsung', 'motorola', 'xiaomi', 'whatsapp', 'meu whatsapp', 'celular', 'smartphone']);
+  // Palavras que indicam que o "nome" é uma frase ou slogan, não um nome próprio
+  const PALAVRAS_SLOGAN = ['salva', 'jesus', 'deus', 'senhor', 'apenas', 'somente', 'só', 'amor', 'paz', 'vida', 'brasil', 'time', 'foda', 'brabo', 'real', 'verdade', 'oficial'];
   function nomePerfilValido(nome) {
     if (!nome || nome.trim().length < 2) return false;
     const n = nome.trim().toLowerCase();
-    if (/^\d+$/.test(n)) return false;
-    if (NOMES_GENERICOS.has(n)) return false;
-    if (n.length > 50) return false;
+    if (/^\d+$/.test(n)) return false; // só números
+    if (NOMES_GENERICOS.has(n)) return false; // dispositivo genérico
+    if (n.length > 30) return false; // muito longo para ser nome
+    // Se tiver mais de 3 palavras, provavelmente é frase/slogan
+    const palavras = n.split(/\s+/);
+    if (palavras.length > 3) return false;
+    // Se qualquer palavra for um slogan ou nome de dispositivo, rejeita
+    const PALAVRAS_INVALIDAS = new Set([...PALAVRAS_SLOGAN, 'iphone', 'android', 'samsung', 'motorola', 'xiaomi', 'celular', 'smartphone', 'de', 'do', 'da', 'meu', 'minha']);
+    if (palavras.some(p => PALAVRAS_INVALIDAS.has(p))) return false;
+    // Se contiver caracteres especiais demais (emojis, símbolos), rejeita
+    if (/[^a-záàãâéêíóôõúüçA-Z\s'-]/.test(nome.trim())) return false;
     return true;
   }
   const nomeDoWebhook = nomePerfilValido(nomePerfil) ? nomePerfil.trim().split(' ')[0] : '';
