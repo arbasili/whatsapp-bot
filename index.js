@@ -590,7 +590,7 @@ setInterval(async () => {
         const resp = await axios.post(
           'https://api.anthropic.com/v1/messages',
           {
-            model: 'claude-sonnet-4-20250514',
+            model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
             max_tokens: 120,
             messages: [
               ...historicoReal,
@@ -931,7 +931,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: 'claude-sonnet-4-20250514',
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
         max_tokens: 10,
         messages: [{
           role: 'user',
@@ -1262,7 +1262,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       const resumoResp = await axios.post(
         'https://api.anthropic.com/v1/messages',
         {
-          model: 'claude-sonnet-4-20250514',
+          model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
           max_tokens: 400,
           messages: [
             ...historicoParaResumo,
@@ -1553,7 +1553,7 @@ async function chamarClaude(historico) {
     try {
       const response = await axios.post(
         'https://api.anthropic.com/v1/messages',
-        { model: 'claude-sonnet-4-20250514', max_tokens: 500, messages: historicoEnviado },
+        { model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6', max_tokens: 500, messages: historicoEnviado },
         {
           headers: {
             'x-api-key': process.env.ANTHROPIC_API_KEY,
