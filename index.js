@@ -90,7 +90,13 @@ async function carregarLeads() {
       const phone = row.phone;
       if (row.conversas) conversas[phone] = row.conversas;
       if (row.ultima_mensagem) ultimaMensagem[phone] = Number(row.ultima_mensagem);
-      if (row.follow_up_status) followUpStatus[phone] = row.follow_up_status;
+      if (row.follow_up_status) {
+        const fs = row.follow_up_status;
+        followUpStatus[phone] = {
+          tentativas: Number(fs.tentativas) || 0,
+          ultimoFollowUp: Number(fs.ultimoFollowUp) || 0
+        };
+      }
       if (row.agendamentos) agendamentos[phone] = row.agendamentos;
       if (row.lead_agendado) leadsAgendados.add(phone);
       if (row.lead_encerrado) leadsEncerrados.add(phone);
@@ -161,12 +167,16 @@ setInterval(() => {
   const agora = Date.now();
   for (const phone of Object.keys(ultimaMensagem)) {
     if (agendamentosConfirmados[phone]) continue;
-    if (agora - ultimaMensagem[phone] > EXPIRACAO_MS) {
+    const prazo = leadsEncerrados.has(phone) ? EXPIRACAO_ENCERRADO_MS : EXPIRACAO_MS;
+    if (agora - ultimaMensagem[phone] > prazo) {
       delete conversas[phone];
       delete ultimaMensagem[phone];
       delete followUpStatus[phone];
       delete agendamentos[phone];
       delete mensagensPendentes[phone];
+      // Limpa também os Sets para evitar crescimento indefinido em memória
+      leadsEncerrados.delete(phone);
+      leadsAgendados.delete(phone);
     }
   }
 }, 60 * 60 * 1000);
@@ -548,6 +558,47 @@ async function remarcarEvento(eventId, novoInicio, novoFim) {
   }
 }
 
+// Gera mensagem de follow-up contextual via Claude
+// Declarada fora do setInterval para não ser recriada a cada tick
+async function gerarMsgFollowUp(phone, nome, tentativa) {
+  try {
+    const historico = conversas[phone];
+    if (!historico || historico.length < 3) {
+      return tentativa === 1
+        ? `Oi ${nome}, tudo bem? Ainda estou por aqui caso queira continuar.`
+        : `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`;
+    }
+    const historicoReal = historico.slice(2).slice(-10)
+      .map(m => ({ role: m.role, content: textoDoConteudo(m.content) }))
+      .filter(m => m.content && m.content.trim());
+    while (historicoReal.length && historicoReal[0].role !== 'user') historicoReal.shift();
+    if (!historicoReal.length) throw new Error('histórico vazio');
+
+    const instrucao = tentativa === 1
+      ? `Você é o Lucas, do time da Clique e Fecha. O lead parou de responder. Com base na conversa, escreva UMA mensagem curta e natural de follow-up — sem emojis, sem travessão, sem diminutivo. A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases. Assine como Lucas apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
+      : `Você é o Lucas, do time da Clique e Fecha. Esta é a segunda tentativa de retomar contato com o lead que não respondeu. Escreva UMA mensagem curta, calorosa e sem pressão — diferente da primeira tentativa. Sem emojis, sem travessão. Máximo 2 frases. Responda APENAS com o texto da mensagem, sem aspas.`;
+
+    const resp = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        max_tokens: 120,
+        messages: [...historicoReal, { role: 'user', content: instrucao }]
+      },
+      {
+        headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        timeout: 15000
+      }
+    );
+    return resp.data.content[0].text.trim();
+  } catch (err) {
+    console.error(`Erro ao gerar follow-up contextual (tentativa ${tentativa}):`, err.message);
+    return tentativa === 1
+      ? `Oi ${nome}, tudo bem? Ainda estou por aqui caso queira continuar.`
+      : `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`;
+  }
+}
+
 // Follow-up automático a cada 15 minutos
 setInterval(async () => {
   const agora = Date.now();
@@ -566,60 +617,15 @@ setInterval(async () => {
       if (nomeExtraido) nome = nomeExtraido;
     }
 
-    // Gera mensagem de follow-up contextual via Claude
-    async function gerarMsgFollowUp(tentativa) {
-      try {
-        const historico = conversas[phone];
-        if (!historico || historico.length < 3) {
-          // Sem histórico suficiente: mensagem genérica
-          return tentativa === 1
-            ? `Oi ${nome}, tudo bem? Ainda estou por aqui caso queira continuar.`
-            : `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`;
-        }
-        // Pega só a conversa real (sem prompt e ack iniciais), limitada às últimas 10 msgs
-        const historicoReal = historico.slice(2).slice(-10)
-          .map(m => ({ role: m.role, content: textoDoConteudo(m.content) }))
-          .filter(m => m.content && m.content.trim());
-        while (historicoReal.length && historicoReal[0].role !== 'user') historicoReal.shift();
-        if (!historicoReal.length) throw new Error('histórico vazio');
-
-        const instrucao = tentativa === 1
-          ? `Você é o Lucas, do time da Clique e Fecha. O lead parou de responder. Com base na conversa, escreva UMA mensagem curta e natural de follow-up — sem emojis, sem travessão, sem diminutivo. A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases. Assine como Lucas apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
-          : `Você é o Lucas, do time da Clique e Fecha. Esta é a segunda tentativa de retomar contato com o lead que não respondeu. Escreva UMA mensagem curta, calorosa e sem pressão — diferente da primeira tentativa. Sem emojis, sem travessão. Máximo 2 frases. Responda APENAS com o texto da mensagem, sem aspas.`;
-
-        const resp = await axios.post(
-          'https://api.anthropic.com/v1/messages',
-          {
-            model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
-            max_tokens: 120,
-            messages: [
-              ...historicoReal,
-              { role: 'user', content: instrucao }
-            ]
-          },
-          {
-            headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-            timeout: 15000
-          }
-        );
-        return resp.data.content[0].text.trim();
-      } catch (err) {
-        console.error(`Erro ao gerar follow-up contextual (tentativa ${tentativa}):`, err.message);
-        return tentativa === 1
-          ? `Oi ${nome}, tudo bem? Ainda estou por aqui caso queira continuar.`
-          : `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`;
-      }
-    }
-
     if (dentroDoHorarioSilencio()) continue; // não envia entre 20h e 8h
 
     if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
-      const msg = await gerarMsgFollowUp(1);
+      const msg = await gerarMsgFollowUp(phone, nome, 1);
       await enviarMensagem(phone, msg);
       followUpStatus[phone] = { tentativas: 1, ultimoFollowUp: agora };
       await persistirLead(phone);
     } else if (status.tentativas === 1 && agora - status.ultimoFollowUp > FOLLOWUP_2_MS) {
-      const msg = await gerarMsgFollowUp(2);
+      const msg = await gerarMsgFollowUp(phone, nome, 2);
       await enviarMensagem(phone, msg);
       followUpStatus[phone] = { tentativas: 2, ultimoFollowUp: agora };
       await persistirLead(phone);
@@ -631,10 +637,13 @@ setInterval(async () => {
       await enviarMensagem(MEU_NUMERO, `*Lead encerrado*\n\nNome: ${nome}\nWhatsApp: ${phone}\n\nNão respondeu após 2 tentativas de follow-up.`);
       atualizarLead(phone, { 'Status': 'Encerrado por inatividade' })
         .catch(e => console.error('atualizarLead inatividade:', e.message));
-      delete conversas[phone];
-      delete ultimaMensagem[phone];
+      // Marca como encerrado mas MANTÉM histórico e ultimaMensagem
+      // para que o lead possa retomar com contexto (limpeza ocorre após 30 dias)
+      leadsEncerrados.add(phone);
       delete followUpStatus[phone];
       delete agendamentos[phone];
+      delete mensagensPendentes[phone];
+      if (debounceTimers[phone]) { clearTimeout(debounceTimers[phone]); delete debounceTimers[phone]; }
       await persistirLead(phone);
     }
    } catch (err) {
