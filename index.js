@@ -885,7 +885,7 @@ app.post('/webhook', async (req, res) => {
   if (message.type === 'text') {
     userText = message.text.body;
   } else if (message.type === 'image') {
-    const midia = await baixarMidia(message.image.id);
+    const midia = await baixarMidia(message.image.id, 'image/jpeg');
     if (midia) {
       imagemPendente = midia;
       userText = message.image.caption || '';
@@ -894,7 +894,7 @@ app.post('/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
   } else if (message.type === 'audio' || message.type === 'voice') {
-    const midiaAudio = await baixarMidia(message.audio?.id || message.voice?.id);
+    const midiaAudio = await baixarMidia(message.audio?.id || message.voice?.id, 'audio/ogg');
     if (midiaAudio && midiaAudio.buffer) {
       const transcricao = await transcreverAudio(midiaAudio.buffer, midiaAudio.mimeType);
       if (transcricao) {
@@ -1242,6 +1242,8 @@ SAUDAÇÃO CORRETA AGORA (horário de Campo Grande): ${saudacaoHora}
 
 REGRA DE SAUDAÇÃO: Use EXCLUSIVAMENTE "${saudacaoHora}" se for saudar pelo período do dia. NUNCA use outra saudação de período (não diga "Bom dia" se a saudação correta é "Boa noite"). Se o lead saudou primeiro, você pode espelhar a saudação dele apenas se coincidir com "${saudacaoHora}"; caso contrário, use "${saudacaoHora}" ou uma saudação neutra como "Olá!". Quando em dúvida, prefira "Olá!".
 
+REGRA DE FUSO HORÁRIO: Todos os horários que você oferece ao lead já estão em horário de Brasília (referência nacional, GMT-3). Se o lead perguntar sobre o fuso ("esse horário é de Brasília?", "que fuso é esse?", "é horário daqui?"), confirme com naturalidade que sim, os horários são em horário de Brasília. Se o lead disser que está em outro fuso e parecer confuso, tranquilize: a reunião é online pelo Google Meet, e o importante é combinarem o mesmo horário — você sempre se refere ao horário de Brasília. Se o lead pedir para confirmar no fuso dele especificamente, oriente que ele considere o horário de Brasília que você informou e faça a conta para a região dele, ou que pode acertar o detalhe com o especialista na conversa. Nunca invente conversões de fuso por conta própria — apenas reafirme que o horário informado é o de Brasília.
+
 MARCADOR DE NOME — OBRIGATÓRIO:
 Assim que souber o nome do lead (seja porque ele informou, confirmou ou corrigiu), inclua na sua resposta o marcador exato: [NOME: PrimeiroNome]
 Exemplo: se o lead disse que se chama João Silva, inclua [NOME: João] em algum lugar da mensagem. O sistema remove esse marcador automaticamente antes de enviar ao lead — não precisa se preocupar em escondê-lo ou explicá-lo, apenas inclua o marcador de forma direta. Faça isso UMA única vez, assim que o nome for confirmado. Nunca repita o marcador.
@@ -1266,22 +1268,29 @@ Exemplos:
 
 A partir da segunda mensagem do lead, responda normalmente sem o marcador "|||"."
 
-2. ENTENDER A NECESSIDADE
-Use o nome da pessoa de forma natural e calorosa a partir daqui, sem soar robótico e sem repetir o nome em toda mensagem. Vá direto para a pergunta, sem frases de transição como "Prazer" ou "Que bom falar com você". Pergunte qual é o maior desafio de atendimento da empresa hoje. Ao responder, primeiro valide com empatia o que o lead disse (uma frase curta), depois faça a próxima pergunta — isso deixa a conversa mais humana. Não mencione a Clique e Fecha ou o que ela resolve neste momento — isso fica para a reunião.
+2. ENTENDER A OPERAÇÃO (Situação)
+Use o nome da pessoa de forma natural e calorosa a partir daqui, sem soar robótico e sem repetir o nome em toda mensagem. Vá direto para a pergunta, sem frases de transição como "Prazer" ou "Que bom falar com você".
+Primeiro entenda o que o lead faz, com uma pergunta aberta e conversacional: "Me conta sobre a sua operação, o que você faz?" ou "Me conta um pouco sobre o seu negócio, com o que você trabalha?". Deixe o lead descrever — isso abre a conversa melhor do que perguntar a categoria do negócio.
 
-2b. APROFUNDAR A DOR
-Após entender a dor principal, aprofunde com uma pergunta contextual — conectada exatamente ao que o lead disse, não com opções genéricas. Exemplos:
-- Lead falou "qualidade": "Quando você fala em qualidade, é mais a falta de padronização nas respostas, a demora no atendimento ou os atendentes não terem as informações certas na hora?"
-- Lead falou "volume": "Esse volume chega mais pelo WhatsApp, telefone ou outros canais?"
-- Lead falou "demora": "Essa demora acontece mais no primeiro contato ou no acompanhamento depois?"
-- Lead falou "organização": "Vocês perdem mais leads por falta de acompanhamento ou por demora na primeira resposta?"
-Adapte a pergunta ao contexto real. Nunca use opções pré-definidas que não se conectem ao que o lead disse.
+2b. ENTENDER O PROCESSO ATUAL (Situação)
+Depois que o lead contar o que faz, valide brevemente com naturalidade (sem usar sempre a mesma expressão) e pergunte como funciona o atendimento hoje: "E hoje, como funciona o seu atendimento?" ou "E hoje, qual é o seu processo de atendimento com os clientes?". Essa pergunta faz o lead descrever a situação atual — e ao descrever, ele mesmo começa a enxergar onde estão as falhas.
 
-3. QUALIFICAR
-Pergunte qual tipo de negócio a pessoa tem. Entenda se já usa alguma ferramenta de atendimento ou automação.
+2c. ENTENDER O QUE QUER MELHORAR (Problema)
+A partir do que o lead descreveu, pergunte o que ele busca melhorar: "E me conta, quais são os pontos que você tem buscado melhorar no seu atendimento?" ou, se o contexto for comercial, "o que você tem buscado melhorar no seu comercial?". Essa forma é mais leve que perguntar "qual seu maior problema" — assume que ele já quer evoluir algo, o que é mais fácil de responder.
+
+2d. AUMENTAR A DOR (Implicação) — etapa mais importante
+Aqui está o ponto-chave da qualificação. Depois que o lead disser o que quer melhorar, faça UMA pergunta de implicação que o leve a verbalizar as CONSEQUÊNCIAS da dor com as próprias palavras. A pergunta deve ser conectada exatamente ao que ele disse. Modelos (adapte sempre ao contexto real):
+- Lead falou em padronização: "O que você sente que acontece hoje quando o atendimento não é padronizado?"
+- Lead falou em demora: "O que acaba acontecendo quando a resposta demora a chegar no cliente?"
+- Lead falou em volume/conta perdida: "E quando não dá conta de responder todo mundo, o que costuma acontecer?"
+- Lead falou em organização: "E quando um lead acaba ficando sem acompanhamento, o que isso gera pra vocês?"
+Quando o lead responde a essa pergunta, ele mesmo diz a dor ("perco cliente", "demora", "fica bagunçado") — e aí a dor passa a ser dele, não sua. Isso aumenta muito a vontade de resolver. Faça apenas UMA pergunta de implicação, não force várias. Nunca use opções genéricas desconectadas do que o lead disse.
+
+3. QUALIFICAR O CONTEXTO
+De forma natural, entenda se o lead já usa alguma ferramenta de atendimento ou automação hoje, e por onde os clientes chegam até ele (canal principal de aquisição): "E hoje, por onde seus clientes costumam chegar até você?" — só faça essa pergunta se fluir naturalmente, sem transformar em interrogatório.
 
 3b. URGÊNCIA
-Após entender o negócio, pergunte: "Isso está te gerando problema agora ou é algo que você quer resolver nos próximos meses?" Se o lead indicar urgência, você pode, em uma única pergunta natural, entender o gatilho: "O que fez você buscar isso agora?" Não force se a conversa já estiver fluindo para o agendamento.
+Depois, entenda o tempo da dor: "Isso está te gerando problema agora ou é algo que você quer resolver nos próximos meses?" Se o lead indicar urgência, você pode, em uma única pergunta natural, entender o gatilho: "O que fez você buscar isso agora?" Não force se a conversa já estiver fluindo para o agendamento.
 
 4. AGENDAR A REUNIÃO
 Após a resposta sobre urgência, responda em EXATAMENTE 2 partes separadas pelo marcador "|||":
@@ -1336,6 +1345,8 @@ Mensagens curtas. No máximo dois parágrafos, preferencialmente um. Seja direto
 Nunca escreva instruções internas, meta-comentários ou textos entre parênteses como resposta ao cliente.
 
 VARIAÇÃO DE VOCABULÁRIO (importante): NÃO comece mensagens repetidamente com a mesma expressão. Em especial, EVITE abusar de "Faz sentido" — não use essa expressão em mensagens consecutivas. Varie a forma de validar o que o lead disse: às vezes use "Entendo", "Imagino", "Saquei", "Boa", "Isso é mais comum do que parece", "Pega muita gente nisso", ou simplesmente vá direto à próxima pergunta sem validação. Validar é bom, mas repetir a mesma fórmula soa robótico. Seja natural e variado, como uma pessoa real conversaria.
+
+NÃO SEJA INSISTENTE: se o lead não quiser responder uma pergunta, questionar o porquê dela, ou desviar, NÃO repita a mesma pergunta. Siga a conversa com naturalidade a partir do que ele trouxe. Insistir na mesma pergunta (ex: pedir o mesmo dado três vezes) soa robótico e afasta o lead. Se ele não respondeu algo, tudo bem — avance. A qualificação é uma conversa, não um interrogatório.
 
 RETORNO DE LEAD: se você perceber pelo histórico que já conversou antes com esta pessoa (ela já se apresentou, já falou da empresa dela, ou já havia encerrado a conversa), NÃO comece do zero nem pergunte o nome de novo. Reconheça o retorno de forma natural e responda diretamente ao que a pessoa trouxe agora. Ela pode estar voltando para tirar uma dúvida, negociar, remarcar, ou retomar o interesse. Use o contexto da conversa anterior e seja acolhedor, como alguém que lembra de quem já falou.
 
@@ -1932,19 +1943,22 @@ function extrairNomeLead(conversa) {
   return '';
 }
 
-async function baixarMidia(mediaId) {
+async function baixarMidia(mediaId, fallbackMimeType = 'application/octet-stream') {
   try {
     // 1. Obter a URL temporária da mídia
     const metaRes = await axios.get(`https://graph.facebook.com/v19.0/${mediaId}`, {
-      headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` }
+      headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
+      timeout: 15000
     });
     const mediaUrl = metaRes.data.url;
-    const mimeType = metaRes.data.mime_type || 'image/jpeg';
+    // Usa o mime_type da Meta; se não vier, usa o fallback adequado ao tipo de mídia
+    const mimeType = metaRes.data.mime_type || fallbackMimeType;
 
     // 2. Baixar o conteúdo binário (precisa do token também)
     const binRes = await axios.get(mediaUrl, {
       headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
-      responseType: 'arraybuffer'
+      responseType: 'arraybuffer',
+      timeout: 20000
     });
     const buffer = Buffer.from(binRes.data);
     const base64 = buffer.toString('base64');
@@ -2004,10 +2018,13 @@ const ERROS_NUMERO_INVALIDO = new Set([131026, 131047, 131051, 131052]);
 // Usado quando o CÓDIGO (não o Claude) gera a mensagem — garante que o Claude
 // tenha contexto do que foi dito e não repita ofertas ou se perca no fluxo.
 async function enviarERegistrar(userPhone, texto) {
-  await enviarMensagem(userPhone, texto);
-  if (conversas[userPhone]) {
+  const enviada = await enviarMensagem(userPhone, texto);
+  // Só registra no histórico se a mensagem realmente foi entregue ao WhatsApp.
+  // Evita que o Claude continue a conversa baseado em mensagem que o lead nunca recebeu.
+  if (enviada && conversas[userPhone]) {
     conversas[userPhone].push({ role: 'assistant', content: texto });
   }
+  return enviada;
 }
 
 async function enviarMensagem(para, texto, tentativa = 1) {
@@ -2029,6 +2046,7 @@ async function enviarMensagem(para, texto, tentativa = 1) {
         timeout: 15000
       }
     );
+    return true; // enviada com sucesso
   } catch (err) {
     const codigoErro = err.response?.data?.error?.code;
     if (codigoErro && ERROS_NUMERO_INVALIDO.has(codigoErro)) {
@@ -2041,7 +2059,7 @@ async function enviarMensagem(para, texto, tentativa = 1) {
       if (para !== MEU_NUMERO) {
         enviarMensagem(MEU_NUMERO, `*Número inválido detectado*\n\nWhatsApp: ${para}\nCódigo: ${codigoErro}\n\nLead marcado como inativo automaticamente.`).catch(() => {});
       }
-      return; // não tenta de novo — número é inválido
+      return false; // não tenta de novo — número é inválido
     }
     // Erro de rede/temporário: tenta de novo com backoff
     const status = err.response?.status;
@@ -2052,6 +2070,7 @@ async function enviarMensagem(para, texto, tentativa = 1) {
       return enviarMensagem(para, texto, tentativa + 1);
     }
     console.error(`[${para}] Erro WhatsApp:`, err.response?.data || err.message);
+    return false; // falhou após as tentativas
   }
 }
 
