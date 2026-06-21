@@ -1,16 +1,23 @@
 {
-  "name": "whatsapp-bot",
+  "name": "clique-e-fecha-bot",
   "version": "1.0.0",
+  "description": "Bot de vendas no WhatsApp com IA (Claude) para a Clique e Fecha — qualifica leads, agenda reuniões no Google Calendar e registra no Google Sheets.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "check": "node --check index.js",
+    "test": "node --test",
+    "lint": "eslint ."
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "axios": "^1.7.2",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.19.0",
+    "form-data": "^4.0.0",
     "googleapis": "^140.0.0",
-    "dotenv": "^16.4.5",
-    "pg": "^8.11.3",
-    "form-data": "^4.0.0"
+    "pg": "^8.12.0"
   }
 }
