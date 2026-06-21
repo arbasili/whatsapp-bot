@@ -145,7 +145,7 @@ const DEBOUNCE_MS = 4000;
 const LEMBRETE_2H_MS = 2 * 60 * 60 * 1000;
 const LEMBRETE_30MIN_MS = 30 * 60 * 1000;
 const LEMBRETE_24H_MS = 24 * 60 * 60 * 1000;
-const EXPIRACAO_MS = 24 * 60 * 60 * 1000;
+const EXPIRACAO_MS = 72 * 60 * 60 * 1000; // 3 dias — tempo para o lead voltar sem perder contexto
 const EXPIRACAO_ENCERRADO_MS = 30 * 24 * 60 * 60 * 1000;
 const FOLLOWUP_1_MS = 2 * 60 * 60 * 1000;
 const FOLLOWUP_2_MS = 24 * 60 * 60 * 1000;
@@ -933,10 +933,15 @@ app.post('/webhook', async (req, res) => {
   }
 
   const agora = Date.now();
+  // Se o lead tem agendamento confirmado e a reunião ainda não passou,
+  // NUNCA expira — o bot precisa retomar reconhecendo o agendamento, não recomeçar do zero.
+  const temAgendamentoFuturo = agendamentosConfirmados[userPhone] &&
+    new Date(agendamentosConfirmados[userPhone].slotInicio).getTime() > agora;
+
   // Expiração: lead encerrado mantém histórico por 30 dias (para retomada com contexto);
-  // conversa ativa normal expira em 24h.
+  // conversa ativa normal expira em 72h.
   const prazoExpiracao = leadsEncerrados.has(userPhone) ? EXPIRACAO_ENCERRADO_MS : EXPIRACAO_MS;
-  if (ultimaMensagem[userPhone] && agora - ultimaMensagem[userPhone] > prazoExpiracao) {
+  if (!temAgendamentoFuturo && ultimaMensagem[userPhone] && agora - ultimaMensagem[userPhone] > prazoExpiracao) {
     delete conversas[userPhone];
     delete agendamentos[userPhone];
     delete mensagensPendentes[userPhone];
