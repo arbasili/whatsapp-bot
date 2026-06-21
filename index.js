@@ -129,6 +129,7 @@ const ultimaMensagem = {};
 const followUpStatus = {};
 const agendamentos = {};
 const leadsAgendados = new Set();
+const leadsRegistradosSheet = new Set(); // evita linha duplicada na planilha
 const leadsEncerrados = new Set();
 const mensagensPendentes = {};
 const debounceTimers = {};
@@ -177,6 +178,7 @@ setInterval(() => {
       // Limpa também os Sets para evitar crescimento indefinido em memória
       leadsEncerrados.delete(phone);
       leadsAgendados.delete(phone);
+      leadsRegistradosSheet.delete(phone);
     }
   }
 }, 60 * 60 * 1000);
@@ -194,9 +196,30 @@ function dentroDoHorarioSilencio() {
   return hora >= SILENCIO_INICIO || hora < SILENCIO_FIM;
 }
 
+// Validação de variáveis de ambiente obrigatórias no boot — falha cedo e claro
+// em vez de quebrar silenciosamente em runtime
+const ENV_OBRIGATORIAS = [
+  'ANTHROPIC_API_KEY',
+  'WHATSAPP_TOKEN',
+  'PHONE_NUMBER_ID',
+  'VERIFY_TOKEN',
+  'GOOGLE_SERVICE_ACCOUNT_KEY',
+  'DATABASE_URL',
+  'META_APP_SECRET'
+];
+const envFaltando = ENV_OBRIGATORIAS.filter(v => !process.env[v]);
+if (envFaltando.length > 0) {
+  console.error('ERRO FATAL: variáveis de ambiente obrigatórias não configuradas:', envFaltando.join(', '));
+  console.error('Configure essas variáveis no Railway antes de iniciar o bot.');
+  process.exit(1);
+}
+// GROQ_API_KEY é opcional (só usada para transcrição de áudio) — apenas avisa
+if (!process.env.GROQ_API_KEY) {
+  console.warn('AVISO: GROQ_API_KEY não configurada — transcrição de áudio ficará indisponível.');
+}
+
 let serviceAccountKey;
 try {
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) throw new Error('GOOGLE_SERVICE_ACCOUNT_KEY não definida.');
   serviceAccountKey = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
 } catch (err) {
   console.error('ERRO FATAL: não foi possível carregar a service account do Google:', err.message);
@@ -257,7 +280,12 @@ async function encontrarLinhaLead(phone) {
 }
 
 // Cria a linha inicial do lead quando ele inicia a conversa
+// Set de leads já registrados (ou em registro) na planilha — evita linha duplicada
+// quando duas mensagens chegam quase simultaneamente
 async function registrarLeadInicial(phone) {
+  // Lock em memória: se já está registrado ou em processo, não duplica
+  if (leadsRegistradosSheet.has(phone)) return;
+  leadsRegistradosSheet.add(phone);
   try {
     await garantirCabecalho();
     const jaExiste = await encontrarLinhaLead(phone);
@@ -274,6 +302,8 @@ async function registrarLeadInicial(phone) {
     });
   } catch (err) {
     console.error('Erro ao registrar lead inicial:', err.message);
+    // Em caso de erro, libera o lock para permitir nova tentativa
+    leadsRegistradosSheet.delete(phone);
   }
 }
 
@@ -324,6 +354,13 @@ function horarioCampoGrande(dia, hora) {
   return new Date(`${ano}-${mes}-${diaMes}T${horaStr}:00:00${OFFSET_CG}`);
 }
 
+// Extrai só a parte do horário de um label (ex: "9h (horário de Brasília)")
+// de "segunda-feira, 22 de junho às 9h (horário de Brasília)"
+function horaDoLabel(label) {
+  const partes = label.split(' às ');
+  return partes[1] || label;
+}
+
 async function buscarSlotDisponivel(dia, periodos) {
   const agoraMs = Date.now();
   const margemMs = 2 * 60 * 60 * 1000; // exige 2h de antecedência mínima
@@ -344,11 +381,20 @@ async function buscarSlotDisponivel(dia, periodos) {
       });
       const ocupado = res.data.calendars[CALENDAR_ID].busy.length > 0;
       if (!ocupado) {
+        // O evento é criado em Campo Grande (onde o especialista está), mas
+        // o lead vê o horário em Brasília (referência nacional). Brasília é UTC-3,
+        // Campo Grande UTC-4 — então o horário de Brasília é +1h.
+        const horaBrasilia = hora + 1;
         const nomeDia = inicio.toLocaleDateString('pt-BR', {
           weekday: 'long', day: 'numeric', month: 'long',
           timeZone: 'America/Campo_Grande'
         });
-        return { label: `${nomeDia} às ${hora}h`, inicio: inicio.toISOString(), fim: fim.toISOString() };
+        return {
+          label: `${nomeDia} às ${horaBrasilia}h (horário de Brasília)`,
+          labelCG: `${nomeDia} às ${hora}h (horário de Campo Grande)`,
+          inicio: inicio.toISOString(),
+          fim: fim.toISOString()
+        };
       }
     } catch (err) {
       console.error('Erro ao verificar agenda:', err.message);
@@ -391,7 +437,10 @@ async function buscarHorariosDisponiveis() {
   if (!slot1) return [];
 
   // Slot 2: obrigatoriamente no proximo dia util apos o dia do slot 1, periodo oposto
-  const horaSlot1 = new Date(slot1.inicio).getHours();
+  // Importante: extrai a hora no fuso de Campo Grande (getHours() usaria o fuso do servidor/UTC)
+  const horaSlot1 = parseInt(new Date(slot1.inicio).toLocaleString('en-US', {
+    hour: 'numeric', hour12: false, timeZone: 'America/Campo_Grande'
+  }), 10);
   const slot1EhManha = horaSlot1 < 13;
   const diaSlot2 = proximoDiaUtil(diaSlot1);
   const periodoSlot2 = slot1EhManha ? tarde : manha;
@@ -471,9 +520,13 @@ async function interpretarPedidoData(texto) {
   }
 
   // 2. Descobrir a HORA pedida (se houver)
+  // O lead fala em horário de Brasília; internamente trabalhamos em Campo Grande (−1h)
   let horaAlvo = null;
   const mh = t.match(/\b(\d{1,2})\s*h\b/) || t.match(/\bàs\s+(\d{1,2})\b/) || t.match(/\b(\d{1,2})\s+horas?\b/);
-  if (mh) horaAlvo = parseInt(mh[1], 10);
+  if (mh) {
+    const horaBrasilia = parseInt(mh[1], 10);
+    horaAlvo = horaBrasilia - 1; // converte Brasília -> Campo Grande
+  }
 
   // Período mencionado
   const pediuManha = /manh[ãa]/.test(t);
@@ -610,7 +663,16 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
 }
 
 // Follow-up automático a cada 15 minutos
+let followUpRodando = false;
 setInterval(async () => {
+  if (followUpRodando) {
+    console.warn('Job de follow-up ainda rodando — pulando este ciclo para evitar sobreposição.');
+    return;
+  }
+  followUpRodando = true;
+  const inicioJob = Date.now();
+  let processados = 0;
+  try {
   const agora = Date.now();
   for (const phone of Object.keys(ultimaMensagem)) {
    try {
@@ -656,14 +718,29 @@ setInterval(async () => {
       if (debounceTimers[phone]) { clearTimeout(debounceTimers[phone]); delete debounceTimers[phone]; }
       await persistirLead(phone);
     }
+    processados++;
    } catch (err) {
      console.error(`Erro no follow-up de ${phone}:`, err.message);
    }
   }
+  } catch (errJob) {
+    console.error('Erro geral no job de follow-up:', errJob.message);
+  } finally {
+    followUpRodando = false;
+    const dur = ((Date.now() - inicioJob) / 1000).toFixed(1);
+    if (processados > 0) console.log(`Job follow-up: ${processados} leads verificados em ${dur}s`);
+  }
 }, 15 * 60 * 1000);
 
-// Lembrete pré-reunião — verifica a cada 15 minutos
+// Lembrete pré-reunião — verifica a cada 5 minutos
+let lembretesRodando = false;
 setInterval(async () => {
+  if (lembretesRodando) {
+    console.warn('Job de lembretes ainda rodando — pulando este ciclo.');
+    return;
+  }
+  lembretesRodando = true;
+  try {
   const agora = Date.now();
   for (const phone of Object.keys(agendamentosConfirmados)) {
    try {
@@ -681,7 +758,7 @@ setInterval(async () => {
       if (minutosApos >= 30 && minutosApos < 90 && !ag.noShowEnviado) {
         const saudNS = ag.nome ? `Oi ${ag.nome}` : 'Oi';
         await enviarMensagem(phone, `${saudNS}, sentimos sua falta na conversa de hoje. Aconteceu alguma coisa? Se quiser remarcar, é só me falar e a gente encontra um novo horário.`);
-        await enviarMensagem(MEU_NUMERO, `*Possível no-show*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${phone}\nHorário: ${ag.label}\n\nLead não apareceu na reunião. Mensagem de retomada enviada automaticamente.`);
+        await enviarMensagem(MEU_NUMERO, `*Possível no-show*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${phone}\nHorário: ${ag.labelCG || ag.label}\n\nLead não apareceu na reunião. Mensagem de retomada enviada automaticamente.`);
         atualizarLead(phone, { 'Status': 'No-show' }).catch(e => console.error('atualizarLead no-show:', e.message));
         ag.noShowEnviado = true;
         await persistirLead(phone);
@@ -727,6 +804,11 @@ setInterval(async () => {
    } catch (err) {
      console.error(`Erro no lembrete de ${phone}:`, err.message);
    }
+  }
+  } catch (errJob) {
+    console.error('Erro geral no job de lembretes:', errJob.message);
+  } finally {
+    lembretesRodando = false;
   }
 }, 5 * 60 * 1000);
 
@@ -920,6 +1002,7 @@ async function tratarPosAgendamento(userPhone, userText) {
       if (ok) {
         ag.slotInicio = escolhido.inicio;
         ag.label = escolhido.label;
+        ag.labelCG = escolhido.labelCG || escolhido.label;
         ag.remarcando = false;
         ag.novosSlots = null;
         // Recalcula se o novo horário está a menos de 24h
@@ -971,10 +1054,28 @@ async function tratarPosAgendamento(userPhone, userText) {
   }
 
   if (intencao === 'confirmar') {
+    // Se já confirmou presença há pouco tempo, não repetir a mensagem — evita loop de "Combinado!"
+    // Mas só ignora dentro de uma janela curta; depois disso volta a responder normalmente
+    const confirmadaRecente = ag.presencaConfirmadaEm && (Date.now() - ag.presencaConfirmadaEm < 30 * 60 * 1000);
+    if (ag.presencaConfirmada && confirmadaRecente) {
+      log(userPhone, 'info', 'Presença confirmada há pouco — ignorando despedida repetida.');
+      return true;
+    }
     await atualizarLead(userPhone, { 'Status': 'Presença confirmada' });
+    ag.presencaConfirmada = true;
+    ag.presencaConfirmadaEm = Date.now();
     const saud = ag.nome ? `Combinado, ${ag.nome}!` : 'Combinado!';
     const refHorario = ag.label ? ` Nossa conversa está confirmada para ${ag.label}.` : ' Sua reunião está confirmada.';
     await enviarMensagem(userPhone, `${saud}${refHorario} Te espero lá!`);
+    return true;
+  }
+
+  // Despedidas simples logo após a confirmação ("ok", "obrigado", "valeu") — não responde em loop.
+  // Só vale na janela de 30 min após confirmar; depois disso, qualquer mensagem é respondida.
+  const despedidaSimples = /^(ok|okay|blz|beleza|tá bom|ta bom|tá|tudo bem|tudo certo|valeu|vlw|obrigad[oa]|brigad[oa]|combinado|certo|entendi|já entendi|ja entendi|isso|isso mesmo|perfeito|show|joia|jóia|👍|🙏|😊|tmj|até|até lá|até mais|fechou|tô dentro|to dentro|tranquilo|de boa)[\s!.,]*$/i.test((userText || '').trim());
+  const confirmadaRecenteParaDespedida = ag.presencaConfirmadaEm && (Date.now() - ag.presencaConfirmadaEm < 30 * 60 * 1000);
+  if (despedidaSimples && confirmadaRecenteParaDespedida) {
+    log(userPhone, 'info', 'Despedida simples logo após confirmação — não responde para evitar loop.');
     return true;
   }
 
@@ -984,7 +1085,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     if (totalRemarcacoes >= 2) {
       log(userPhone, 'warn', `Limite de remarcações atingido (${totalRemarcacoes})`);
       await enviarMensagem(userPhone, 'Entendo! Como já remarcamos algumas vezes, vou pedir para nossa equipe entrar em contato diretamente para encontrar o melhor horário para você.');
-      await enviarMensagem(MEU_NUMERO, `*Limite de remarcações atingido*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário atual: ${ag.label}\n\nLead tentou remarcar pela ${totalRemarcacoes + 1}ª vez. Tratar manualmente.`);
+      await enviarMensagem(MEU_NUMERO, `*Limite de remarcações atingido*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário atual: ${ag.labelCG || ag.label}\n\nLead tentou remarcar pela ${totalRemarcacoes + 1}ª vez. Tratar manualmente.`);
       await atualizarLead(userPhone, { 'Status': 'Remarcação manual necessária' });
       return true;
     }
@@ -1032,9 +1133,9 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
 
   // Valida o nome vindo do perfil do WhatsApp
   // Considera inválido: vazio, muito curto, só números, nomes genéricos, frases/slogans
-  const NOMES_GENERICOS = new Set(['iphone', 'android', 'samsung', 'motorola', 'xiaomi', 'whatsapp', 'meu whatsapp', 'celular', 'smartphone']);
+  const NOMES_GENERICOS = new Set(['iphone', 'android', 'samsung', 'motorola', 'xiaomi', 'whatsapp', 'meu whatsapp', 'celular', 'smartphone', 'claro', 'vivo', 'tim', 'oi', 'nextel', 'user', 'usuario', 'usuário', 'cliente', 'admin', 'teste', 'test']);
   // Palavras que indicam que o "nome" é uma frase ou slogan, não um nome próprio
-  const PALAVRAS_SLOGAN = ['salva', 'jesus', 'deus', 'senhor', 'apenas', 'somente', 'só', 'amor', 'paz', 'vida', 'brasil', 'time', 'foda', 'brabo', 'real', 'verdade', 'oficial'];
+  const PALAVRAS_SLOGAN = ['salva', 'jesus', 'deus', 'senhor', 'apenas', 'somente', 'só', 'amor', 'paz', 'vida', 'brasil', 'time', 'foda', 'brabo', 'real', 'verdade', 'oficial', 'loja', 'comercial', 'vendas', 'contato', 'atendimento'];
   function nomePerfilValido(nome) {
     if (!nome || nome.trim().length < 2) return false;
     const n = nome.trim().toLowerCase();
@@ -1091,7 +1192,7 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     leadsAgendados.delete(userPhone);
     delete agendamentosConfirmados[userPhone];
 
-    let opcoesHorario = 'amanhã às 10h ou amanhã às 14h';
+    let opcoesHorario = 'amanhã às 10h ou amanhã às 14h (horário de Brasília)';
     let slotsDisponiveis = [];
 
     try {
@@ -1110,6 +1211,15 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
 
     agendamentos[userPhone] = { slots: slotsDisponiveis };
 
+    // Calcula a saudação correta com base na hora real de Campo Grande
+    const horaAtualCG = parseInt(new Date().toLocaleString('en-US', {
+      hour: 'numeric', hour12: false, timeZone: 'America/Campo_Grande'
+    }), 10);
+    let saudacaoHora;
+    if (horaAtualCG >= 5 && horaAtualCG < 12) saudacaoHora = 'Bom dia';
+    else if (horaAtualCG >= 12 && horaAtualCG < 18) saudacaoHora = 'Boa tarde';
+    else saudacaoHora = 'Boa noite';
+
     // Registrar lead na planilha (início da conversa)
     registrarLeadInicial(userPhone).catch(e => console.error('registrarLeadInicial:', e.message));
 
@@ -1123,12 +1233,15 @@ Seu objetivo é qualificar o lead e agendar uma conversa gratuita com um especia
 NÚMERO DO CLIENTE: ${userPhone}
 NOME DO PERFIL DO WHATSAPP: ${nomeDoWebhook || 'não disponível'}
 HORÁRIOS DISPONÍVEIS NA AGENDA: ${opcoesHorario}
+SAUDAÇÃO CORRETA AGORA (horário de Campo Grande): ${saudacaoHora}
+
+REGRA DE SAUDAÇÃO: Use EXCLUSIVAMENTE "${saudacaoHora}" se for saudar pelo período do dia. NUNCA use outra saudação de período (não diga "Bom dia" se a saudação correta é "Boa noite"). Se o lead saudou primeiro, você pode espelhar a saudação dele apenas se coincidir com "${saudacaoHora}"; caso contrário, use "${saudacaoHora}" ou uma saudação neutra como "Olá!". Quando em dúvida, prefira "Olá!".
 
 MARCADOR DE NOME — OBRIGATÓRIO:
 Assim que souber o nome do lead (seja porque ele informou, confirmou ou corrigiu), inclua na sua resposta o marcador exato: [NOME: PrimeiroNome]
 Exemplo: se o lead disse que se chama João Silva, inclua [NOME: João] em algum lugar da mensagem. O sistema remove esse marcador automaticamente antes de enviar ao lead — não precisa se preocupar em escondê-lo ou explicá-lo, apenas inclua o marcador de forma direta. Faça isso UMA única vez, assim que o nome for confirmado. Nunca repita o marcador.
 
-${nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o nome do lead pode ser "${nomeDoWebhook}" (vindo do perfil do WhatsApp). Na primeira mensagem, em vez de perguntar o nome, use o formato de 3 partes com "|||" mas substitua a última parte por: "Posso te chamar de ${nomeDoWebhook}?" — Se o lead confirmar, inclua [NOME: ${nomeDoWebhook}] na resposta. Se corrigir, use o nome que ele informar e inclua [NOME: NomeCorrigido].` : ''}
+${nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o nome do lead pode ser "${nomeDoWebhook}" (vindo do perfil do WhatsApp, pode não ser o nome real). Na primeira mensagem, em vez de perguntar o nome do zero, use o formato de 3 partes com "|||" mas substitua a última parte por: "Posso te chamar de ${nomeDoWebhook}?" — Se o lead confirmar, inclua [NOME: ${nomeDoWebhook}] na resposta. Se o lead corrigir ou disser que não é esse o nome, pergunte naturalmente "Como você prefere que eu te chame?" e use o nome que ele informar com [NOME: NomeCorrigido]. Seja flexível: o nome do perfil pode estar errado.` : ''}
 
 SOBRE A EMPRESA:
 Serviços: automações de processos, chatbots personalizados e soluções de atendimento automatizado.
@@ -1216,6 +1329,8 @@ Use asterisco simples para negrito: *palavra* e nunca **palavra**.
 Faça apenas uma pergunta por mensagem. Esta regra é absoluta.
 Mensagens curtas. No máximo dois parágrafos, preferencialmente um. Seja direto e objetivo.
 Nunca escreva instruções internas, meta-comentários ou textos entre parênteses como resposta ao cliente.
+
+VARIAÇÃO DE VOCABULÁRIO (importante): NÃO comece mensagens repetidamente com a mesma expressão. Em especial, EVITE abusar de "Faz sentido" — não use essa expressão em mensagens consecutivas. Varie a forma de validar o que o lead disse: às vezes use "Entendo", "Imagino", "Saquei", "Boa", "Isso é mais comum do que parece", "Pega muita gente nisso", ou simplesmente vá direto à próxima pergunta sem validação. Validar é bom, mas repetir a mesma fórmula soa robótico. Seja natural e variado, como uma pessoa real conversaria.
 
 RETORNO DE LEAD: se você perceber pelo histórico que já conversou antes com esta pessoa (ela já se apresentou, já falou da empresa dela, ou já havia encerrado a conversa), NÃO comece do zero nem pergunte o nome de novo. Reconheça o retorno de forma natural e responda diretamente ao que a pessoa trouxe agora. Ela pode estar voltando para tirar uma dúvida, negociar, remarcar, ou retomar o interesse. Use o contexto da conversa anterior e seja acolhedor, como alguém que lembra de quem já falou.
 
@@ -1387,6 +1502,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       email: emailLead,
       slotInicio: slotEscolhido.inicio,
       label: slotEscolhido.label,
+      labelCG: slotEscolhido.labelCG || slotEscolhido.label,
       meetLink,
       eventId,
       lembrete24hEnviado: reuniaoEmMenos24h, // se já está em menos de 24h, pula essa etapa
@@ -1424,7 +1540,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       );
       await new Promise(r => setTimeout(r, 10000));
       await enviarMensagem(userPhone, despedida);
-      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\nMeet: ${meetLink}`);
+      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.labelCG || slotEscolhido.label}\nMeet: ${meetLink}`);
     } else {
       await enviarMensagem(userPhone,
         `${saudacao}\n\n` +
@@ -1436,7 +1552,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       );
       await new Promise(r => setTimeout(r, 10000));
       await enviarMensagem(userPhone, despedida);
-      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
+      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.labelCG || slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
    } catch (err) {
      console.error('Erro no processamento do agendamento:', err.message);
@@ -1546,10 +1662,13 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
         if (opcoesDia.length >= 2) {
           agendamentos[userPhone].slots = opcoesDia;
-          await enviarERegistrar(userPhone, `Para ${nomeDia}, tenho ${opcoesDia[0].label.split(' às ')[1]} ou ${opcoesDia[1].label.split(' às ')[1]}. Qual funciona melhor para você?`);
+          const h1 = horaDoLabel(opcoesDia[0].label).replace(' (horário de Brasília)', '');
+          const h2 = horaDoLabel(opcoesDia[1].label).replace(' (horário de Brasília)', '');
+          await enviarERegistrar(userPhone, `Para ${nomeDia}, tenho ${h1} ou ${h2} (horário de Brasília). Qual funciona melhor para você?`);
         } else if (opcoesDia.length === 1) {
           agendamentos[userPhone].slots = opcoesDia;
-          await enviarERegistrar(userPhone, `Para ${nomeDia}, tenho disponível às ${opcoesDia[0].label.split(' às ')[1]}. Posso reservar para você?`);
+          const h1 = horaDoLabel(opcoesDia[0].label).replace(' (horário de Brasília)', '');
+          await enviarERegistrar(userPhone, `Para ${nomeDia}, tenho disponível às ${h1} (horário de Brasília). Posso reservar para você?`);
         } else {
           // Nenhum horário livre nesse dia: oferece alternativas gerais
           let alternativas = [];
@@ -1594,7 +1713,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const agendamentoFoiOferecido = leadsAgendados.has(userPhone) ||
       (conversas[userPhone] || []).some(m =>
         m.role === 'assistant' &&
-        /faria sentido|marcar uma conversa|horários disponíveis|posso usar o número|qual é o seu email/i.test(textoDoConteudo(m.content))
+        /marcar uma conversa|conversa rápida|conversa gratuita|hor[áa]rios? dispon[íi]ve|tenho duas op[çc]|qual funciona melhor|posso usar o n[úu]mero|qual [ée] o seu email|posso reservar|especialista/i.test(textoDoConteudo(m.content))
       );
 
     const encerrarEfetivo = deveEncerrar && agendamentoFoiOferecido;
@@ -1740,9 +1859,10 @@ function escolherSlot(texto, slots) {
     if (match) return match;
   }
 
-  // 3. Tentar por hora ("9h", "às 14", "14 horas")
+  // 3. Tentar por hora ("9h", "às 14", "14 horas") — label está em horário de Brasília
   for (const slot of slots) {
-    const hora = slot.label.split(' às ')[1]?.replace('h', '').trim();
+    const matchHora = slot.label.match(/às\s+(\d{1,2})h/);
+    const hora = matchHora ? matchHora[1] : null;
     if (hora && (t.includes(hora + 'h') || t.includes(hora + ' h') || t.includes('às ' + hora) || t.includes(hora + ' hora'))) {
       return slot;
     }
@@ -1885,7 +2005,8 @@ async function enviarERegistrar(userPhone, texto) {
   }
 }
 
-async function enviarMensagem(para, texto) {
+async function enviarMensagem(para, texto, tentativa = 1) {
+  const MAX_TENTATIVAS_ENVIO = 2;
   try {
     await axios.post(
       `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
@@ -1899,7 +2020,8 @@ async function enviarMensagem(para, texto) {
         headers: {
           Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 15000
       }
     );
   } catch (err) {
@@ -1914,9 +2036,17 @@ async function enviarMensagem(para, texto) {
       if (para !== MEU_NUMERO) {
         enviarMensagem(MEU_NUMERO, `*Número inválido detectado*\n\nWhatsApp: ${para}\nCódigo: ${codigoErro}\n\nLead marcado como inativo automaticamente.`).catch(() => {});
       }
-    } else {
-      console.error(`[${para}] Erro WhatsApp:`, err.response?.data || err.message);
+      return; // não tenta de novo — número é inválido
     }
+    // Erro de rede/temporário: tenta de novo com backoff
+    const status = err.response?.status;
+    const reintentavel = !status || status === 429 || status >= 500;
+    if (tentativa < MAX_TENTATIVAS_ENVIO && reintentavel) {
+      console.warn(`[${para}] Falha ao enviar (tentativa ${tentativa}) — tentando novamente...`);
+      await new Promise(r => setTimeout(r, tentativa * 1500));
+      return enviarMensagem(para, texto, tentativa + 1);
+    }
+    console.error(`[${para}] Erro WhatsApp:`, err.response?.data || err.message);
   }
 }
 
