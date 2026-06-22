@@ -3,6 +3,9 @@ const axios = require('axios');
 const { google } = require('googleapis');
 require('dotenv/config');
 
+// Versão do bot — aparece no log de startup e no /health para confirmar qual versão está rodando
+const BOT_VERSION = 'v2026.06.22-spin-fuso-origem';
+
 const app = express();
 app.use(express.json({
   verify: (req, res, buf) => { req.rawBody = buf; }
@@ -243,14 +246,14 @@ const sheets = google.sheets({ version: 'v4', auth });
 const SHEET_ID = '18n8-s1pXQCszT_rYWNEmtBY5OzBvfJi0jownohlAgF0';
 const SHEET_ABA = 'Leads';
 
-const COLUNAS_SHEET = ['Data', 'WhatsApp', 'Nome', 'Email', 'Tipo de Negócio', 'Dor', 'Urgência', 'Horário', 'Link Meet', 'Status', 'Resumo'];
+const COLUNAS_SHEET = ['Data', 'WhatsApp', 'Nome', 'Email', 'Tipo de Negócio', 'Dor', 'Urgência', 'Horário', 'Link Meet', 'Status', 'Resumo', 'Origem'];
 
 // Garante que a primeira linha tenha o cabeçalho
 async function garantirCabecalho() {
   try {
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
-      range: `${SHEET_ABA}!A1:K1`,
+      range: `${SHEET_ABA}!A1:L1`,
     });
     if (!res.data.values || res.data.values.length === 0) {
       await sheets.spreadsheets.values.update({
@@ -286,7 +289,7 @@ async function encontrarLinhaLead(phone) {
 // Cria a linha inicial do lead quando ele inicia a conversa
 // Set de leads já registrados (ou em registro) na planilha — evita linha duplicada
 // quando duas mensagens chegam quase simultaneamente
-async function registrarLeadInicial(phone) {
+async function registrarLeadInicial(phone, origem = '') {
   // Lock em memória: se já está registrado ou em processo, não duplica
   if (leadsRegistradosSheet.has(phone)) return;
   leadsRegistradosSheet.add(phone);
@@ -296,10 +299,10 @@ async function registrarLeadInicial(phone) {
     if (jaExiste) return; // não duplica
 
     const dataAgora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Campo_Grande' });
-    const linha = [dataAgora, phone, '', '', '', '', '', '', '', 'Em conversa', ''];
+    const linha = [dataAgora, phone, '', '', '', '', '', '', '', 'Em conversa', '', origem];
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
-      range: `${SHEET_ABA}!A:K`,
+      range: `${SHEET_ABA}!A:L`,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [linha] },
@@ -329,7 +332,7 @@ async function atualizarLead(phone, dados) {
     // Lê a linha atual para mesclar
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
-      range: `${SHEET_ABA}!A${linha}:K${linha}`,
+      range: `${SHEET_ABA}!A${linha}:L${linha}`,
     });
     const atual = (res.data.values && res.data.values[0]) || new Array(COLUNAS_SHEET.length).fill('');
     while (atual.length < COLUNAS_SHEET.length) atual.push('');
@@ -341,7 +344,7 @@ async function atualizarLead(phone, dados) {
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `${SHEET_ABA}!A${linha}:K${linha}`,
+      range: `${SHEET_ABA}!A${linha}:L${linha}`,
       valueInputOption: 'RAW',
       requestBody: { values: [atual] },
     });
@@ -837,6 +840,7 @@ app.get('/health', (req, res) => {
 
   res.json({
     status: 'ok',
+    versao: BOT_VERSION,
     uptime: uptimeStr,
     leads: {
       ativos: leadsAtivos,
@@ -1235,8 +1239,22 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     else if (horaAtualCG >= 12 && horaAtualCG < 18) saudacaoHora = 'Boa tarde';
     else saudacaoHora = 'Boa noite';
 
-    // Registrar lead na planilha (início da conversa)
-    registrarLeadInicial(userPhone).catch(e => console.error('registrarLeadInicial:', e.message));
+    // Detecta a origem do lead pela primeira mensagem.
+    // Sites geralmente enviam um texto pré-preenchido no link do WhatsApp.
+    let origemLead = 'WhatsApp direto';
+    const textoInicial = (userText || '').toLowerCase();
+    if (/vim do site|pelo site|atrav[ée]s do site|no site de voc[êe]s|site clique e fecha/.test(textoInicial)) {
+      origemLead = 'Site';
+    } else if (/vim do instagram|pelo instagram|no insta|vi no instagram/.test(textoInicial)) {
+      origemLead = 'Instagram';
+    } else if (/indica[çc][ãa]o|me indicaram|fui indicad/.test(textoInicial)) {
+      origemLead = 'Indicação';
+    } else if (/anúncio|anuncio|vi o an[úu]ncio|pelo facebook|vi no facebook/.test(textoInicial)) {
+      origemLead = 'Anúncio';
+    }
+
+    // Registrar lead na planilha (início da conversa) com a origem detectada
+    registrarLeadInicial(userPhone, origemLead).catch(e => console.error('registrarLeadInicial:', e.message));
 
     conversas[userPhone] = [
       {
@@ -2091,7 +2109,12 @@ async function enviarMensagem(para, texto, tentativa = 1) {
   } catch (err) {
     console.error('Erro na inicialização do banco (seguindo sem persistência):', err.message);
   }
-  app.listen(process.env.PORT || 3000, () => console.log('Bot rodando!'));
+  app.listen(process.env.PORT || 3000, () => {
+    console.log('='.repeat(50));
+    console.log(`Bot rodando! Versão: ${BOT_VERSION}`);
+    console.log(`Iniciado em: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Campo_Grande' })} (Campo Grande)`);
+    console.log('='.repeat(50));
+  });
 })();
 
 
