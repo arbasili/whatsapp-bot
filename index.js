@@ -136,7 +136,11 @@ const debounceTimers = {};
 const processandoAgendamento = new Set();
 const mensagensProcessadas = new Set(); // deduplicação de webhooks repetidos da Meta
 const MENSAGENS_PROCESSADAS_MAX = 500; // evita crescimento indefinido
-const agendamentosConfirmados = {}; // { phone: { nome, slotInicio, label, meetLink, lembrete2hEnviado, lembrete30minEnviado } }
+// Estado dinâmico de agendamentos confirmados, por telefone. Campos possíveis:
+//   nome, email, slotInicio, label (Brasília), labelCG (Campo Grande), meetLink, eventId,
+//   lembrete24hEnviado, lembrete2hEnviado, lembrete30minEnviado, noShowEnviado,
+//   presencaConfirmada, presencaConfirmadaEm, remarcando, novosSlots, totalRemarcacoes
+const agendamentosConfirmados = {};
 const rateLimit = {}; // { phone: { count, windowStart } }
 const RATE_LIMIT_MAX = 15; // máximo de mensagens por janela
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // janela de 1 minuto
@@ -310,11 +314,17 @@ async function registrarLeadInicial(phone) {
 // Atualiza campos específicos do lead (recebe objeto com chaves = nome da coluna)
 async function atualizarLead(phone, dados) {
   try {
-    const linha = await encontrarLinhaLead(phone);
+    let linha = await encontrarLinhaLead(phone);
     if (!linha) {
-      // Se não existir ainda, cria primeiro
+      // Lead ainda não existe na planilha: cria e tenta achar UMA única vez.
+      // Não usa recursão — se ainda assim não achar (planilha indisponível),
+      // loga e desiste, evitando loop infinito.
       await registrarLeadInicial(phone);
-      return atualizarLead(phone, dados);
+      linha = await encontrarLinhaLead(phone);
+      if (!linha) {
+        console.error(`[${phone}] Não foi possível criar/localizar a linha na planilha — atualização ignorada.`);
+        return;
+      }
     }
     // Lê a linha atual para mesclar
     const res = await sheets.spreadsheets.values.get({
@@ -1015,7 +1025,7 @@ async function tratarPosAgendamento(userPhone, userText) {
         ag.lembrete24hEnviado = msAteNovoSlot < LEMBRETE_24H_MS;
         ag.lembrete2hEnviado = false;
         ag.lembrete30minEnviado = false;
-        await atualizarLead(userPhone, { 'Horário': escolhido.label, 'Status': 'Reagendado' });
+        await atualizarLead(userPhone, { 'Horário': escolhido.labelCG || escolhido.label, 'Status': 'Reagendado' });
         let msg = `Prontinho, remarcado para ${escolhido.label}.`;
         if (ag.meetLink) msg += ` O link do Google Meet continua o mesmo: ${ag.meetLink}`;
         msg += `\n\nQualquer coisa é só me chamar. Até lá!`;
@@ -1533,7 +1543,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       'Tipo de Negócio': tipoNegocio,
       'Dor': dorPrincipal,
       'Urgência': urgenciaLead,
-      'Horário': slotEscolhido.label,
+      'Horário': slotEscolhido.labelCG || slotEscolhido.label,
       'Link Meet': meetLink || 'Não gerado',
       'Status': 'Agendado',
       'Resumo': resumoConversa
