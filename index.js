@@ -4,7 +4,7 @@ const { google } = require('googleapis');
 require('dotenv/config');
 
 // Versão do bot — aparece no log de startup e no /health para confirmar qual versão está rodando
-const BOT_VERSION = 'v2026.06.22-spin-fuso-origem';
+const BOT_VERSION = 'v2026.06.22-spin-ponte-status';
 
 const app = express();
 app.use(express.json({
@@ -1036,7 +1036,7 @@ async function tratarPosAgendamento(userPhone, userText) {
         await enviarMensagem(userPhone, msg);
       } else {
         await enviarMensagem(userPhone, 'Tive um problema para remarcar aqui. Nossa equipe vai entrar em contato para ajustar com você.');
-        await atualizarLead(userPhone, { 'Status': 'Remarcação pendente' });
+        await atualizarLead(userPhone, { 'Status': 'Remarcando' });
         ag.remarcando = false;
       }
       return true;
@@ -1080,7 +1080,7 @@ async function tratarPosAgendamento(userPhone, userText) {
       log(userPhone, 'info', 'Presença confirmada há pouco — ignorando despedida repetida.');
       return true;
     }
-    await atualizarLead(userPhone, { 'Status': 'Presença confirmada' });
+    await atualizarLead(userPhone, { 'Status': 'Confirmado' });
     ag.presencaConfirmada = true;
     ag.presencaConfirmadaEm = Date.now();
     const saud = ag.nome ? `Combinado, ${ag.nome}!` : 'Combinado!';
@@ -1105,7 +1105,7 @@ async function tratarPosAgendamento(userPhone, userText) {
       log(userPhone, 'warn', `Limite de remarcações atingido (${totalRemarcacoes})`);
       await enviarMensagem(userPhone, 'Entendo! Como já remarcamos algumas vezes, vou pedir para nossa equipe entrar em contato diretamente para encontrar o melhor horário para você.');
       await enviarMensagem(MEU_NUMERO, `*Limite de remarcações atingido*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário atual: ${ag.labelCG || ag.label}\n\nLead tentou remarcar pela ${totalRemarcacoes + 1}ª vez. Tratar manualmente.`);
-      await atualizarLead(userPhone, { 'Status': 'Remarcação manual necessária' });
+      await atualizarLead(userPhone, { 'Status': 'Remarcando' });
       return true;
     }
 
@@ -1118,7 +1118,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     }
     if (novosSlots.length === 0) {
       await enviarMensagem(userPhone, 'Sem problema! No momento não consegui localizar novos horários automaticamente, mas nossa equipe vai entrar em contato para remarcar com você.');
-      await atualizarLead(userPhone, { 'Status': 'Remarcação pendente' });
+      await atualizarLead(userPhone, { 'Status': 'Remarcando' });
       return true;
     }
     ag.remarcando = true;
@@ -1306,13 +1306,14 @@ Depois que o lead contar o que faz, valide brevemente com naturalidade (sem usar
 2c. ENTENDER O QUE QUER MELHORAR (Problema)
 A partir do que o lead descreveu, pergunte o que ele busca melhorar: "E me conta, quais são os pontos que você tem buscado melhorar no seu atendimento?" ou, se o contexto for comercial, "o que você tem buscado melhorar no seu comercial?". Essa forma é mais leve que perguntar "qual seu maior problema" — assume que ele já quer evoluir algo, o que é mais fácil de responder.
 
-2d. AUMENTAR A DOR (Implicação) — etapa mais importante
-Aqui está o ponto-chave da qualificação. Depois que o lead disser o que quer melhorar, faça UMA pergunta de implicação que o leve a verbalizar as CONSEQUÊNCIAS da dor com as próprias palavras. A pergunta deve ser conectada exatamente ao que ele disse. Modelos (adapte sempre ao contexto real):
-- Lead falou em padronização: "O que você sente que acontece hoje quando o atendimento não é padronizado?"
-- Lead falou em demora: "O que acaba acontecendo quando a resposta demora a chegar no cliente?"
-- Lead falou em volume/conta perdida: "E quando não dá conta de responder todo mundo, o que costuma acontecer?"
-- Lead falou em organização: "E quando um lead acaba ficando sem acompanhamento, o que isso gera pra vocês?"
-Quando o lead responde a essa pergunta, ele mesmo diz a dor ("perco cliente", "demora", "fica bagunçado") — e aí a dor passa a ser dele, não sua. Isso aumenta muito a vontade de resolver. Faça apenas UMA pergunta de implicação, não force várias. Nunca use opções genéricas desconectadas do que o lead disse.
+2d. AUMENTAR A DOR (Implicação) — use com leveza, NÃO transforme em interrogatório
+Esta etapa só deve ser usada se a dor ainda não estiver clara. Se o lead já disse algo que mostra a consequência (ex: "perco clientes", "fica bagunçado", "demora demais"), NÃO faça mais nenhuma pergunta de implicação — a dor já está clara, siga em frente (qualificar contexto e depois a ponte para o agendamento).
+Se a dor ainda estiver vaga, faça NO MÁXIMO UMA pergunta de implicação, conectada ao que ele disse. Modelos (adapte ao contexto):
+- Lead falou em demora: "E quando a resposta demora a chegar, isso chega a custar cliente pra você?"
+- Lead falou em volume: "E nos horários de pico, vocês conseguem dar conta de todo mundo?"
+REGRA ABSOLUTA: NUNCA faça duas perguntas de implicação seguidas. Uma é o limite, e só se necessário. Assim que o lead verbalizar uma consequência real ("perco cliente", "deixo gente sem resposta"), PARE de cavar e siga para a ponte. Cavar demais vira interrogatório e cansa o lead.
+
+IMPORTANTE — REAJA COMO GENTE: antes de cada pergunta, reaja brevemente ao que o lead acabou de dizer, com humanidade e variando as palavras (não use sempre "faz sentido"). Quando o lead expõe uma dor real (ex: "perdemos clientes"), valide isso com empatia genuína ("Pô, isso dói mesmo, cliente que vai embora dificilmente volta") ANTES de qualquer próximo passo. Não emende pergunta atrás de pergunta — a conversa tem que respirar, como uma pessoa real conversando.
 
 3. QUALIFICAR O CONTEXTO
 De forma natural, entenda se o lead já usa alguma ferramenta de atendimento ou automação hoje, e por onde os clientes chegam até ele (canal principal de aquisição): "E hoje, por onde seus clientes costumam chegar até você?" — só faça essa pergunta se fluir naturalmente, sem transformar em interrogatório.
@@ -1320,9 +1321,11 @@ De forma natural, entenda se o lead já usa alguma ferramenta de atendimento ou 
 3b. URGÊNCIA
 Depois, entenda o tempo da dor: "Isso está te gerando problema agora ou é algo que você quer resolver nos próximos meses?" Se o lead indicar urgência, você pode, em uma única pergunta natural, entender o gatilho: "O que fez você buscar isso agora?" Não force se a conversa já estiver fluindo para o agendamento.
 
-4. AGENDAR A REUNIÃO
-Após a resposta sobre urgência, responda em EXATAMENTE 2 partes separadas pelo marcador "|||":
-[validação curta e natural sobre a urgência — se for urgente, algo como "Faz sentido resolver isso logo então."; se for futuro, algo como "Faz sentido se preparar com antecedência então."]|||Faria sentido a gente marcar uma conversa rápida de 30 minutos com um especialista da Clique e Fecha para te ajudar a estruturar isso?
+4. PONTE E AGENDAMENTO
+Antes de propor a reunião, faça a PONTE: conecte a dor que o lead trouxe à ideia de que isso tem solução, de forma leve e sem soar vendedor. Não pule direto para "vamos marcar com o especialista" — isso fica abrupto. Primeiro mostre que entendeu e que dá pra resolver. Exemplo de ponte natural: se o lead falou que perde clientes por demora, algo como "Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você não pode." — uma frase curta que liga a dor à solução, sem entrar em detalhes técnicos (isso fica para a reunião).
+
+Depois da ponte, proponha a conversa. Responda em EXATAMENTE 2 partes separadas pelo marcador "|||":
+[ponte curta conectando a dor à solução + validação da urgência]|||Faria sentido marcar uma conversa rápida de 30 minutos com um especialista da Clique e Fecha pra te mostrar como isso funcionaria no seu caso?
 
 A partir daqui, siga esta sequência obrigatória, uma mensagem por vez:
 b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
@@ -1331,7 +1334,11 @@ MARCADOR DE SLOT — OBRIGATÓRIO: Quando o lead escolher ou confirmar um horár
 Exemplo: se os slots são "quinta-feira, 19 de junho às 9h" e "sexta-feira, 20 de junho às 14h", e o lead escolheu o segundo, inclua [SLOT: sexta-feira, 20 de junho às 14h]. Use o label EXATO como foi oferecido, sem alterar texto. O sistema remove esse marcador automaticamente antes de enviar ao lead. Faça isso UMA única vez, logo após o lead confirmar o horário — é essencial mesmo que a confirmação seja vaga (ex: "pode sim", "tá bom", "pode"), pois é o que garante que o agendamento real bata com o horário correto.
 IMPORTANTE: isso também vale quando o SISTEMA ofereceu um horário específico na mensagem anterior (ex: "Tenho segunda-feira, 22 de junho às 14h disponível. Posso reservar?") e o lead confirmou. Nesse caso, emita [SLOT: segunda-feira, 22 de junho às 14h] com o horário que foi oferecido, e avance para confirmar o WhatsApp. NUNCA volte a oferecer horários que já foram aceitos.
 
-DATA ESPECÍFICA PEDIDA PELO LEAD: se em qualquer momento da etapa de agendamento o lead pedir um dia ou horário específico diferente das opções oferecidas (por exemplo "pode ser sexta?", "prefiro quinta às 15h", "dia 20 de manhã", "tem na segunda?"), NÃO responda você mesmo sobre disponibilidade. Em vez disso, responda APENAS com o marcador no formato exato: [VERIFICAR_DATA: texto do que o lead pediu]. Exemplo: se o lead diz "pode ser sexta às 15h", responda somente "[VERIFICAR_DATA: sexta às 15h]". O sistema vai checar a agenda real e cuidar da resposta. Não escreva mais nada junto com esse marcador.
+DATA ESPECÍFICA PEDIDA PELO LEAD: se em qualquer momento da etapa de agendamento o lead pedir um dia ou horário específico DIFERENTE das opções oferecidas (por exemplo "pode ser sexta?", "prefiro quinta às 15h", "dia 20 de manhã", "tem na segunda?"), NÃO responda você mesmo sobre disponibilidade. Em vez disso, responda APENAS com o marcador no formato exato: [VERIFICAR_DATA: texto do que o lead pediu]. Exemplo: se o lead diz "pode ser sexta às 15h", responda somente "[VERIFICAR_DATA: sexta às 15h]". O sistema vai checar a agenda real e cuidar da resposta. Não escreva mais nada junto com esse marcador.
+
+ATENÇÃO — diferença entre ESCOLHER um horário oferecido e PEDIR um novo:
+- Se o lead mencionar um horário que JÁ ESTÁ entre as opções que você ofereceu (ex: você ofereceu "11h ou 15h" e o lead diz "as 15h", "pode as 15", "o das 15", "o segundo"), isso é uma ESCOLHA — emita [SLOT: ...] com o horário escolhido, NÃO use [VERIFICAR_DATA]. Confirmações curtas só com a hora ("as 15h", "15h", "pode 15") são escolhas do horário oferecido.
+- Use [VERIFICAR_DATA] APENAS quando o lead pedir algo que NÃO está entre as opções oferecidas.
 
 c. Após a escolha do horário, reforce o compromisso e confirme o WhatsApp em uma única mensagem: "Perfeito, vou reservar esse horário com o especialista. Posso usar o número ${userPhone} para contato, ou prefere outro?"
 d. Após confirmar o WhatsApp, peça o email com esta mensagem exata: "E qual é o seu email para eu registrar o agendamento?"
@@ -1500,7 +1507,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
           max_tokens: 400,
           messages: [
             ...historicoParaResumo,
-            { role: 'user', content: 'Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "...", "dor": "...", "urgencia": "imediata ou futura", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}. Se algum campo não estiver claro na conversa, use string vazia.' }
+            { role: 'user', content: 'Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "...", "dor": "...", "urgencia": "imediata ou futura", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}. No resumo, NÃO inclua o horário ou data do agendamento (isso já fica em coluna própria). Foque no perfil do lead: negócio, dor principal, contexto e urgência. Se algum campo não estiver claro na conversa, use string vazia.' }
           ]
         },
         { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 20000 }
@@ -1606,7 +1613,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
      await enviarMensagem(MEU_NUMERO, `*Agendamento pendente — finalizar manualmente!*\n\nWhatsApp: ${userPhone}\nErro: ${err.message}\n\nO lead recebeu seus dados mas o link não foi gerado. Finalize o agendamento e envie o link.`)
        .catch(() => {});
      // Marca na planilha como pendente para acompanhamento
-     atualizarLead(userPhone, { 'Status': 'Pendente de agendamento' })
+     atualizarLead(userPhone, { 'Status': 'Qualificando' })
        .catch(e => console.error('atualizarLead pendente:', e.message));
    } finally {
      processandoAgendamento.delete(userPhone);
@@ -1618,7 +1625,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     conversas[userPhone].push({ role: 'assistant', content: resposta });
 
     // Atualiza o nome na planilha assim que for identificado (não espera o agendamento)
-    const nomeAtual = extrairNomeLead(conversas[userPhone]);
+    // Prioriza o nome do marcador [NOME] (mais confiável); só usa heurística se não houver marcador
+    const nomeAtual = agendamentos[userPhone]?.nomeConfirmado || extrairNomeLead(conversas[userPhone]);
     if (nomeAtual) {
       atualizarLead(userPhone, { 'Nome': nomeAtual }).catch(e => console.error(`[${userPhone}] atualizarLead nome:`, e.message));
     }
@@ -1628,13 +1636,13 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const respostaTexto = resposta.toLowerCase();
     let statusIntermediario = null;
     if (/faria sentido|marcar uma conversa|conversa rápida/.test(respostaTexto)) {
-      statusIntermediario = 'Proposta feita';
+      statusIntermediario = 'Agendamento oferecido';
     } else if (/horários disponíveis|tenho duas opções|qual funciona melhor/.test(respostaTexto)) {
-      statusIntermediario = 'Horários oferecidos';
+      statusIntermediario = 'Agendamento oferecido';
     } else if (/posso usar o número|prefere outro/.test(respostaTexto)) {
-      statusIntermediario = 'Confirmando contato';
+      statusIntermediario = 'Aguardando dados';
     } else if (/qual é o seu email|email para eu registrar/.test(respostaTexto)) {
-      statusIntermediario = 'Aguardando email';
+      statusIntermediario = 'Aguardando dados';
     } else if (nomeAtual && conversas[userPhone].filter(m => m.role === 'user').length <= 3) {
       statusIntermediario = 'Qualificando';
     }
@@ -1903,11 +1911,19 @@ function escolherSlot(texto, slots) {
     if (match) return match;
   }
 
-  // 3. Tentar por hora ("9h", "às 14", "14 horas") — label está em horário de Brasília
+  // 3. Tentar por hora ("9h", "às 14", "14 horas", "as 15") — label está em horário de Brasília
+  const textoEhCurto = t.trim().split(/\s+/).length <= 4; // confirmação curta, ex: "pode as 15"
   for (const slot of slots) {
     const matchHora = slot.label.match(/às\s+(\d{1,2})h/);
     const hora = matchHora ? matchHora[1] : null;
-    if (hora && (t.includes(hora + 'h') || t.includes(hora + ' h') || t.includes('às ' + hora) || t.includes(hora + ' hora'))) {
+    if (hora && (
+      t.includes(hora + 'h') ||
+      t.includes(hora + ' h') ||
+      t.includes('às ' + hora) ||
+      t.includes('as ' + hora) ||
+      t.includes(hora + ' hora') ||
+      (textoEhCurto && new RegExp(`\\b${hora}\\b`).test(t))  // hora isolada só em texto curto
+    )) {
       return slot;
     }
   }
@@ -1927,7 +1943,10 @@ function extrairNomeLead(conversa) {
   const CONFIRMACOES = new Set(['sim', 'pode', 'claro', 'isso', 'correto', 'exato', 'isso mesmo',
     'pode sim', 'com certeza', 'ok', 'isso aí', 'perfeito', 'certo', 'é isso', 'é']);
 
-  for (let i = 0; i < conversa.length - 1; i++) {
+  // Começa do índice 2: índice 0 é o prompt do sistema (contém exemplos com "qual o seu nome"
+  // e "Sou o Lucas") e índice 1 é o "Entendido" do assistant. Nenhum deles tem o nome real
+  // do lead, e varrê-los causava captura errada (ex: pegar "Lucas" da apresentação).
+  for (let i = 2; i < conversa.length - 1; i++) {
     const conteudo = textoDoConteudo(conversa[i].content).toLowerCase().replace(/\|\|\|/g, ' ');
     const perguntouNome = PERGUNTAS_NOME.some(p => conteudo.includes(p));
     if (perguntouNome && conversa[i+1] && conversa[i+1].role === 'user') {
