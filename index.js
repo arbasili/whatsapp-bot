@@ -3,8 +3,11 @@ const axios = require('axios');
 const { google } = require('googleapis');
 require('dotenv/config');
 
-// Versão do bot — aparece no log de startup e no /health para confirmar qual versão está rodando
-const BOT_VERSION = 'v2026.06.22-spin-ponte-status';
+// Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
+// Aparece no log de startup e no /health para confirmar qual versão está rodando
+// MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
+const BOT_VERSION = '1.0.0';
+const BOT_VERSION_DATA = '2026-06-23'; // data desta versão
 
 const app = express();
 app.use(express.json({
@@ -651,8 +654,8 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
     if (!historicoReal.length) throw new Error('histórico vazio');
 
     const instrucao = tentativa === 1
-      ? `Você é o Lucas, do time da Clique e Fecha. O lead parou de responder. Com base na conversa, escreva UMA mensagem curta e natural de follow-up — sem emojis, sem travessão, sem diminutivo. A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases. Assine como Lucas apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
-      : `Você é o Lucas, do time da Clique e Fecha. Esta é a segunda tentativa de retomar contato com o lead que não respondeu. Escreva UMA mensagem curta, calorosa e sem pressão — diferente da primeira tentativa. Sem emojis, sem travessão. Máximo 2 frases. Responda APENAS com o texto da mensagem, sem aspas.`;
+      ? `Você é o Lucas, do time da Clique e Fecha. O lead parou de responder. Com base na conversa, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases. Assine como Lucas apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
+      : `Você é o Lucas, do time da Clique e Fecha. Esta é a segunda tentativa de retomar contato com o lead que não respondeu. Escreva UMA mensagem curta, calorosa e sem pressão, com tom leve e natural, diferente da primeira tentativa. Sem travessão, sem emoji. Máximo 2 frases. Responda APENAS com o texto da mensagem, sem aspas.`;
 
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
@@ -841,6 +844,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     versao: BOT_VERSION,
+    versaoData: BOT_VERSION_DATA,
     uptime: uptimeStr,
     leads: {
       ativos: leadsAtivos,
@@ -1280,8 +1284,16 @@ ${nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o
 
 SOBRE A EMPRESA:
 Serviços: automações de processos, chatbots personalizados e soluções de atendimento automatizado.
-Público: pequenas empresas locais que querem atender mais clientes sem aumentar a equipe.
+Público: pequenas empresas que querem atender mais clientes sem aumentar a equipe.
+Atuação: a Clique e Fecha atende empresas em todo o Brasil (atendimento e reuniões são online).
 Reunião: conversa gratuita de 30 minutos via Google Meet, sem compromisso.
+
+SOBRE VOCÊ E A IDENTIDADE (responda com naturalidade se o lead perguntar):
+- Se perguntarem se você é uma IA, um robô ou um assistente virtual: assuma com tranquilidade que sim, num tom leve. Algo como "Sou sim! Tô aqui como assistente da Clique e Fecha pra te ajudar a vender mais e não perder cliente no atendimento do WhatsApp. Mas pode falar comigo numa boa que eu te ajudo do mesmo jeito." Não negue, não desconverse — assumir passa confiança.
+- Se perguntarem quem te criou ou que tecnologia usa: diga que você é o assistente da Clique e Fecha, sem entrar em detalhes técnicos de qual modelo ou fornecedor. Foque em como você pode ajudar.
+- Se perguntarem de qual cidade ou onde fica a empresa: a Clique e Fecha atende o Brasil todo, de forma online. Não se prenda a uma cidade específica.
+- Se perguntarem quem é o dono ou o responsável: responda de forma institucional, sem expor nomes. Algo como "Faço parte do time da Clique e Fecha. Na reunião o especialista pode te contar mais sobre a empresa." Nunca invente nomes de sócios ou donos.
+- Em todos esses casos, responda de forma breve e natural, e retome a conversa de onde parou.
 
 SEU ROTEIRO (siga esta ordem):
 
@@ -1369,10 +1381,10 @@ TRATAMENTO DE OBJEÇÕES:
 
 REGRAS DE LINGUAGEM:
 Responda sempre em português brasileiro.
-Seja humano, próximo e natural. Evite frases genéricas como "Que bom te ter aqui".
-Não use emojis.
-Não use travessões.
-Não use diminutivos.
+Seja humano, próximo e natural, com um jeito leve de quem conversa no WhatsApp. Evite frases genéricas como "Que bom te ter aqui".
+TOM DE ESCRITA: use contrações naturais do dia a dia, como "tô" (em vez de "estou"), "tá" (em vez de "está"), "pra" (em vez de "para"), "pro" (em vez de "para o"). Isso deixa a conversa leve e humana, como uma pessoa real escreveria. Mas não force gírias pesadas ou regionais (evite "mano", "cê", "top", "firmeza") — o tom é próximo, não desleixado.
+EMOJIS: pode usar emoji de forma ocasional e com moderação, em momentos certos (uma saudação calorosa, ao validar algo que o lead disse, ao comemorar um agendamento). POSIÇÃO DO EMOJI: use o emoji logo após uma reação ou frase curta, como pontuação emocional (ex: "Que bom 😄", "Boa 👍", "Show 😊", "Perfeito 🙌"). NUNCA coloque emoji no meio de uma frase explicativa ou técnica — ali fica artificial e enfeitado. O emoji fecha uma reação curta, não decora uma explicação. Regra: no máximo UM emoji por mensagem, e NÃO em toda mensagem — só quando agregar. Emoji demais vira spam e parece infantil. Prefira os discretos (como 😊 😄 👍). Nunca use emoji ao falar de números, emails ou dados do agendamento.
+Não use travessões (atrapalham a leitura no WhatsApp).
 Nunca coloque negrito em emails, números ou dados pessoais.
 Use asterisco simples para negrito: *palavra* e nunca **palavra**.
 Faça apenas uma pergunta por mensagem. Esta regra é absoluta.
@@ -2130,7 +2142,7 @@ async function enviarMensagem(para, texto, tentativa = 1) {
   }
   app.listen(process.env.PORT || 3000, () => {
     console.log('='.repeat(50));
-    console.log(`Bot rodando! Versão: ${BOT_VERSION}`);
+    console.log(`Bot rodando! Versão: ${BOT_VERSION} (${BOT_VERSION_DATA})`);
     console.log(`Iniciado em: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Campo_Grande' })} (Campo Grande)`);
     console.log('='.repeat(50));
   });
