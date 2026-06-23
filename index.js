@@ -1,15 +1,26 @@
 const express = require('express');
 const axios = require('axios');
 const { google } = require('googleapis');
+const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
 require('dotenv/config');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.1.4';
+const BOT_VERSION = '1.2.0';
 const BOT_VERSION_DATA = '2026-06-23'; // data desta versão
 
 const app = express();
+
+// CORS — aceita requisições do painel CRM
+app.use(cors({
+  origin: [
+    'https://painel-clique-fecha-production.up.railway.app',
+    'https://app.cliqueefecha.com.br'
+  ]
+}));
+
 app.use(express.json({
   verify: (req, res, buf) => { req.rawBody = buf; }
 }));
@@ -17,6 +28,27 @@ app.use(express.json({
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const FormData = require('form-data');
+
+// Supabase — autenticação JWT do painel
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+// Middleware de autenticação — valida token JWT do painel antes de cada rota protegida
+async function verificarToken(req, res, next) {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Não autorizado' });
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) return res.status(401).json({ error: 'Token inválido' });
+    req.user = user;
+    next();
+  } catch (err) {
+    console.error('Erro ao verificar token:', err.message);
+    return res.status(401).json({ error: 'Erro na autenticação' });
+  }
+}
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -285,7 +317,9 @@ const ENV_OBRIGATORIAS = [
   'GOOGLE_SERVICE_ACCOUNT_KEY',
   'DATABASE_URL',
   'META_APP_SECRET',
-  'CLIENT_ID'
+  'CLIENT_ID',
+  'SUPABASE_URL',
+  'SUPABASE_SERVICE_ROLE_KEY'
 ];
 const envFaltando = ENV_OBRIGATORIAS.filter(v => !process.env[v]);
 if (envFaltando.length > 0) {
@@ -871,6 +905,67 @@ setInterval(async () => {
 
 const BOT_START_TIME = Date.now();
 let ultimaMensagemProcessada = null; // timestamp da última mensagem processada com sucesso
+
+// ─── ROTAS API CRM ────────────────────────────────────────────────────────────
+
+// GET /api/leads — lista leads do client_id com filtro opcional por status e limite
+app.get('/api/leads', verificarToken, async (req, res) => {
+  try {
+    const { status, limit = 50 } = req.query;
+    let query, params;
+
+    if (status) {
+      query = `SELECT * FROM leads WHERE client_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT $3`;
+      params = [process.env.CLIENT_ID, status, parseInt(limit)];
+    } else {
+      query = `SELECT * FROM leads WHERE client_id = $1 ORDER BY created_at DESC LIMIT $2`;
+      params = [process.env.CLIENT_ID, parseInt(limit)];
+    }
+
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('Erro em GET /api/leads:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar leads' });
+  }
+});
+
+// GET /api/leads/:id — detalhe completo de um lead específico
+app.get('/api/leads/:id', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM leads WHERE id = $1 AND client_id = $2`,
+      [req.params.id, process.env.CLIENT_ID]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Erro em GET /api/leads/:id:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar lead' });
+  }
+});
+
+// GET /api/metrics — métricas agregadas: total, por status e urgência imediata
+app.get('/api/metrics', verificarToken, async (req, res) => {
+  try {
+    const [{ rows: total }, { rows: porStatus }, { rows: urgentes }] = await Promise.all([
+      pool.query(`SELECT COUNT(*) FROM leads WHERE client_id = $1`, [process.env.CLIENT_ID]),
+      pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE client_id = $1 GROUP BY status`, [process.env.CLIENT_ID]),
+      pool.query(`SELECT COUNT(*) FROM leads WHERE client_id = $1 AND urgency = 'imediata'`, [process.env.CLIENT_ID]),
+    ]);
+
+    res.json({
+      total: parseInt(total[0].count),
+      por_status: Object.fromEntries(porStatus.map(r => [r.status, parseInt(r.count)])),
+      urgencia_imediata: parseInt(urgentes[0].count),
+    });
+  } catch (err) {
+    console.error('Erro em GET /api/metrics:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar métricas' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 app.get('/health', (req, res) => {
   const uptime = Math.floor((Date.now() - BOT_START_TIME) / 1000);
