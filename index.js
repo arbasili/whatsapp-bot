@@ -6,7 +6,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.1.0';
+const BOT_VERSION = '1.1.2';
 const BOT_VERSION_DATA = '2026-06-23'; // data desta versão
 
 const app = express();
