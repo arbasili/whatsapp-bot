@@ -6,7 +6,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.1.2';
+const BOT_VERSION = '1.1.4';
 const BOT_VERSION_DATA = '2026-06-23'; // data desta versão
 
 const app = express();
@@ -30,7 +30,7 @@ async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS bot_state (
       phone TEXT NOT NULL,
-      client_id TEXT NOT NULL,
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
       conversas JSONB,
       ultima_mensagem BIGINT,
       follow_up_status JSONB,
@@ -57,7 +57,7 @@ async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS leads (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      client_id TEXT NOT NULL,
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
       phone TEXT NOT NULL,
       name TEXT,
       email TEXT,
@@ -79,13 +79,34 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS conversations (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       lead_id UUID REFERENCES leads(id) ON DELETE CASCADE,
-      client_id TEXT NOT NULL,
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
       messages JSONB NOT NULL DEFAULT '[]',
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
   console.log('Tabelas do banco prontas (bot_state, clients, leads, conversations).');
+
+  // Auto-registro do cliente — garante que o CLIENT_ID existe na tabela clients.
+  // Evita erro de foreign key sem precisar de inserção manual, mesmo que o banco seja limpo.
+  try {
+    const jaExiste = await pool.query('SELECT id FROM clients WHERE id = $1', [CLIENT_ID]);
+    if (jaExiste.rows.length === 0) {
+      const clientName = process.env.CLIENT_NAME || 'Cliente';
+      const clientEmail = process.env.CLIENT_EMAIL || `${CLIENT_ID}@cliqueefecha.com.br`;
+      await pool.query(
+        `INSERT INTO clients (id, name, email, whatsapp_number)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (id) DO NOTHING`,
+        [CLIENT_ID, clientName, clientEmail, process.env.PHONE_NUMBER_ID || '']
+      );
+      console.log(`Cliente auto-registrado: ${clientName} (${CLIENT_ID})`);
+    } else {
+      console.log(`Cliente já registrado: ${CLIENT_ID}`);
+    }
+  } catch (err) {
+    console.error('Erro ao auto-registrar cliente:', err.message);
+  }
 }
 
 // Remove imagens (base64) do histórico antes de persistir, mantendo um placeholder
@@ -275,6 +296,10 @@ if (envFaltando.length > 0) {
 // GROQ_API_KEY é opcional (só usada para transcrição de áudio) — apenas avisa
 if (!process.env.GROQ_API_KEY) {
   console.warn('AVISO: GROQ_API_KEY não configurada — transcrição de áudio ficará indisponível.');
+}
+// CLIENT_NAME e CLIENT_EMAIL são opcionais — usados no auto-registro do cliente no banco
+if (!process.env.CLIENT_NAME || !process.env.CLIENT_EMAIL) {
+  console.warn('AVISO: CLIENT_NAME e/ou CLIENT_EMAIL não configurados — serão usados valores padrão no auto-registro.');
 }
 
 let serviceAccountKey;
