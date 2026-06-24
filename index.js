@@ -8,8 +8,8 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.2.2';
-const BOT_VERSION_DATA = '2026-06-23'; // data desta versão
+const BOT_VERSION = '1.3.1';
+const BOT_VERSION_DATA = '2026-06-24'; // data desta versão
 
 const app = express();
 
@@ -54,7 +54,7 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway.internal')
     ? false
-    : { rejectUnauthorized: false }
+    : { rejectUnauthorized: true }
 });
 
 async function initDb() {
@@ -97,6 +97,7 @@ async function initDb() {
       pain TEXT,
       urgency TEXT,
       status TEXT DEFAULT 'Em conversa',
+      funnel_stages TEXT DEFAULT '',
       scheduled_at TEXT,
       meet_link TEXT,
       summary TEXT,
@@ -105,6 +106,11 @@ async function initDb() {
       updated_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE (client_id, phone)
     )
+  `);
+
+  // Migração: adiciona funnel_stages em tabelas que já existiam antes dessa versão
+  await pool.query(`
+    ALTER TABLE leads ADD COLUMN IF NOT EXISTS funnel_stages TEXT DEFAULT ''
   `);
 
   await pool.query(`
@@ -365,10 +371,10 @@ async function registrarLeadInicial(phone, origem = '') {
   leadsRegistradosPg.add(phone);
   try {
     await pool.query(
-      `INSERT INTO leads (client_id, phone, status, origin, created_at, updated_at)
-       VALUES ($1, $2, 'Em conversa', $3, NOW(), NOW())
+      `INSERT INTO leads (client_id, phone, status, funnel_stages, origin, created_at, updated_at)
+       VALUES ($1, $2, 'Em conversa', $3, $4, NOW(), NOW())
        ON CONFLICT (client_id, phone) DO NOTHING`,
-      [CLIENT_ID, phone, origem]
+      [CLIENT_ID, phone, FUNIL.EM_CONVERSA, origem]
     );
   } catch (err) {
     console.error(`[${phone}] Erro ao registrar lead inicial:`, err.message);
@@ -392,6 +398,7 @@ async function atualizarLead(phone, dados) {
     'Link Meet':      'meet_link',
     'Resumo':         'summary',
     'Origem':         'origin',
+    'Funil':          'funnel_stages',
   };
 
   const sets = [];
@@ -431,7 +438,44 @@ async function atualizarLead(phone, dados) {
   }
 }
 
-// Campo Grande (Mato Grosso do Sul) é UTC-04:00 o ano todo — sem horário de verão desde 2019.
+// ─── FUNIL DE VENDAS ──────────────────────────────────────────────────────────
+// Siglas acumuladas em funnel_stages na ordem em que o lead avança.
+// Cada sigla é adicionada uma única vez — nunca duplicada.
+// Etapas do funil:
+const FUNIL = {
+  EM_CONVERSA:       '[EM]', // lead iniciou contato
+  QUALIFICANDO:      '[QA]', // nome identificado, mapeando dor
+  PRONTO_AGENDAR:    '[PA]', // dor clara, reunião proposta
+  REUNIAO_AGENDADA:  '[RA]', // agendado + confirmou presença
+  REUNIAO_REALIZADA: '[RR]', // reunião aconteceu (manual)
+  FECHADO_VENDA:     '[FV]', // virou cliente (manual)
+  FECHADO_PERDIDO:   '[FP]', // não fechou após reunião (manual)
+  // Saídas do funil:
+  NO_SHOW:           '[NS]', // não apareceu na reunião
+  REMARCANDO:        '[RM]', // pediu remarcação
+  ENCERRADO_SEM:     '[ES]', // encerrou sem agendar
+  ENCERRADO_INATIVO: '[EI]', // inatividade após 2 follow-ups
+};
+
+// Adiciona uma etapa ao funil do lead — idempotente (não duplica se já existir)
+async function registrarEtapaFunil(phone, sigla) {
+  try {
+    // Usa LIKE para verificar se a sigla já existe antes de adicionar
+    await pool.query(
+      `UPDATE leads
+       SET funnel_stages = CASE
+         WHEN funnel_stages LIKE $1 THEN funnel_stages
+         ELSE funnel_stages || $2
+       END,
+       updated_at = NOW()
+       WHERE client_id = $3 AND phone = $4`,
+      [`%${sigla}%`, sigla, CLIENT_ID, phone]
+    );
+  } catch (err) {
+    console.error(`[${phone}] Erro ao registrar etapa ${sigla}:`, err.message);
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
 // Constrói um Date correto para uma data + hora local de Campo Grande,
 // independente do fuso do servidor (Railway roda em UTC).
 const OFFSET_CG = '-04:00';
@@ -800,6 +844,8 @@ setInterval(async () => {
       await enviarMensagem(MEU_NUMERO, `*Lead encerrado*\n\nNome: ${nome}\nWhatsApp: ${phone}\n\nNão respondeu após 2 tentativas de follow-up.`);
       atualizarLead(phone, { 'Status': 'Encerrado por inatividade' })
         .catch(e => console.error('atualizarLead inatividade:', e.message));
+      registrarEtapaFunil(phone, FUNIL.ENCERRADO_INATIVO)
+        .catch(e => console.error('funil inatividade:', e.message));
       // Marca como encerrado mas MANTÉM histórico e ultimaMensagem
       // para que o lead possa retomar com contexto (limpeza ocorre após 30 dias)
       leadsEncerrados.add(phone);
@@ -851,6 +897,7 @@ setInterval(async () => {
         await enviarMensagem(phone, `${saudNS}, sentimos sua falta na conversa de hoje. Aconteceu alguma coisa? Se quiser remarcar, é só me falar e a gente encontra um novo horário.`);
         await enviarMensagem(MEU_NUMERO, `*Possível no-show*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${phone}\nHorário: ${ag.labelCG || ag.label}\n\nLead não apareceu na reunião. Mensagem de retomada enviada automaticamente.`);
         atualizarLead(phone, { 'Status': 'No-show' }).catch(e => console.error('atualizarLead no-show:', e.message));
+        registrarEtapaFunil(phone, FUNIL.NO_SHOW).catch(e => console.error('funil no-show:', e.message));
         ag.noShowEnviado = true;
         await persistirLead(phone);
       }
@@ -945,19 +992,47 @@ app.get('/api/leads/:id', verificarToken, async (req, res) => {
   }
 });
 
-// GET /api/metrics — métricas agregadas: total, por status e urgência imediata
+// GET /api/metrics — métricas agregadas: total, por status, urgência e funil completo
 app.get('/api/metrics', verificarToken, async (req, res) => {
   try {
-    const [{ rows: total }, { rows: porStatus }, { rows: urgentes }] = await Promise.all([
+    const [{ rows: total }, { rows: porStatus }, { rows: urgentes }, { rows: funil }] = await Promise.all([
       pool.query(`SELECT COUNT(*) FROM leads WHERE client_id = $1`, [process.env.CLIENT_ID]),
       pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE client_id = $1 GROUP BY status`, [process.env.CLIENT_ID]),
       pool.query(`SELECT COUNT(*) FROM leads WHERE client_id = $1 AND urgency = 'imediata'`, [process.env.CLIENT_ID]),
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[EM]%') AS em_conversa,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[QA]%') AS qualificando,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[PA]%') AS pronto_agendar,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[RA]%') AS reuniao_agendada,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[RR]%') AS reuniao_realizada,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[FV]%') AS fechado_venda,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[FP]%') AS fechado_perdido,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[NS]%') AS no_show,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[RM]%') AS remarcando,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[ES]%') AS encerrado_sem_agendar,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[EI]%') AS encerrado_inativo
+        FROM leads WHERE client_id = $1
+      `, [process.env.CLIENT_ID]),
     ]);
 
     res.json({
       total: parseInt(total[0].count),
       por_status: Object.fromEntries(porStatus.map(r => [r.status, parseInt(r.count)])),
       urgencia_imediata: parseInt(urgentes[0].count),
+      funil: {
+        em_conversa:        parseInt(funil[0].em_conversa),
+        qualificando:       parseInt(funil[0].qualificando),
+        pronto_agendar:     parseInt(funil[0].pronto_agendar),
+        reuniao_agendada:   parseInt(funil[0].reuniao_agendada),
+        reuniao_realizada:  parseInt(funil[0].reuniao_realizada),
+        fechado_venda:      parseInt(funil[0].fechado_venda),
+        fechado_perdido:    parseInt(funil[0].fechado_perdido),
+        no_show:            parseInt(funil[0].no_show),
+        remarcando:         parseInt(funil[0].remarcando),
+        encerrado_sem_agendar: parseInt(funil[0].encerrado_sem_agendar),
+        encerrado_inativo:  parseInt(funil[0].encerrado_inativo),
+      },
     });
   } catch (err) {
     console.error('Erro em GET /api/metrics:', err.message);
@@ -1169,7 +1244,8 @@ async function tratarPosAgendamento(userPhone, userText) {
         ag.lembrete24hEnviado = msAteNovoSlot < LEMBRETE_24H_MS;
         ag.lembrete2hEnviado = false;
         ag.lembrete30minEnviado = false;
-        await atualizarLead(userPhone, { 'Horário': escolhido.labelCG || escolhido.label, 'Status': 'Reagendado' });
+        await atualizarLead(userPhone, { 'Horário': escolhido.labelCG || escolhido.label, 'Status': 'Reunião agendada' });
+        registrarEtapaFunil(userPhone, FUNIL.REUNIAO_AGENDADA).catch(e => console.error('funil reagendado:', e.message));
         let msg = `Prontinho, remarcado para ${escolhido.label}.`;
         if (ag.meetLink) msg += ` O link do Google Meet continua o mesmo: ${ag.meetLink}`;
         msg += `\n\nQualquer coisa é só me chamar. Até lá!`;
@@ -1177,6 +1253,7 @@ async function tratarPosAgendamento(userPhone, userText) {
       } else {
         await enviarMensagem(userPhone, 'Tive um problema para remarcar aqui. Nossa equipe vai entrar em contato para ajustar com você.');
         await atualizarLead(userPhone, { 'Status': 'Remarcando' });
+        registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando:', e.message));
         ag.remarcando = false;
       }
       return true;
@@ -1220,7 +1297,8 @@ async function tratarPosAgendamento(userPhone, userText) {
       log(userPhone, 'info', 'Presença confirmada há pouco — ignorando despedida repetida.');
       return true;
     }
-    await atualizarLead(userPhone, { 'Status': 'Confirmado' });
+    await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
+    registrarEtapaFunil(userPhone, FUNIL.REUNIAO_AGENDADA).catch(e => console.error('funil confirmado:', e.message));
     ag.presencaConfirmada = true;
     ag.presencaConfirmadaEm = Date.now();
     const saud = ag.nome ? `Combinado, ${ag.nome}!` : 'Combinado!';
@@ -1246,6 +1324,7 @@ async function tratarPosAgendamento(userPhone, userText) {
       await enviarMensagem(userPhone, 'Entendo! Como já remarcamos algumas vezes, vou pedir para nossa equipe entrar em contato diretamente para encontrar o melhor horário para você.');
       await enviarMensagem(MEU_NUMERO, `*Limite de remarcações atingido*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário atual: ${ag.labelCG || ag.label}\n\nLead tentou remarcar pela ${totalRemarcacoes + 1}ª vez. Tratar manualmente.`);
       await atualizarLead(userPhone, { 'Status': 'Remarcando' });
+      registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando limite:', e.message));
       return true;
     }
 
@@ -1259,12 +1338,14 @@ async function tratarPosAgendamento(userPhone, userText) {
     if (novosSlots.length === 0) {
       await enviarMensagem(userPhone, 'Sem problema! No momento não consegui localizar novos horários automaticamente, mas nossa equipe vai entrar em contato para remarcar com você.');
       await atualizarLead(userPhone, { 'Status': 'Remarcando' });
+      registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando sem slot:', e.message));
       return true;
     }
     ag.remarcando = true;
     ag.novosSlots = novosSlots;
     ag.totalRemarcacoes = totalRemarcacoes + 1;
     await atualizarLead(userPhone, { 'Status': 'Remarcando' });
+    registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando:', e.message));
     const opcoes = novosSlots.length >= 2
       ? `${novosSlots[0].label} ou ${novosSlots[1].label}`
       : novosSlots[0].label;
@@ -1446,7 +1527,7 @@ A partir da segunda mensagem do lead, responda normalmente sem o marcador "|||".
 
 2. ENTENDER A OPERAÇÃO (Situação)
 Use o nome da pessoa de forma natural e calorosa a partir daqui, sem soar robótico e sem repetir o nome em toda mensagem. Vá direto para a pergunta, sem frases de transição como "Prazer" ou "Que bom falar com você".
-Primeiro entenda o que o lead faz, com uma pergunta aberta e conversacional: "Me conta sobre a sua operação, o que você faz?" ou "Me conta um pouco sobre o seu negócio, com o que você trabalha?". Deixe o lead descrever — isso abre a conversa melhor do que perguntar a categoria do negócio.
+Primeiro entenda o que o lead faz, com uma pergunta aberta e conversacional: "Me conta sobre a sua operação, o que você faz?". Deixe o lead descrever — isso abre a conversa melhor do que perguntar a categoria do negócio.
 
 2b. ENTENDER O PROCESSO ATUAL (Situação)
 Depois que o lead contar o que faz, valide brevemente com naturalidade (sem usar sempre a mesma expressão) e pergunte como funciona o atendimento hoje: "E hoje, como funciona o seu atendimento?" ou "E hoje, qual é o seu processo de atendimento com os clientes?". Essa pergunta faz o lead descrever a situação atual — e ao descrever, ele mesmo começa a enxergar onde estão as falhas.
@@ -1460,8 +1541,7 @@ Se a dor ainda estiver vaga, primeiro envie uma observação empática em mensag
 "Realmente, o pior é que quando o atendimento depende de cada pessoa, vocês acabam perdendo cliente na hora, porque demora, fica desencontrado e trava o crescimento."
 Depois, em uma nova mensagem, faça NO MÁXIMO UMA pergunta de implicação: "O que acontece aí no dia a dia quando isso falha?" Adapte ao contexto real.
 REGRA ABSOLUTA: NUNCA faça duas perguntas de implicação seguidas. Uma é o limite, e só se necessário. Assim que o lead verbalizar uma consequência real ("perco cliente", "deixo gente sem resposta"), PARE de cavar e siga para a ponte. Cavar demais vira interrogatório e cansa o lead.
-
-IMPORTANTE — REAJA COMO GENTE: antes de cada pergunta, reaja brevemente ao que o lead acabou de dizer, com humanidade e variando as palavras (não use sempre "faz sentido"). Quando o lead expõe uma dor real (ex: "perdemos clientes"), valide isso com empatia genuína ("Pô, isso dói mesmo, cliente que vai embora dificilmente volta") ANTES de qualquer próximo passo. Não emende pergunta atrás de pergunta — a conversa tem que respirar, como uma pessoa real conversando.
+Em qualquer etapa da conversa: antes de avançar, reaja brevemente ao que o lead disse, variando as palavras. Quando o lead expor uma dor real, valide com empatia genuína antes de qualquer próximo passo. Não emende pergunta atrás de pergunta — a conversa precisa respirar.
 
 3. QUALIFICAR O CONTEXTO
 De forma natural, entenda se o lead já usa alguma ferramenta de atendimento ou automação hoje, e por onde os clientes chegam até ele (canal principal de aquisição): "E hoje, por onde seus clientes costumam chegar até você?" — só faça essa pergunta se fluir naturalmente, sem transformar em interrogatório.
@@ -1513,19 +1593,17 @@ TRATAMENTO DE OBJEÇÕES:
 
 "Vou pensar" / "Depois eu vejo": Não pressione. Mantenha a porta aberta com leveza: "Claro, sem problema. Se quiser, posso já deixar um horário reservado e você confirma depois, ou prefere que eu deixe você pensar com calma?" Respeite a resposta.
 
-"Agora não" / "Não tenho tempo": Investigue o motivo antes de aceitar. "Entendo. Só para eu saber, tem alguma coisa que ficou sem resposta ou posso esclarecer algo agora?"
+"Agora não" / "Não tenho tempo": Investigue o motivo antes de aceitar. "Entendo. Só para eu saber, tem alguma coisa que ficou sem resposta ou posso esclarecer algo agora?" Se mencionar falta de tempo, reforce: "A conversa é só 30 minutos e pode ser no horário que for melhor para você."
 
 "Está caro": A conversa é gratuita e sem compromisso. Valores são apresentados na reunião conforme cada caso.
 
 "Já tenho alguém": Respeite e explore se está satisfeito. Se insatisfeito, apresente a conversa como oportunidade de comparar.
 
-"Não tenho tempo": "A conversa é só 30 minutos e pode ser no horário que for melhor para você."
-
 REGRAS DE LINGUAGEM:
 Responda sempre em português brasileiro.
 Seja humano, próximo e natural, com um jeito leve de quem conversa no WhatsApp. Evite frases genéricas como "Que bom te ter aqui".
 TOM DE ESCRITA: use contrações naturais do dia a dia, como "tô" (em vez de "estou"), "tá" (em vez de "está"), "pra" (em vez de "para"), "pro" (em vez de "para o"). Isso deixa a conversa leve e humana, como uma pessoa real escreveria. Mas não force gírias pesadas ou regionais (evite "mano", "cê", "top", "firmeza") — o tom é próximo, não desleixado.
-EMOJIS: pode usar emoji de forma ocasional e com moderação, em momentos certos (uma saudação calorosa, ao validar algo que o lead disse, ao comemorar um agendamento). POSIÇÃO DO EMOJI: use o emoji logo após uma reação ou frase curta, como pontuação emocional (ex: "Que bom 😄", "Boa 👍", "Show 😊", "Perfeito 🙌"). NUNCA coloque emoji no meio de uma frase explicativa ou técnica — ali fica artificial e enfeitado. O emoji fecha uma reação curta, não decora uma explicação. Regra: no máximo UM emoji por mensagem, e NÃO em toda mensagem — só quando agregar. Emoji demais vira spam e parece infantil. Prefira os discretos (como 😊 😄 👍). Nunca use emoji ao falar de números, emails ou dados do agendamento.
+EMOJIS: pode usar emoji de forma ocasional e com moderação, em momentos certos (uma saudação calorosa, ao validar algo que o lead disse, ao comemorar um agendamento). POSIÇÃO DO EMOJI: o emoji só pode aparecer ao FINAL de uma mensagem curta de reação, como pontuação emocional isolada (ex: "Que bom 😄", "Boa 👍", "Show 😊"). NUNCA coloque emoji no meio de uma frase, mesmo que curta — jamais faça "Ótimo! 😊 Tenho duas opções..." ou "Perfeito! 🙌 Vou reservar...". O emoji fecha uma reação, não abre um conteúdo. Regra: no máximo UM emoji por mensagem, e NÃO em toda mensagem — só quando agregar. Emoji demais vira spam e parece infantil. Prefira os discretos (como 😊 😄 👍). Nunca use emoji ao falar de números, emails ou dados do agendamento.
 NUNCA use travessão (—) em nenhuma hipótese. Nem nas mensagens ao lead, nem internamente. Substitua sempre por vírgula ou ponto. Exemplos do que nunca fazer: "o cliente espera — e vai embora", "me conta sobre o negócio — o que você faz?", "responde na hora — mesmo fora do horário". Se sentir vontade de usar travessão, use vírgula ou reescreva a frase.
 Nunca coloque negrito em emails, números ou dados pessoais.
 Use asterisco simples para negrito: *palavra* e nunca **palavra**.
@@ -1533,7 +1611,7 @@ Faça apenas uma pergunta por mensagem. Esta regra é absoluta.
 Mensagens curtas. No máximo dois parágrafos, preferencialmente um. Seja direto e objetivo.
 Nunca escreva instruções internas, meta-comentários ou textos entre parênteses como resposta ao cliente.
 
-VARIAÇÃO DE VOCABULÁRIO (importante): NÃO comece mensagens repetidamente com a mesma expressão. Em especial, EVITE abusar de "Faz sentido" — não use essa expressão em mensagens consecutivas. Varie a forma de validar o que o lead disse: às vezes use "Entendo", "Imagino", "Saquei", "Boa", "Isso é mais comum do que parece", "Pega muita gente nisso", ou simplesmente vá direto à próxima pergunta sem validação. Validar é bom, mas repetir a mesma fórmula soa robótico. Seja natural e variado, como uma pessoa real conversaria.
+VARIAÇÃO DE VOCABULÁRIO (importante): NÃO comece mensagens repetidamente com a mesma expressão. Em especial, EVITE abusar de "Faz sentido" — não use essa expressão em mensagens consecutivas. NUNCA use "Pô" — é informal demais e soa brusco. Varie a forma de validar o que o lead disse: às vezes use "Entendo", "Imagino", "Saquei", "Boa", "Isso é mais comum do que parece", "Pega muita gente nisso", ou simplesmente vá direto à próxima pergunta sem validação. Validar é bom, mas repetir a mesma fórmula soa robótico. Seja natural e variado, como uma pessoa real conversaria.
 
 NÃO SEJA INSISTENTE: se o lead não quiser responder uma pergunta, questionar o porquê dela, ou desviar, NÃO repita a mesma pergunta. Siga a conversa com naturalidade a partir do que ele trouxe. Insistir na mesma pergunta (ex: pedir o mesmo dado três vezes) soa robótico e afasta o lead. Se ele não respondeu algo, tudo bem — avance. A qualificação é uma conversa, não um interrogatório.
 
@@ -1724,9 +1802,10 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       'Urgência': urgenciaLead,
       'Horário': slotEscolhido.labelCG || slotEscolhido.label,
       'Link Meet': meetLink || 'Não gerado',
-      'Status': 'Agendado',
+      'Status': 'Reunião agendada',
       'Resumo': resumoConversa
     }).catch(e => console.error('atualizarLead agendamento:', e.message));
+    registrarEtapaFunil(userPhone, FUNIL.REUNIAO_AGENDADA).catch(e => console.error('funil agendado:', e.message));
 
     await new Promise(r => setTimeout(r, 10000));
 
@@ -1766,9 +1845,10 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
        .catch(() => {});
      await enviarMensagem(MEU_NUMERO, `*Agendamento pendente — finalizar manualmente!*\n\nWhatsApp: ${userPhone}\nErro: ${err.message}\n\nO lead recebeu seus dados mas o link não foi gerado. Finalize o agendamento e envie o link.`)
        .catch(() => {});
-     // Marca na planilha como pendente para acompanhamento
+     // Marca no banco como pendente para acompanhamento
      atualizarLead(userPhone, { 'Status': 'Qualificando' })
        .catch(e => console.error('atualizarLead pendente:', e.message));
+     registrarEtapaFunil(userPhone, FUNIL.QUALIFICANDO).catch(() => {});
    } finally {
      processandoAgendamento.delete(userPhone);
    }
@@ -1778,7 +1858,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     log(userPhone, 'info', `Resposta Claude: "${resposta.slice(0, 100)}"`);
     conversas[userPhone].push({ role: 'assistant', content: resposta });
 
-    // Atualiza o nome na planilha assim que for identificado (não espera o agendamento)
+    // Atualiza o nome no banco assim que for identificado (não espera o agendamento)
     // Prioriza o nome do marcador [NOME] (mais confiável); só usa heurística se não houver marcador
     const nomeAtual = agendamentos[userPhone]?.nomeConfirmado || extrairNomeLead(conversas[userPhone]);
     if (nomeAtual) {
@@ -1813,9 +1893,9 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const respostaTexto = resposta.toLowerCase();
     let statusIntermediario = null;
     if (/faria sentido|marcar uma conversa|conversa rápida/.test(respostaTexto)) {
-      statusIntermediario = 'Agendamento oferecido';
+      statusIntermediario = 'Pronto para agendar';
     } else if (/horários disponíveis|tenho duas opções|qual funciona melhor/.test(respostaTexto)) {
-      statusIntermediario = 'Agendamento oferecido';
+      statusIntermediario = 'Pronto para agendar';
     } else if (/posso usar o número|prefere outro/.test(respostaTexto)) {
       statusIntermediario = 'Aguardando dados';
     } else if (/qual é o seu email|email para eu registrar/.test(respostaTexto)) {
@@ -1825,6 +1905,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     }
     if (statusIntermediario) {
       atualizarLead(userPhone, { 'Status': statusIntermediario }).catch(e => console.error(`[${userPhone}] atualizarLead status:`, e.message));
+      if (statusIntermediario === 'Qualificando') registrarEtapaFunil(userPhone, FUNIL.QUALIFICANDO).catch(() => {});
+      if (statusIntermediario === 'Pronto para agendar') registrarEtapaFunil(userPhone, FUNIL.PRONTO_AGENDAR).catch(() => {});
     }
 
     // Detectar marcador de nome [NOME: X] emitido pelo Claude
@@ -1970,10 +2052,11 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     if (encerrarEfetivo) {
       log(userPhone, 'info', 'Conversa encerrada.');
       leadsEncerrados.add(userPhone);
-      // Marca como encerrado na planilha apenas se não tiver agendado
+      // Marca como encerrado no banco apenas se não tiver agendado
       if (!leadsAgendados.has(userPhone)) {
         atualizarLead(userPhone, { 'Status': 'Encerrado sem agendar' })
           .catch(e => console.error('atualizarLead encerramento:', e.message));
+        registrarEtapaFunil(userPhone, FUNIL.ENCERRADO_SEM).catch(() => {});
       }
       // Mantém o histórico (conversas e ultimaMensagem) para que, se o lead voltar,
       // o bot responda com contexto. A limpeza definitiva ocorre por expiração (30 dias).
