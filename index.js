@@ -8,7 +8,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.2.0';
+const BOT_VERSION = '1.2.2';
 const BOT_VERSION_DATA = '2026-06-23'; // data desta versão
 
 const app = express();
@@ -1393,7 +1393,7 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
       origemLead = 'Anúncio';
     }
 
-    // Registrar lead na planilha (início da conversa) com a origem detectada
+    // Registrar lead no banco (início da conversa) com a origem detectada
     registrarLeadInicial(userPhone, origemLead).catch(e => console.error('registrarLeadInicial:', e.message));
 
     conversas[userPhone] = [
@@ -1715,7 +1715,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       lembrete30minEnviado: false
     };
 
-    // Atualizar planilha com os dados do agendamento
+    // Atualizar banco com os dados do agendamento
     atualizarLead(userPhone, {
       'Nome': nome || 'Não informado',
       'Email': emailLead,
@@ -1783,6 +1783,29 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const nomeAtual = agendamentos[userPhone]?.nomeConfirmado || extrairNomeLead(conversas[userPhone]);
     if (nomeAtual) {
       atualizarLead(userPhone, { 'Nome': nomeAtual }).catch(e => console.error(`[${userPhone}] atualizarLead nome:`, e.message));
+    }
+
+    // Gravação incremental — grava tipo de negócio, dor e urgência assim que detectados
+    // sem esperar o agendamento, para o painel CRM mostrar dados em tempo real
+    const tipoNegocio = extrairTipoNegocio(conversas[userPhone]);
+    if (tipoNegocio && !agendamentos[userPhone]?.tipoNegocioGravado) {
+      atualizarLead(userPhone, { 'Tipo de Negócio': tipoNegocio }).catch(e => console.error(`[${userPhone}] atualizarLead tipo:`, e.message));
+      if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
+      agendamentos[userPhone].tipoNegocioGravado = true;
+    }
+
+    const dorLead = extrairDorLead(conversas[userPhone]);
+    if (dorLead && !agendamentos[userPhone]?.dorGravada) {
+      atualizarLead(userPhone, { 'Dor': dorLead }).catch(e => console.error(`[${userPhone}] atualizarLead dor:`, e.message));
+      if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
+      agendamentos[userPhone].dorGravada = true;
+    }
+
+    const urgenciaDetectada = extrairUrgencia(conversas[userPhone]);
+    if (urgenciaDetectada && !agendamentos[userPhone]?.urgenciaGravada) {
+      atualizarLead(userPhone, { 'Urgência': urgenciaDetectada }).catch(e => console.error(`[${userPhone}] atualizarLead urgencia:`, e.message));
+      if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
+      agendamentos[userPhone].urgenciaGravada = true;
     }
 
     // Atualiza status intermediário no funil conforme a etapa da conversa
@@ -2084,6 +2107,80 @@ function escolherSlot(texto, slots) {
   // 4. Tentar por ordem ("primeira/primeiro/1", "segunda opção/2")
   if (/\bprimeir|1[ªao]?\b|op[çc][ãa]o 1/.test(t) && slots[0]) return slots[0];
   if (/\bsegund|2[ªao]?\b|op[çc][ãa]o 2/.test(t) && slots[1]) return slots[1];
+
+  return null;
+}
+
+// Extrai o tipo de negócio do lead a partir da conversa
+function extrairTipoNegocio(historico) {
+  if (!historico || historico.length < 3) return null;
+
+  const mensagensUsuario = historico
+    .filter(m => m.role === 'user')
+    .slice(-5)
+    .map(m => textoDoConteudo(m.content))
+    .join(' ')
+    .toLowerCase();
+
+  const respostasBot = historico
+    .filter(m => m.role === 'assistant')
+    .slice(-5)
+    .map(m => textoDoConteudo(m.content))
+    .join(' ')
+    .toLowerCase();
+
+  const padroes = [
+    /(?:tenho|trabalho com|sou dono de|tenho um[a]?)\s+([^.!?\n]{3,40})/i,
+    /(?:meu negócio|minha empresa|meu estabelecimento)\s+(?:é|são)\s+([^.!?\n]{3,40})/i,
+  ];
+
+  for (const padrao of padroes) {
+    const match = mensagensUsuario.match(padrao);
+    if (match) return match[1].trim();
+  }
+
+  const confirmacaoBot = respostasBot.match(/(?:^|\s)([\w\s]{3,30})\s+(?:é um negócio|é uma área|é um segmento)/i);
+  if (confirmacaoBot) return confirmacaoBot[1].trim();
+
+  return null;
+}
+
+// Extrai a dor principal do lead a partir das mensagens do usuário
+function extrairDorLead(historico) {
+  if (!historico || historico.length < 4) return null;
+
+  const mensagensUsuario = historico
+    .filter(m => m.role === 'user')
+    .slice(-8)
+    .map(m => textoDoConteudo(m.content))
+    .filter(m => m.length > 15)
+    .join(' | ');
+
+  if (mensagensUsuario.length < 20) return null;
+
+  return mensagensUsuario.slice(0, 200);
+}
+
+// Detecta urgência com base nas palavras usadas pelo lead
+function extrairUrgencia(historico) {
+  if (!historico || historico.length < 4) return null;
+
+  const texto = historico
+    .filter(m => m.role === 'user')
+    .slice(-6)
+    .map(m => textoDoConteudo(m.content))
+    .join(' ')
+    .toLowerCase();
+
+  if (/agora|urgente|hoje|essa semana|o mais rápido|quanto antes|imediato|imediata/.test(texto)) {
+    return 'imediata';
+  }
+  if (/próxim[ao]s? (dias?|semanas?)|em breve|logo/.test(texto)) {
+    return 'próximos dias';
+  }
+  if (/próxim[ao]s? (meses?)|futuramente|sem pressa|quando der/.test(texto)) {
+    return 'próximos meses';
+  }
 
   return null;
 }
