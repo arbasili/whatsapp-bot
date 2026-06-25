@@ -9,7 +9,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.3.8';
+const BOT_VERSION = '1.3.9';
 const BOT_VERSION_DATA = '2026-06-24'; // data desta versão
 
 const app = express();
@@ -1560,7 +1560,9 @@ Exemplo completo com pet shop:
 "Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você tá ocupado com outro cliente.|||Faria sentido marcar uma conversa rápida de 30 minutos com um especialista da Clique e Fecha pra te mostrar como isso funcionaria no seu pet shop?"
 
 A partir daqui, siga esta sequência obrigatória, uma mensagem por vez:
-b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
+b. Somente após a confirmação, explique a reunião e ofereça os horários em EXATAMENTE 2 partes separadas pelo marcador "|||". A primeira parte explica o que é a conversa, a segunda oferece os horários:
+"É uma conversa gratuita e sem compromisso, pelo Google Meet, com um dos nossos especialistas. Em 30 minutos ele entende o seu caso e te mostra o que dá pra fazer pra resolver isso no seu negócio.|||Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor pra você?"
+Adapte a primeira parte ao contexto do lead (ex: "no seu pet shop", "na sua empresa", etc).
 
 MARCADOR DE SLOT — OBRIGATÓRIO: Quando o lead escolher ou confirmar um horário (qualquer resposta indicando aceitação de um slot, mesmo indireta como "pode ser", "esse mesmo", "pode", "tá bom"), inclua na sua resposta o marcador exato com o horário completo escolhido: [SLOT: label completo do slot escolhido]
 Exemplo: se os slots são "quinta-feira, 19 de junho às 9h" e "sexta-feira, 20 de junho às 14h", e o lead escolheu o segundo, inclua [SLOT: sexta-feira, 20 de junho às 14h]. Use o label EXATO como foi oferecido, sem alterar texto. O sistema remove esse marcador automaticamente antes de enviar ao lead. Faça isso UMA única vez, logo após o lead confirmar o horário — é essencial mesmo que a confirmação seja vaga (ex: "pode sim", "tá bom", "pode"), pois é o que garante que o agendamento real bata com o horário correto.
@@ -1909,10 +1911,10 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     } else if (/horários disponíveis|tenho duas opções|qual funciona melhor/.test(respostaTextoCompleto)) {
       statusIntermediario = 'Pronto para agendar';
     } else if (/posso usar o número|prefere outro/.test(respostaTexto)) {
-      statusIntermediario = 'Aguardando dados';
+      statusIntermediario = 'Aguardando confirmação de contato';
     } else if (/qual é o seu email|email para eu registrar/.test(respostaTexto)) {
-      statusIntermediario = 'Aguardando dados';
-    } else if (nomeAtual && conversas[userPhone].filter(m => m.role === 'user').length <= 3) {
+      statusIntermediario = 'Aguardando email';
+    } else if (nomeAtual && conversas[userPhone].filter(m => m.role === 'user').length <= 5) {
       statusIntermediario = 'Qualificando';
     }
     if (statusIntermediario) {
@@ -2036,7 +2038,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const agendamentoFoiOferecido = leadsAgendados.has(userPhone) ||
       (conversas[userPhone] || []).some(m =>
         m.role === 'assistant' &&
-        /marcar uma conversa|conversa rápida|conversa gratuita|hor[áa]rios? dispon[íi]ve|tenho duas op[çc]|qual funciona melhor|posso usar o n[úu]mero|qual [ée] o seu email|posso reservar|especialista/i.test(textoDoConteudo(m.content))
+        /marcar uma conversa|conversa rápida|conversa gratuita|hor[áa]rios? dispon[íi]ve|tenho duas op[çc]|qual funciona melhor|posso usar o n[úu]mero|qual [ée] o seu email|posso reservar|especialista|aguardando email|aguardando confirma/i.test(textoDoConteudo(m.content))
       );
 
     const encerrarEfetivo = deveEncerrar && agendamentoFoiOferecido;
