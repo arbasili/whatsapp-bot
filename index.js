@@ -8,7 +8,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.3.1';
+const BOT_VERSION = '1.3.4';
 const BOT_VERSION_DATA = '2026-06-24'; // data desta versão
 
 const app = express();
@@ -1530,18 +1530,17 @@ Use o nome da pessoa de forma natural e calorosa a partir daqui, sem soar robót
 Primeiro entenda o que o lead faz, com uma pergunta aberta e conversacional: "Me conta sobre a sua operação, o que você faz?". Deixe o lead descrever — isso abre a conversa melhor do que perguntar a categoria do negócio.
 
 2b. ENTENDER O PROCESSO ATUAL (Situação)
-Depois que o lead contar o que faz, valide brevemente com naturalidade (sem usar sempre a mesma expressão) e pergunte como funciona o atendimento hoje: "E hoje, como funciona o seu atendimento?" ou "E hoje, qual é o seu processo de atendimento com os clientes?". Essa pergunta faz o lead descrever a situação atual — e ao descrever, ele mesmo começa a enxergar onde estão as falhas.
+Depois que o lead contar o que faz, valide brevemente com naturalidade (sem usar sempre a mesma expressão) e pergunte como funciona o atendimento hoje no WhatsApp: "E hoje, como funciona o seu atendimento com os clientes no WhatsApp?" Essa pergunta faz o lead descrever a situação atual — e ao descrever, ele mesmo começa a enxergar onde estão as falhas.
 
 2c. ENTENDER O QUE QUER MELHORAR (Problema)
 A partir do que o lead descreveu, aprofunde com uma pergunta direta e consultiva: "Me diz só uma coisa: hoje o que mais pega no WhatsApp aí, demora, perda de orçamento ou bagunça no atendimento?" Adapte as opções ao contexto real do lead — se ele já mencionou algo específico, use isso como ancoragem em vez das opções genéricas. O objetivo é fazer o lead nomear a dor principal com clareza.
 
 2d. AUMENTAR A DOR (Implicação) — use com leveza, NÃO transforme em interrogatório
 Esta etapa só deve ser usada se a dor ainda não estiver clara. Se o lead já disse algo que mostra a consequência (ex: "perco clientes", "fica bagunçado", "demora demais"), NÃO faça mais nenhuma pergunta de implicação — a dor já está clara, siga em frente.
-Se a dor ainda estiver vaga, primeiro envie uma observação empática em mensagem separada, conectada ao que o lead disse. Use este modelo como referência e adapte ao contexto real:
-"Realmente, o pior é que quando o atendimento depende de cada pessoa, vocês acabam perdendo cliente na hora, porque demora, fica desencontrado e trava o crescimento."
-Depois, em uma nova mensagem, faça NO MÁXIMO UMA pergunta de implicação: "O que acontece aí no dia a dia quando isso falha?" Adapte ao contexto real.
-REGRA ABSOLUTA: NUNCA faça duas perguntas de implicação seguidas. Uma é o limite, e só se necessário. Assim que o lead verbalizar uma consequência real ("perco cliente", "deixo gente sem resposta"), PARE de cavar e siga para a ponte. Cavar demais vira interrogatório e cansa o lead.
-Em qualquer etapa da conversa: antes de avançar, reaja brevemente ao que o lead disse, variando as palavras. Quando o lead expor uma dor real, valide com empatia genuína antes de qualquer próximo passo. Não emende pergunta atrás de pergunta — a conversa precisa respirar.
+Se a dor ainda estiver vaga, responda em EXATAMENTE 2 partes separadas pelo marcador "|||": a primeira é a observação empática, a segunda é a pergunta de implicação. Curtas e separadas:
+[observação empática curta conectada ao que o lead disse]|||[UMA pergunta curta de implicação]
+Exemplo: "Isso é mais comum do que parece nos pet shops, principalmente quando tá no meio do atendimento presencial e o WhatsApp vai acumulando.|||O que acontece quando demora, o cliente some ou reclama?"
+REGRA ABSOLUTA: NUNCA coloque duas perguntas na mesma mensagem, nem antes nem depois do |||. Uma pergunta por mensagem, sempre. Assim que o lead verbalizar uma consequência real ("perco cliente", "some", "reclama"), PARE e siga para a ponte.
 
 3. QUALIFICAR O CONTEXTO
 De forma natural, entenda se o lead já usa alguma ferramenta de atendimento ou automação hoje, e por onde os clientes chegam até ele (canal principal de aquisição): "E hoje, por onde seus clientes costumam chegar até você?" — só faça essa pergunta se fluir naturalmente, sem transformar em interrogatório.
@@ -1552,8 +1551,11 @@ Depois, entenda o tempo da dor: "Isso está te gerando problema agora ou é algo
 4. PONTE E AGENDAMENTO
 Antes de propor a reunião, faça a PONTE: conecte a dor que o lead trouxe à ideia de que isso tem solução, de forma leve e sem soar vendedor. Não pule direto para "vamos marcar com o especialista" — isso fica abrupto. Primeiro mostre que entendeu e que dá pra resolver. Exemplo de ponte natural: se o lead falou que perde clientes por demora, algo como "Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você não pode." Uma frase curta que liga a dor à solução, sem entrar em detalhes técnicos (isso fica para a reunião).
 
-Depois da ponte, proponha a conversa. Responda em EXATAMENTE 2 partes separadas pelo marcador "|||":
-[ponte curta conectando a dor à solução + validação da urgência]|||Faria sentido marcar uma conversa rápida de 30 minutos com um especialista da Clique e Fecha pra te mostrar como isso funcionaria no seu caso?
+Depois da ponte, proponha a conversa. Responda em EXATAMENTE 2 partes separadas pelo marcador "|||". A primeira parte é a ponte, a segunda é a proposta de reunião — sempre separadas, com uma pausa natural entre elas:
+[ponte curta conectando a dor à solução]|||Faria sentido marcar uma conversa rápida de 30 minutos com um especialista da Clique e Fecha pra te mostrar como isso funcionaria no seu caso?
+
+Exemplo completo com pet shop:
+"Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você tá ocupado com outro cliente.|||Faria sentido marcar uma conversa rápida de 30 minutos com um especialista da Clique e Fecha pra te mostrar como isso funcionaria no seu pet shop?"
 
 A partir daqui, siga esta sequência obrigatória, uma mensagem por vez:
 b. Somente após a confirmação, ofereça os dois horários com um de manhã e outro de tarde: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor para você?"
@@ -1810,7 +1812,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     await new Promise(r => setTimeout(r, 10000));
 
     const saudacao = nome ? `Agendamento confirmado, ${nome}!` : `Agendamento confirmado!`;
-    const despedida = nome ? `O especialista entrará em contato antes da reunião para confirmar os detalhes. Até lá, ${nome}!` : `O especialista entrará em contato antes da reunião para confirmar os detalhes. Até lá!`;
+    const avisoEmail = `Um email com as informações da reunião foi enviado para ${emailLead}.`;
+    const despedida = nome ? `O especialista entrará em contato pelo WhatsApp antes da reunião para confirmar os detalhes. Até lá, ${nome}!` : `O especialista entrará em contato pelo WhatsApp antes da reunião para confirmar os detalhes. Até lá!`;
     const nomeExibicao = nome || 'Não informado';
 
     if (meetLink) {
@@ -1823,6 +1826,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
         `Link do Google Meet: ${meetLink}`
       );
       await new Promise(r => setTimeout(r, 10000));
+      await enviarMensagem(userPhone, avisoEmail);
+      await new Promise(r => setTimeout(r, 3000));
       await enviarMensagem(userPhone, despedida);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.labelCG || slotEscolhido.label}\nMeet: ${meetLink}`);
     } else {
@@ -1835,6 +1840,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
         `Atenção: o link do Google Meet não foi gerado automaticamente. Nossa equipe entrará em contato para enviar o link.`
       );
       await new Promise(r => setTimeout(r, 10000));
+      await enviarMensagem(userPhone, avisoEmail);
+      await new Promise(r => setTimeout(r, 3000));
       await enviarMensagem(userPhone, despedida);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${slotEscolhido.labelCG || slotEscolhido.label}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
@@ -1890,7 +1897,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
     // Atualiza status intermediário no funil conforme a etapa da conversa
     // Detecta pela resposta do bot qual etapa acabou de acontecer
-    const respostaTexto = resposta.toLowerCase();
+    // Testa apenas a primeira parte da resposta (antes do |||) para não perder detecções quando o bot usa marcador de separação
+    const respostaTexto = resposta.split('|||')[0].toLowerCase();
     let statusIntermediario = null;
     if (/faria sentido|marcar uma conversa|conversa rápida/.test(respostaTexto)) {
       statusIntermediario = 'Pronto para agendar';
@@ -2041,7 +2049,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       await new Promise(r => setTimeout(r, 3000));
       await enviarMensagem(userPhone, partes[2]);
     } else if (partes.length === 2) {
-      // Validação + proposta de conversa
+      // Duas partes separadas por |||: ponte + proposta, ou observação empática + pergunta de implicação
       await enviarMensagem(userPhone, partes[0]);
       await new Promise(r => setTimeout(r, 5000));
       await enviarMensagem(userPhone, partes[1]);
