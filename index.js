@@ -9,7 +9,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.3.7';
+const BOT_VERSION = '1.3.8';
 const BOT_VERSION_DATA = '2026-06-24'; // data desta versão
 
 const app = express();
@@ -1899,12 +1899,14 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
     // Atualiza status intermediário no funil conforme a etapa da conversa
     // Detecta pela resposta do bot qual etapa acabou de acontecer
-    // Testa apenas a primeira parte da resposta (antes do |||) para não perder detecções quando o bot usa marcador de separação
+    // Testa a resposta completa para detectar status, mas usa só a primeira parte para evitar
+    // falsos positivos quando o bot usa ||| para separar mensagens distintas
+    const respostaTextoCompleto = resposta.toLowerCase();
     const respostaTexto = resposta.split('|||')[0].toLowerCase();
     let statusIntermediario = null;
-    if (/faria sentido|marcar uma conversa|conversa rápida/.test(respostaTexto)) {
+    if (/faria sentido|marcar uma conversa|conversa rápida/.test(respostaTextoCompleto)) {
       statusIntermediario = 'Pronto para agendar';
-    } else if (/horários disponíveis|tenho duas opções|qual funciona melhor/.test(respostaTexto)) {
+    } else if (/horários disponíveis|tenho duas opções|qual funciona melhor/.test(respostaTextoCompleto)) {
       statusIntermediario = 'Pronto para agendar';
     } else if (/posso usar o número|prefere outro/.test(respostaTexto)) {
       statusIntermediario = 'Aguardando dados';
