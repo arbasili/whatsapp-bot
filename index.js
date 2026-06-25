@@ -8,8 +8,8 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.3.5';
-const BOT_VERSION_DATA = '2026-06-25'; // data desta versão
+const BOT_VERSION = '1.3.6';
+const BOT_VERSION_DATA = '2026-06-24'; // data desta versão
 
 const app = express();
 
@@ -58,6 +58,17 @@ const pool = new Pool({
 });
 
 async function initDb() {
+  // clients precisa existir antes das tabelas que a referenciam (bot_state, leads, conversations)
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS clients (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      whatsapp_number TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   // Tabela de runtime — estado em memória persistido por lead (não é CRM, é operação do bot)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS bot_state (
@@ -72,17 +83,6 @@ async function initDb() {
       agendamento_confirmado JSONB,
       updated_at TIMESTAMPTZ DEFAULT NOW(),
       PRIMARY KEY (phone, client_id)
-    )
-  `);
-
-  // Tabelas de negócio (SaaS multi-cliente)
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS clients (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      name TEXT NOT NULL,
-      email TEXT UNIQUE NOT NULL,
-      whatsapp_number TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
 
