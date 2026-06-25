@@ -9,7 +9,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.4.1';
+const BOT_VERSION = '1.4.3';
 const BOT_VERSION_DATA = '2026-06-24'; // data desta versão
 
 const app = express();
@@ -991,6 +991,38 @@ app.get('/api/leads/:id', verificarToken, async (req, res) => {
   } catch (err) {
     console.error('Erro em GET /api/leads/:id:', err.message);
     res.status(500).json({ error: 'Erro ao buscar lead' });
+  }
+});
+
+// PATCH /api/leads/:id/status — atualização manual de etapa pelo especialista
+app.patch('/api/leads/:id/status', verificarToken, async (req, res) => {
+  try {
+    const { status, sigla } = req.body;
+    const PERMITIDOS = ['Reunião realizada', 'Fechado e Venda', 'Fechado e Perdido'];
+    const SIGLAS_VALIDAS = ['[RR]', '[FV]', '[FP]'];
+    if (!PERMITIDOS.includes(status)) {
+      return res.status(400).json({ error: 'Status não permitido' });
+    }
+    if (!sigla || !SIGLAS_VALIDAS.includes(sigla)) {
+      return res.status(400).json({ error: 'Sigla inválida ou não informada' });
+    }
+    const { rows } = await pool.query(
+      `UPDATE leads
+       SET status = $1,
+           funnel_stages = CASE
+             WHEN funnel_stages LIKE $5 THEN funnel_stages
+             ELSE COALESCE(funnel_stages, '') || $2
+           END,
+           updated_at = NOW()
+       WHERE id = $3 AND client_id = $4
+       RETURNING *`,
+      [status, sigla, req.params.id, process.env.CLIENT_ID, `%${sigla}%`]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Erro em PATCH /api/leads/:id/status:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar status' });
   }
 });
 
