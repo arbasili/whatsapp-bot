@@ -8,8 +8,8 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.3.4';
-const BOT_VERSION_DATA = '2026-06-24'; // data desta versão
+const BOT_VERSION = '1.3.5';
+const BOT_VERSION_DATA = '2026-06-25'; // data desta versão
 
 const app = express();
 
@@ -54,7 +54,7 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway.internal')
     ? false
-    : { rejectUnauthorized: true }
+    : { rejectUnauthorized: false }
 });
 
 async function initDb() {
