@@ -9,7 +9,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.4.0';
+const BOT_VERSION = '1.4.1';
 const BOT_VERSION_DATA = '2026-06-24'; // data desta versão
 
 const app = express();
@@ -2265,9 +2265,14 @@ function extrairDorLead(historico) {
 function extrairUrgencia(historico) {
   if (!historico || historico.length < 4) return null;
 
-  const texto = historico
-    .filter(m => m.role === 'user')
-    .slice(-6)
+  const mensagensUsuario = historico.filter(m => m.role === 'user');
+
+  // Só detecta urgência a partir da 4ª mensagem do usuário
+  // Antes disso qualquer "hoje", "agora" é contexto casual, não urgência real
+  if (mensagensUsuario.length < 4) return null;
+
+  const texto = mensagensUsuario
+    .slice(3) // ignora as 3 primeiras mensagens (saudação, nome, tipo de negócio)
     .map(m => textoDoConteudo(m.content))
     .join(' ')
     .toLowerCase();
