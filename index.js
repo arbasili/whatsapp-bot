@@ -9,7 +9,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.3.9';
+const BOT_VERSION = '1.4.0';
 const BOT_VERSION_DATA = '2026-06-24'; // data desta versão
 
 const app = express();
@@ -1139,6 +1139,9 @@ app.post('/webhook', async (req, res) => {
       await enviarMensagem(userPhone, 'Não consegui abrir o áudio. Pode tentar de novo ou me escrever por texto?');
       return res.sendStatus(200);
     }
+  } else if (message.type === 'reaction') {
+    // Reação de emoji — ignorar silenciosamente, não responder
+    return res.sendStatus(200);
   } else {
     // Vídeo, documento, figurinha, etc. — ainda não suportado
     await enviarMensagem(userPhone, 'Por enquanto consigo ler apenas texto, áudio e imagem. Pode me escrever por texto?');
