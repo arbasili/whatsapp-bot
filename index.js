@@ -9,7 +9,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.4.5';
+const BOT_VERSION = '1.4.6';
 const BOT_VERSION_DATA = '2026-06-26'; // data desta versão
 
 const app = express();
@@ -977,20 +977,27 @@ let ultimaMensagemProcessada = null; // timestamp da última mensagem processada
 
 // ─── ROTAS API CRM ────────────────────────────────────────────────────────────
 
-// GET /api/leads — lista leads do client_id com filtro opcional por status e limite
+// GET /api/leads — lista leads do client_id com filtro opcional por status, temperature e limite
 app.get('/api/leads', verificarToken, async (req, res) => {
   try {
-    const { status, limit = 50 } = req.query;
-    let query, params;
+    const { status, temperature, limit = 50 } = req.query;
+    let conditions = ['client_id = $1'];
+    let params = [process.env.CLIENT_ID];
+    let idx = 2;
 
     if (status) {
-      query = `SELECT * FROM leads WHERE client_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT $3`;
-      params = [process.env.CLIENT_ID, status, parseInt(limit)];
-    } else {
-      query = `SELECT * FROM leads WHERE client_id = $1 ORDER BY created_at DESC LIMIT $2`;
-      params = [process.env.CLIENT_ID, parseInt(limit)];
+      conditions.push(`status = $${idx}`);
+      params.push(status);
+      idx++;
+    }
+    if (temperature) {
+      conditions.push(`temperature = $${idx}`);
+      params.push(temperature);
+      idx++;
     }
 
+    params.push(parseInt(limit));
+    const query = `SELECT * FROM leads WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT $${idx}`;
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) {
@@ -1809,7 +1816,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
           max_tokens: 400,
           messages: [
             ...historicoParaResumo,
-            { role: 'user', content: 'Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "...", "dor": "...", "urgencia": "imediata ou futura", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}. No resumo, NÃO inclua o horário ou data do agendamento (isso já fica em coluna própria). Foque no perfil do lead: negócio, dor principal, contexto e urgência. Se algum campo não estiver claro na conversa, use string vazia.' }
+            { role: 'user', content: 'Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "...", "dor": "...", "urgencia": "imediata ou próximos dias ou próximos meses", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}. No campo urgencia, use EXATAMENTE um desses três valores: "imediata" (problema acontecendo agora, perda de cliente ativa), "próximos dias" (quer resolver em breve), "próximos meses" (sem urgência clara). No resumo, NÃO inclua o horário ou data do agendamento (isso já fica em coluna própria). Foque no perfil do lead: negócio, dor principal, contexto e urgência. Se algum campo não estiver claro na conversa, use string vazia.' }
           ]
         },
         { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 20000 }
