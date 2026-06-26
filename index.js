@@ -9,7 +9,7 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.4.6';
+const BOT_VERSION = '1.4.7';
 const BOT_VERSION_DATA = '2026-06-26'; // data desta versão
 
 const app = express();
@@ -798,6 +798,7 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
       ? `Você é o Lucas, do time da Clique e Fecha. O lead parou de responder. Com base na conversa, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases. Assine como Lucas apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
       : `Você é o Lucas, do time da Clique e Fecha. Esta é a segunda tentativa de retomar contato com o lead que não respondeu. Escreva UMA mensagem curta, calorosa e sem pressão, com tom leve e natural, diferente da primeira tentativa. Sem travessão, sem emoji. Máximo 2 frases. Responda APENAS com o texto da mensagem, sem aspas.`;
 
+    const inicioFollowUp = Date.now();
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
@@ -810,6 +811,9 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
         timeout: 15000
       }
     );
+    const duracaoFollowUp = Date.now() - inicioFollowUp;
+    const usoFollowUp = resp.data.usage || {};
+    console.log(`[Claude/followup] ${duracaoFollowUp}ms | input: ${usoFollowUp.input_tokens || '?'} | output: ${usoFollowUp.output_tokens || '?'} tokens`);
     return resp.data.content[0].text.trim();
   } catch (err) {
     console.error(`Erro ao gerar follow-up contextual (tentativa ${tentativa}):`, err.message);
@@ -1809,6 +1813,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       while (historicoParaResumo.length && historicoParaResumo[0].role !== 'user') {
         historicoParaResumo.shift();
       }
+      const inicioResumo = Date.now();
       const resumoResp = await axios.post(
         'https://api.anthropic.com/v1/messages',
         {
@@ -1821,6 +1826,9 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
         },
         { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 20000 }
       );
+      const duracaoResumo = Date.now() - inicioResumo;
+      const usoResumo = resumoResp.data.usage || {};
+      console.log(`[Claude/resumo] ${duracaoResumo}ms | input: ${usoResumo.input_tokens || '?'} | output: ${usoResumo.output_tokens || '?'} tokens`);
       const textoResp = resumoResp.data.content[0].text.trim();
       const jsonMatch = textoResp.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
@@ -2174,6 +2182,7 @@ async function chamarClaude(historico) {
 
   const MAX_TENTATIVAS = 3;
   for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+    const inicio = Date.now();
     try {
       const response = await axios.post(
         'https://api.anthropic.com/v1/messages',
@@ -2187,11 +2196,15 @@ async function chamarClaude(historico) {
           timeout: 25000
         }
       );
+      const duracao = Date.now() - inicio;
+      const uso = response.data.usage || {};
+      console.log(`[Claude] ${duracao}ms | input: ${uso.input_tokens || '?'} tokens | output: ${uso.output_tokens || '?'} tokens | msgs enviadas: ${historicoEnviado.length}`);
       return response.data.content[0].text;
     } catch (err) {
+      const duracao = Date.now() - inicio;
       const status = err.response?.status;
       const reintentavel = !status || status === 429 || status >= 500;
-      console.error(`Erro Claude (tentativa ${tentativa}/${MAX_TENTATIVAS}):`, err.response?.data || err.message);
+      console.error(`[Claude] ERRO (tentativa ${tentativa}/${MAX_TENTATIVAS}) | ${duracao}ms | status: ${status || 'sem resposta'}:`, err.response?.data || err.message);
       if (tentativa < MAX_TENTATIVAS && reintentavel) {
         const espera = tentativa * 2000; // 2s, 4s
         await new Promise(r => setTimeout(r, espera));
