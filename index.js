@@ -9,8 +9,8 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.4.3';
-const BOT_VERSION_DATA = '2026-06-24'; // data desta versão
+const BOT_VERSION = '1.4.5';
+const BOT_VERSION_DATA = '2026-06-26'; // data desta versão
 
 const app = express();
 
@@ -100,6 +100,7 @@ async function initDb() {
       urgency TEXT,
       status TEXT DEFAULT 'Em conversa',
       funnel_stages TEXT DEFAULT '',
+      temperature TEXT DEFAULT NULL,
       scheduled_at TEXT,
       meet_link TEXT,
       summary TEXT,
@@ -110,10 +111,9 @@ async function initDb() {
     )
   `);
 
-  // Migração: adiciona funnel_stages em tabelas que já existiam antes dessa versão
-  await pool.query(`
-    ALTER TABLE leads ADD COLUMN IF NOT EXISTS funnel_stages TEXT DEFAULT ''
-  `);
+  // Migrações: adiciona colunas em tabelas que já existiam antes dessa versão
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS funnel_stages TEXT DEFAULT ''`);
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS temperature TEXT DEFAULT NULL`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS conversations (
@@ -401,6 +401,7 @@ async function atualizarLead(phone, dados) {
     'Resumo':         'summary',
     'Origem':         'origin',
     'Funil':          'funnel_stages',
+    'Temperatura':    'temperature',
   };
 
   const sets = [];
@@ -477,6 +478,25 @@ async function registrarEtapaFunil(phone, sigla) {
     console.error(`[${phone}] Erro ao registrar etapa ${sigla}:`, err.message);
   }
 }
+
+// Calcula a temperatura do lead no momento do agendamento
+// Só faz sentido após [RA] — antes é só pipeline
+// Cruza urgência com o conteúdo da dor para classificar o engajamento
+function calcularTemperatura(urgency, pain) {
+  const painTexto = (pain || '').toLowerCase();
+
+  // Palavras que indicam dor forte e perda real
+  const dorQuente = /perd[eo]|cliente foi|foi embora|concorr[êe]ncia|prejuízo|não consigo|tá travando|trava|urgente|agora mesmo|todo dia|toda semana/;
+
+  if (urgency === 'imediata' || dorQuente.test(painTexto)) {
+    return 'quente';
+  }
+  if (urgency === 'próximos dias') {
+    return 'morno';
+  }
+  return 'frio';
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Constrói um Date correto para uma data + hora local de Campo Grande,
 // independente do fuso do servidor (Railway roda em UTC).
@@ -998,8 +1018,12 @@ app.get('/api/leads/:id', verificarToken, async (req, res) => {
 app.patch('/api/leads/:id/status', verificarToken, async (req, res) => {
   try {
     const { status, sigla } = req.body;
-    const PERMITIDOS = ['Reunião realizada', 'Fechado e Venda', 'Fechado e Perdido'];
-    const SIGLAS_VALIDAS = ['[RR]', '[FV]', '[FP]'];
+    const PERMITIDOS = [
+      'Em conversa', 'Qualificando', 'Pronto para agendar',
+      'Reunião agendada', 'Reunião realizada',
+      'Fechado e Venda', 'Fechado e Perdido'
+    ];
+    const SIGLAS_VALIDAS = ['[EM]', '[QA]', '[PA]', '[RA]', '[RR]', '[FV]', '[FP]'];
     if (!PERMITIDOS.includes(status)) {
       return res.status(400).json({ error: 'Status não permitido' });
     }
@@ -1281,7 +1305,12 @@ async function tratarPosAgendamento(userPhone, userText) {
         ag.lembrete24hEnviado = msAteNovoSlot < LEMBRETE_24H_MS;
         ag.lembrete2hEnviado = false;
         ag.lembrete30minEnviado = false;
-        await atualizarLead(userPhone, { 'Horário': escolhido.labelCG || escolhido.label, 'Status': 'Reunião agendada' });
+        const tempAtual = agendamentos[userPhone]?.temperatura;
+        await atualizarLead(userPhone, {
+          'Horário': escolhido.labelCG || escolhido.label,
+          'Status': 'Reunião agendada',
+          'Temperatura': tempAtual || calcularTemperatura(agendamentos[userPhone]?.urgencia, agendamentos[userPhone]?.dor)
+        });
         registrarEtapaFunil(userPhone, FUNIL.REUNIAO_AGENDADA).catch(e => console.error('funil reagendado:', e.message));
         let msg = `Prontinho, remarcado para ${escolhido.label}.`;
         if (ag.meetLink) msg += ` O link do Google Meet continua o mesmo: ${ag.meetLink}`;
@@ -1844,7 +1873,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       'Horário': slotEscolhido.labelCG || slotEscolhido.label,
       'Link Meet': meetLink || 'Não gerado',
       'Status': 'Reunião agendada',
-      'Resumo': resumoConversa
+      'Resumo': resumoConversa,
+      'Temperatura': calcularTemperatura(urgenciaLead, dorPrincipal)
     }).catch(e => console.error('atualizarLead agendamento:', e.message));
     registrarEtapaFunil(userPhone, FUNIL.REUNIAO_AGENDADA).catch(e => console.error('funil agendado:', e.message));
 
