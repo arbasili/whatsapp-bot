@@ -9,8 +9,8 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.5.1';
-const BOT_VERSION_DATA = '2026-06-26'; // data desta versão
+const BOT_VERSION = '1.6.0';
+const BOT_VERSION_DATA = '2026-06-27'; // data desta versão
 
 const app = express();
 
@@ -271,9 +271,17 @@ const LEMBRETE_30MIN_MS = 30 * 60 * 1000;
 const LEMBRETE_24H_MS = 24 * 60 * 60 * 1000;
 const EXPIRACAO_MS = 72 * 60 * 60 * 1000; // 3 dias — tempo para o lead voltar sem perder contexto
 const EXPIRACAO_ENCERRADO_MS = 30 * 24 * 60 * 60 * 1000;
-const FOLLOWUP_1_MS = 2 * 60 * 60 * 1000;
-const FOLLOWUP_2_MS = 24 * 60 * 60 * 1000;
-const ENCERRAMENTO_MS = 24 * 60 * 60 * 1000;
+
+// Follow-ups dentro da janela de 24h da Meta
+// Após 24h da última mensagem do lead, a janela fecha e não podemos mais enviar mensagens livres
+const FOLLOWUP_1_MS  =  1 * 60 * 60 * 1000; //  1h — primeira tentativa
+const FOLLOWUP_2_MS  =  6 * 60 * 60 * 1000; //  6h — segunda tentativa
+const FOLLOWUP_3_MS  = 22 * 60 * 60 * 1000; // 22h — última tentativa dentro da janela
+const JANELA_META_MS = 24 * 60 * 60 * 1000; // 24h — após isso, silêncio (janela fechada)
+
+// Reativação de leads encerrados
+const REATIVACAO_3D_MS =  3 * 24 * 60 * 60 * 1000; // 3 dias — encerrado sem agendar
+const REATIVACAO_7D_MS =  7 * 24 * 60 * 60 * 1000; // 7 dias — encerrado por inatividade
 
 // Limpa entradas antigas do rateLimit a cada 10 minutos para evitar crescimento indefinido
 setInterval(() => {
@@ -455,13 +463,17 @@ const FUNIL = {
   PRONTO_AGENDAR:    '[PA]', // dor clara, reunião proposta
   REUNIAO_AGENDADA:  '[RA]', // agendado + confirmou presença
   REUNIAO_REALIZADA: '[RR]', // reunião aconteceu (manual)
+  PROPOSTA:          '[PR]', // proposta enviada (manual)
+  NEGOCIACAO:        '[NG]', // em negociação (manual)
   FECHADO_VENDA:     '[FV]', // virou cliente (manual)
   FECHADO_PERDIDO:   '[FP]', // não fechou após reunião (manual)
-  // Saídas do funil:
+  // Saídas antes do agendamento:
   NO_SHOW:           '[NS]', // não apareceu na reunião
   REMARCANDO:        '[RM]', // pediu remarcação
   ENCERRADO_SEM:     '[ES]', // encerrou sem agendar
-  ENCERRADO_INATIVO: '[EI]', // inatividade após 2 follow-ups
+  REATIVACAO_3D:     '[R3]', // em reativação 3 dias (substituiu encerrado por inatividade)
+  REATIVACAO_7D:     '[R7]', // em reativação 7 dias
+  PERDIDO_SEM_RESP:  '[PS]', // perdido sem resposta antes da reunião
 };
 
 // Adiciona uma etapa ao funil do lead — idempotente (não duplica se já existir)
@@ -815,7 +827,9 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
 
     const instrucao = tentativa === 1
       ? `Você é o Lucas, do time da Clique e Fecha. O lead parou de responder.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Com base na conversa, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. Se souber a dor do lead, mencione ela de forma leve e direta (ex: "vi que você falou que perde cliente por demora..."). A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases. Assine como Lucas apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
-      : `Você é o Lucas, do time da Clique e Fecha. Esta é a segunda tentativa de retomar contato com o lead que não respondeu.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem curta, calorosa e sem pressão, com tom leve e natural, diferente da primeira tentativa. Se souber a dor do lead, pode mencionar o impacto dela de forma humana. Sem travessão, sem emoji. Máximo 2 frases. Responda APENAS com o texto da mensagem, sem aspas.`;
+      : tentativa === 2
+      ? `Você é o Lucas, do time da Clique e Fecha. Esta é a segunda tentativa de retomar contato com o lead que não respondeu.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem curta, calorosa e sem pressão, com tom leve e natural, diferente da primeira tentativa. Se souber a dor do lead, pode mencionar o impacto dela de forma humana. Sem travessão, sem emoji. Máximo 2 frases. Responda APENAS com o texto da mensagem, sem aspas.`
+      : `Você é o Lucas, do time da Clique e Fecha. Esta é a última tentativa antes de encerrar o contato.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem muito curta, sem pressão, deixando a porta aberta. Tom: "tudo bem se não for o momento certo, só queria deixar o caminho aberto". Sem cobrar resposta, sem urgência. Máximo 1 frase. Sem emoji, sem travessão. Responda APENAS com o texto da mensagem, sem aspas.`;
 
     const inicioFollowUp = Date.now();
     const resp = await axios.post(
@@ -842,7 +856,63 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
   }
 }
 
-// Follow-up automático a cada 15 minutos
+// Job de reativação — roda a cada hora, verifica leads encerrados prontos para reativar
+// Reativação 3 dias: leads encerrado sem agendar ou por inatividade (janela fechou)
+// Reativação 7 dias: leads que não responderam à reativação de 3 dias
+let reativacaoRodando = false;
+setInterval(async () => {
+  if (reativacaoRodando) return;
+  reativacaoRodando = true;
+  try {
+    const agora = Date.now();
+    for (const phone of Object.keys(followUpStatus)) {
+      const status = followUpStatus[phone];
+      if (status.tentativas !== 99) continue; // só processa leads em modo reativação
+      if (dentroDoHorarioSilencio()) continue;
+
+      const tempoEncerrado = agora - status.reativacaoAgendada;
+      const nome = status.nomeExib || 'você';
+      const negocio = status.negocio ? ` o atendimento do ${status.negocio}` : ' o atendimento';
+
+      // Reativação 3 dias — primeira tentativa
+      if (!status.reativacao3dEnviada && tempoEncerrado > REATIVACAO_3D_MS) {
+        const msg = nome !== 'você'
+          ? `${nome}, passando rapidinho. Ainda temos horários disponíveis para mostrar como automatizar${negocio}. Se quiser dar uma olhada, é só me falar.`
+          : `Passando rapidinho. Ainda temos horários disponíveis para mostrar como resolver${negocio}. Se quiser dar uma olhada, é só me falar.`;
+        await enviarMensagem(phone, msg);
+        atualizarLead(phone, { 'Status': 'Reativação 3 dias' }).catch(() => {});
+        registrarEtapaFunil(phone, FUNIL.REATIVACAO_3D).catch(() => {});
+        followUpStatus[phone] = { ...status, reativacao3dEnviada: true, ultimoFollowUp: agora };
+        await persistirLead(phone);
+
+      // Reativação 7 dias — segunda tentativa (se não respondeu à de 3 dias)
+      } else if (status.reativacao3dEnviada && !status.reativacao7dEnviada && tempoEncerrado > REATIVACAO_7D_MS) {
+        const msg = nome !== 'você'
+          ? `${nome}, tentei te alcançar há alguns dias. Se o momento não era o certo antes, tudo bem. Se ainda fizer sentido melhorar${negocio}, pode me chamar quando quiser.`
+          : `Tentei entrar em contato há alguns dias. Se ainda fizer sentido melhorar${negocio}, pode me chamar quando quiser.`;
+        await enviarMensagem(phone, msg);
+        atualizarLead(phone, { 'Status': 'Reativação 7 dias' }).catch(() => {});
+        registrarEtapaFunil(phone, FUNIL.REATIVACAO_7D).catch(() => {});
+        followUpStatus[phone] = { ...status, reativacao7dEnviada: true, ultimoFollowUp: agora };
+        await persistirLead(phone);
+
+      // Perdido sem resposta — encerramento final após reativação 7 dias sem retorno
+      } else if (status.reativacao7dEnviada && !status.perdidoFinal && agora - status.ultimoFollowUp > REATIVACAO_3D_MS) {
+        atualizarLead(phone, { 'Status': 'Perdido sem resposta' }).catch(() => {});
+        registrarEtapaFunil(phone, FUNIL.PERDIDO_SEM_RESP).catch(() => {});
+        await enviarMensagem(MEU_NUMERO,
+          `*Lead perdido sem resposta*\n\nNome: ${nome}\nWhatsApp: ${phone}\nNegócio: ${status.negocio || 'Não informado'}\n\nNão respondeu após reativação de 3 e 7 dias.`
+        );
+        followUpStatus[phone] = { ...status, perdidoFinal: true };
+        await persistirLead(phone);
+      }
+    }
+  } catch (err) {
+    console.error('Erro no job de reativação:', err.message);
+  } finally {
+    reativacaoRodando = false;
+  }
+}, 60 * 60 * 1000); // roda a cada hora
 let followUpRodando = false;
 setInterval(async () => {
   if (followUpRodando) {
@@ -871,30 +941,49 @@ setInterval(async () => {
 
     if (dentroDoHorarioSilencio()) continue; // não envia entre 20h e 8h
 
-    if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
-      const msg = await gerarMsgFollowUp(phone, nome, 1);
-      await enviarMensagem(phone, msg);
-      followUpStatus[phone] = { tentativas: 1, ultimoFollowUp: agora };
-      await persistirLead(phone);
-    } else if (status.tentativas === 1 && agora - status.ultimoFollowUp > FOLLOWUP_2_MS) {
-      const msg = await gerarMsgFollowUp(phone, nome, 2);
-      await enviarMensagem(phone, msg);
-      followUpStatus[phone] = { tentativas: 2, ultimoFollowUp: agora };
-      await persistirLead(phone);
-    } else if (status.tentativas === 2 && agora - status.ultimoFollowUp > ENCERRAMENTO_MS) {
-      const despedida = nome !== 'você'
-        ? `Olá ${nome}, como não tivemos retorno, vou encerrar nosso atendimento por aqui. Se precisar de algo futuramente, é só me chamar. Será um prazer!`
-        : `Como não tivemos retorno, vou encerrar nosso atendimento por aqui. Se precisar de algo futuramente, é só me chamar!`;
-      await enviarMensagem(phone, despedida);
-      await enviarMensagem(MEU_NUMERO, `*Lead encerrado*\n\nNome: ${nome}\nWhatsApp: ${phone}\n\nNão respondeu após 2 tentativas de follow-up.`);
-      atualizarLead(phone, { 'Status': 'Encerrado por inatividade' })
-        .catch(e => console.error('atualizarLead inatividade:', e.message));
-      registrarEtapaFunil(phone, FUNIL.ENCERRADO_INATIVO)
-        .catch(e => console.error('funil inatividade:', e.message));
-      // Marca como encerrado mas MANTÉM histórico e ultimaMensagem
-      // para que o lead possa retomar com contexto (limpeza ocorre após 30 dias)
+    // ── Follow-ups dentro da janela de 24h ──────────────────────────────────
+    // Após 24h da última mensagem do lead a janela da Meta fecha.
+    // Todas as tentativas precisam acontecer antes disso.
+    const dentroJanela = tempoSemResposta < JANELA_META_MS;
+
+    if (dentroJanela) {
+      if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
+        const msg = await gerarMsgFollowUp(phone, nome, 1);
+        await enviarMensagem(phone, msg);
+        followUpStatus[phone] = { tentativas: 1, ultimoFollowUp: agora };
+        await persistirLead(phone);
+
+      } else if (status.tentativas === 1 && tempoSemResposta > FOLLOWUP_2_MS) {
+        const msg = await gerarMsgFollowUp(phone, nome, 2);
+        await enviarMensagem(phone, msg);
+        followUpStatus[phone] = { tentativas: 2, ultimoFollowUp: agora };
+        await persistirLead(phone);
+
+      } else if (status.tentativas === 2 && tempoSemResposta > FOLLOWUP_3_MS) {
+        const msg = await gerarMsgFollowUp(phone, nome, 3);
+        await enviarMensagem(phone, msg);
+        followUpStatus[phone] = { tentativas: 3, ultimoFollowUp: agora };
+        await persistirLead(phone);
+      }
+
+    } else if (status.tentativas >= 3 || (status.tentativas > 0 && !dentroJanela)) {
+      // ── Janela fechou — mover para reativação e encerrar ───────────────────
+      const negocio = extrairTipoNegocio(conversas[phone]);
+      const nomeExib = nome !== 'você' ? nome : '';
+
+      // Marca no funil como em reativação 3 dias
+      await atualizarLead(phone, { 'Status': 'Reativação 3 dias' });
+      registrarEtapaFunil(phone, FUNIL.REATIVACAO_3D).catch(() => {});
+
+      // Agenda reativação — guardamos o timestamp de encerramento no followUpStatus
+      followUpStatus[phone] = {
+        tentativas: 99, // flag especial: indica que está em modo reativação
+        ultimoFollowUp: agora,
+        reativacaoAgendada: agora,
+        negocio,
+        nomeExib
+      };
       leadsEncerrados.add(phone);
-      delete followUpStatus[phone];
       delete agendamentos[phone];
       delete mensagensPendentes[phone];
       if (debounceTimers[phone]) { clearTimeout(debounceTimers[phone]); delete debounceTimers[phone]; }
@@ -1055,9 +1144,11 @@ app.patch('/api/leads/:id/status', verificarToken, async (req, res) => {
     const PERMITIDOS = [
       'Em conversa', 'Qualificando', 'Pronto para agendar',
       'Reunião agendada', 'Reunião realizada',
-      'Fechado e Venda', 'Fechado e Perdido'
+      'Proposta', 'Negociação',
+      'Fechado e Venda', 'Fechado e Perdido',
+      'Reativação 3 dias', 'Reativação 7 dias', 'Perdido sem resposta'
     ];
-    const SIGLAS_VALIDAS = ['[EM]', '[QA]', '[PA]', '[RA]', '[RR]', '[FV]', '[FP]'];
+    const SIGLAS_VALIDAS = ['[EM]', '[QA]', '[PA]', '[RA]', '[RR]', '[PR]', '[NG]', '[FV]', '[FP]', '[R3]', '[R7]', '[PS]'];
     if (!PERMITIDOS.includes(status)) {
       return res.status(400).json({ error: 'Status não permitido' });
     }
@@ -1131,12 +1222,16 @@ app.get('/api/metrics', verificarToken, async (req, res) => {
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[PA]%') AS pronto_agendar,
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[RA]%') AS reuniao_agendada,
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[RR]%') AS reuniao_realizada,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[PR]%') AS proposta,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[NG]%') AS negociacao,
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[FV]%') AS fechado_venda,
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[FP]%') AS fechado_perdido,
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[NS]%') AS no_show,
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[RM]%') AS remarcando,
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[ES]%') AS encerrado_sem_agendar,
-          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[EI]%') AS encerrado_inativo
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[R3]%') AS reativacao_3d,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[R7]%') AS reativacao_7d,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[PS]%') AS perdido_sem_resposta
         FROM leads WHERE client_id = $1
       `, [process.env.CLIENT_ID]),
       pool.query(`
@@ -1156,17 +1251,21 @@ app.get('/api/metrics', verificarToken, async (req, res) => {
       tempo_medio_resposta_min: tempos[0].tempo_resposta_min ? parseFloat(parseFloat(tempos[0].tempo_resposta_min).toFixed(1)) : null,
       tempo_medio_agendamento_h: tempos[0].tempo_agendamento_h ? parseFloat(parseFloat(tempos[0].tempo_agendamento_h).toFixed(1)) : null,
       funil: {
-        em_conversa:        parseInt(funil[0].em_conversa),
-        qualificando:       parseInt(funil[0].qualificando),
-        pronto_agendar:     parseInt(funil[0].pronto_agendar),
-        reuniao_agendada:   parseInt(funil[0].reuniao_agendada),
-        reuniao_realizada:  parseInt(funil[0].reuniao_realizada),
-        fechado_venda:      parseInt(funil[0].fechado_venda),
-        fechado_perdido:    parseInt(funil[0].fechado_perdido),
-        no_show:            parseInt(funil[0].no_show),
-        remarcando:         parseInt(funil[0].remarcando),
+        em_conversa:           parseInt(funil[0].em_conversa),
+        qualificando:          parseInt(funil[0].qualificando),
+        pronto_agendar:        parseInt(funil[0].pronto_agendar),
+        reuniao_agendada:      parseInt(funil[0].reuniao_agendada),
+        reuniao_realizada:     parseInt(funil[0].reuniao_realizada),
+        proposta:              parseInt(funil[0].proposta),
+        negociacao:            parseInt(funil[0].negociacao),
+        fechado_venda:         parseInt(funil[0].fechado_venda),
+        fechado_perdido:       parseInt(funil[0].fechado_perdido),
+        no_show:               parseInt(funil[0].no_show),
+        remarcando:            parseInt(funil[0].remarcando),
         encerrado_sem_agendar: parseInt(funil[0].encerrado_sem_agendar),
-        encerrado_inativo:  parseInt(funil[0].encerrado_inativo),
+        reativacao_3d:         parseInt(funil[0].reativacao_3d),
+        reativacao_7d:         parseInt(funil[0].reativacao_7d),
+        perdido_sem_resposta:  parseInt(funil[0].perdido_sem_resposta),
       },
     });
   } catch (err) {
