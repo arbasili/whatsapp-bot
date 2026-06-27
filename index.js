@@ -9,8 +9,8 @@ require('dotenv/config');
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.6.0';
-const BOT_VERSION_DATA = '2026-06-27'; // data desta versão
+const BOT_VERSION = '1.7.0';
+const BOT_VERSION_DATA = '2026-06-26'; // data desta versão
 
 const app = express();
 
@@ -117,6 +117,23 @@ async function initDb() {
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS notes TEXT`);
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS first_response_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS scheduled_set_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS score INTEGER`);
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS close_probability INTEGER`);
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_action TEXT`);
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_action_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ai_insights JSONB`);
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS summary_bullets JSONB`);
+
+  // Tabela de atividade da IA — feed de ações do bot para a visão geral do painel
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ai_activity (
+      id SERIAL PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      acao TEXT NOT NULL,
+      lead_name TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS conversations (
@@ -523,6 +540,128 @@ function calcularTemperatura(urgency, pain, historico = null) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Constrói um Date correto para uma data + hora local de Campo Grande,
 // independente do fuso do servidor (Railway roda em UTC).
+// Calcula score, probabilidade, insights, bullets e próxima ação via Claude
+// Chamado no agendamento (score completo) e no encerramento (score parcial)
+async function calcularInteligenciaLead(phone, { nome, tipoNegocio, dor, urgencia, temperatura, agendou }) {
+  try {
+    const historico = conversas[phone] || [];
+    const historicoTexto = historico
+      .slice(2).slice(-20)
+      .filter(m => m.role !== 'system')
+      .map(m => `${m.role === 'user' ? 'Lead' : 'Bot'}: ${typeof m.content === 'string' ? m.content : textoDoConteudo(m.content)}`)
+      .join('\n');
+
+    const contexto = [
+      tipoNegocio ? `Tipo de negócio: ${tipoNegocio}` : '',
+      dor ? `Dor principal: ${dor.slice(0, 200)}` : '',
+      urgencia ? `Urgência: ${urgencia}` : '',
+      temperatura ? `Temperatura: ${temperatura}` : '',
+      `Agendou reunião: ${agendou ? 'sim' : 'não'}`,
+    ].filter(Boolean).join(' | ');
+
+    const horasFollowup = agendou ? '24h' : '3 dias';
+    const prompt = `Você é um especialista em vendas B2B analisando um lead para uma empresa de automação de WhatsApp.
+
+DADOS DO LEAD:
+${contexto}
+
+TRECHO DA CONVERSA:
+${historicoTexto}
+
+Responda APENAS com um JSON válido, sem texto antes ou depois:
+{
+  "score": <número 0-100 — potencial geral do lead>,
+  "close_probability": <número 0-100 — probabilidade de fechamento>,
+  "next_action": "<texto curto: o que o vendedor deve fazer agora>",
+  "next_action_at_horas": <número: em quantas horas fazer a próxima ação, ou null>,
+  "insights": [<lista de até 4 observações curtas sobre o lead>],
+  "objecao_principal": "<principal objeção ou null se não houver>",
+  "recomendacoes": [<lista de até 3 recomendações para o vendedor>],
+  "tempo_followup_ideal_h": <número de horas ideal para follow-up>,
+  "summary_bullets": [
+    {"label": "Segmento", "valor": "<tipo de negócio>"},
+    {"label": "Atendimento", "valor": "<como atende hoje>"},
+    {"label": "Principal dor", "valor": "<dor principal>"},
+    {"label": "Consequência", "valor": "<impacto da dor>"},
+    {"label": "Interesse", "valor": "<alto|médio|baixo>"}
+  ]
+}
+
+Regras:
+- score alto (70+): urgência imediata, dor clara, engajado, agendou
+- score médio (40-69): dor identificada mas sem urgência clara
+- score baixo (<40): pouco engajamento, dor vaga, não agendou
+- next_action deve ser específico como: "Realizar consultoria", "Enviar proposta", "Fazer follow-up em ${horasFollowup}"`;
+
+    const inicioIA = Date.now();
+    const resp = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        max_tokens: 600,
+        messages: [{ role: 'user', content: prompt }]
+      },
+      {
+        headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        timeout: 20000
+      }
+    );
+    const duracaoIA = Date.now() - inicioIA;
+    const usoIA = resp.data.usage || {};
+    console.log(`[Claude/score] ${duracaoIA}ms | input: ${usoIA.input_tokens || '?'} | output: ${usoIA.output_tokens || '?'} tokens`);
+
+    const texto = resp.data.content[0].text.replace(/```json|```/g, '').trim();
+    const dados = JSON.parse(texto);
+
+    const nextActionAt = dados.next_action_at_horas
+      ? new Date(Date.now() + dados.next_action_at_horas * 3600000).toISOString()
+      : null;
+
+    await pool.query(
+      `UPDATE leads SET
+        score = $1, close_probability = $2,
+        next_action = $3, next_action_at = $4,
+        ai_insights = $5, summary_bullets = $6,
+        updated_at = NOW()
+       WHERE phone = $7 AND client_id = $8`,
+      [
+        dados.score ?? null,
+        dados.close_probability ?? null,
+        dados.next_action ?? null,
+        nextActionAt,
+        JSON.stringify({
+          insights: dados.insights || [],
+          objecao_principal: dados.objecao_principal || null,
+          recomendacoes: dados.recomendacoes || [],
+          tempo_followup_ideal_h: dados.tempo_followup_ideal_h || null
+        }),
+        JSON.stringify(dados.summary_bullets || []),
+        phone,
+        CLIENT_ID
+      ]
+    );
+
+    registrarAtividade(nome || 'Lead', agendou ? 'Gerou score pós-agendamento' : 'Gerou score parcial').catch(() => {});
+    console.log(`[IA] Score calculado para ${phone}: score=${dados.score}, close=${dados.close_probability}%`);
+    return dados;
+  } catch (err) {
+    console.error(`[${phone}] Erro ao calcular inteligência do lead:`, err.message);
+    return null;
+  }
+}
+
+// Registra uma ação no feed de atividade da IA
+async function registrarAtividade(leadName, acao) {
+  try {
+    await pool.query(
+      `INSERT INTO ai_activity (client_id, acao, lead_name) VALUES ($1, $2, $3)`,
+      [CLIENT_ID, acao, leadName]
+    );
+  } catch (err) {
+    console.error('Erro ao registrar atividade:', err.message);
+  }
+}
+
 const OFFSET_CG = '-04:00';
 function horarioCampoGrande(dia, hora) {
   // Extrai ano, mês e dia no fuso de Campo Grande
@@ -975,6 +1114,19 @@ setInterval(async () => {
       await atualizarLead(phone, { 'Status': 'Reativação 3 dias' });
       registrarEtapaFunil(phone, FUNIL.REATIVACAO_3D).catch(() => {});
 
+      // Calcula score parcial — lead não agendou mas já tem dor identificada
+      const nomeParaScore = nome !== 'você' ? nome : '';
+      calcularInteligenciaLead(phone, {
+        nome: nomeParaScore,
+        tipoNegocio: extrairTipoNegocio(conversas[phone]),
+        dor: extrairDorLead(conversas[phone]),
+        urgencia: extrairUrgencia(conversas[phone]),
+        temperatura: null,
+        agendou: false
+      }).catch(() => {});
+
+      registrarAtividade(nomeParaScore || 'Lead', 'Encerrado por inatividade — score gerado').catch(() => {});
+
       // Agenda reativação — guardamos o timestamp de encerramento no followUpStatus
       followUpStatus[phone] = {
         tentativas: 99, // flag especial: indica que está em modo reativação
@@ -1208,10 +1360,43 @@ app.get('/api/leads/:id/conversation', verificarToken, async (req, res) => {
   }
 });
 
+// GET /api/activity — últimas ações da IA (feed da visão geral)
+app.get('/api/activity', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT acao, lead_name, created_at FROM ai_activity
+       WHERE client_id = $1
+       ORDER BY created_at DESC LIMIT 10`,
+      [process.env.CLIENT_ID]
+    );
+    res.json({ activity: rows });
+  } catch (err) {
+    console.error('Erro em GET /api/activity:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar atividade' });
+  }
+});
+
+// GET /api/health — heartbeat do bot com última atividade
+app.get('/api/health', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT MAX(updated_at) AS ultima FROM leads WHERE client_id = $1`,
+      [process.env.CLIENT_ID]
+    );
+    res.json({
+      online: true,
+      ultima_atividade: rows[0]?.ultima ?? null,
+      versao: BOT_VERSION,
+    });
+  } catch (err) {
+    res.status(500).json({ online: false });
+  }
+});
+
 // GET /api/metrics — métricas agregadas: total, por status, urgência, funil e tempos
 app.get('/api/metrics', verificarToken, async (req, res) => {
   try {
-    const [{ rows: total }, { rows: porStatus }, { rows: urgentes }, { rows: funil }, { rows: tempos }] = await Promise.all([
+    const [{ rows: total }, { rows: porStatus }, { rows: urgentes }, { rows: funil }, { rows: tempos }, { rows: temporal }] = await Promise.all([
       pool.query(`SELECT COUNT(*) FROM leads WHERE client_id = $1`, [process.env.CLIENT_ID]),
       pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE client_id = $1 GROUP BY status`, [process.env.CLIENT_ID]),
       pool.query(`SELECT COUNT(*) FROM leads WHERE client_id = $1 AND urgency = 'imediata'`, [process.env.CLIENT_ID]),
@@ -1241,6 +1426,14 @@ app.get('/api/metrics', verificarToken, async (req, res) => {
           COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE AT TIME ZONE 'America/Campo_Grande') AS leads_hoje
         FROM leads WHERE client_id = $1
       `, [process.env.CLIENT_ID]),
+      pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE created_at >= date_trunc('week', NOW() AT TIME ZONE 'America/Campo_Grande') AT TIME ZONE 'America/Campo_Grande') AS leads_semana_atual,
+          COUNT(*) FILTER (WHERE created_at >= date_trunc('week', NOW() AT TIME ZONE 'America/Campo_Grande') AT TIME ZONE 'America/Campo_Grande' - INTERVAL '7 days'
+                           AND created_at < date_trunc('week', NOW() AT TIME ZONE 'America/Campo_Grande') AT TIME ZONE 'America/Campo_Grande') AS leads_semana_anterior,
+          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[RA]%' AND scheduled_at IS NOT NULL AND scheduled_at::TEXT LIKE '%' || TO_CHAR(NOW() AT TIME ZONE 'America/Campo_Grande', 'YYYY-MM-DD') || '%') AS reunioes_hoje
+        FROM leads WHERE client_id = $1
+      `, [process.env.CLIENT_ID]),
     ]);
 
     res.json({
@@ -1248,6 +1441,9 @@ app.get('/api/metrics', verificarToken, async (req, res) => {
       por_status: Object.fromEntries(porStatus.map(r => [r.status, parseInt(r.count)])),
       urgencia_imediata: parseInt(urgentes[0].count),
       leads_hoje: parseInt(tempos[0].leads_hoje) || 0,
+      leads_semana_atual: parseInt(temporal[0].leads_semana_atual) || 0,
+      leads_semana_anterior: parseInt(temporal[0].leads_semana_anterior) || 0,
+      reunioes_hoje: parseInt(temporal[0].reunioes_hoje) || 0,
       tempo_medio_resposta_min: tempos[0].tempo_resposta_min ? parseFloat(parseFloat(tempos[0].tempo_resposta_min).toFixed(1)) : null,
       tempo_medio_agendamento_h: tempos[0].tempo_agendamento_h ? parseFloat(parseFloat(tempos[0].tempo_agendamento_h).toFixed(1)) : null,
       funil: {
@@ -2066,6 +2262,19 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
        WHERE phone = $1 AND client_id = $2`,
       [userPhone, CLIENT_ID]
     ).catch(e => console.error('scheduled_set_at:', e.message));
+
+    // Calcula inteligência completa do lead (score, insights, bullets, próxima ação)
+    calcularInteligenciaLead(userPhone, {
+      nome,
+      tipoNegocio,
+      dor: dorPrincipal,
+      urgencia: urgenciaLead,
+      temperatura: calcularTemperatura(urgenciaLead, dorPrincipal, conversas[userPhone]),
+      agendou: true
+    }).catch(() => {});
+
+    // Registra atividade no feed do painel
+    registrarAtividade(nome || 'Lead', 'Agendou reunião').catch(() => {});
     registrarEtapaFunil(userPhone, FUNIL.REUNIAO_AGENDADA).catch(e => console.error('funil agendado:', e.message));
 
     await new Promise(r => setTimeout(r, 10000));
@@ -2176,8 +2385,14 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     }
     if (statusIntermediario) {
       atualizarLead(userPhone, { 'Status': statusIntermediario }).catch(e => console.error(`[${userPhone}] atualizarLead status:`, e.message));
-      if (statusIntermediario === 'Qualificando') registrarEtapaFunil(userPhone, FUNIL.QUALIFICANDO).catch(() => {});
-      if (statusIntermediario === 'Pronto para agendar') registrarEtapaFunil(userPhone, FUNIL.PRONTO_AGENDAR).catch(() => {});
+      if (statusIntermediario === 'Qualificando') {
+        registrarEtapaFunil(userPhone, FUNIL.QUALIFICANDO).catch(() => {});
+        registrarAtividade(nomeAtual || 'Lead', 'Qualificou lead').catch(() => {});
+      }
+      if (statusIntermediario === 'Pronto para agendar') {
+        registrarEtapaFunil(userPhone, FUNIL.PRONTO_AGENDAR).catch(() => {});
+        registrarAtividade(nomeAtual || 'Lead', 'Propôs reunião').catch(() => {});
+      }
     }
 
     // Detectar marcador de nome [NOME: X] emitido pelo Claude
