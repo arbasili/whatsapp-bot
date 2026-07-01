@@ -681,26 +681,11 @@ async function enviarBriefEspecialista(phone, ag) {
   }
 }
 
-// Melhoria 1 — indicador de digitando via WhatsApp Cloud API
-async function indicarDigitando(phone) {
-  try {
-    await axios.post(
-      `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to: phone,
-        type: 'text',
-        text: { body: '...' },
-      },
-      {
-        headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
-        timeout: 5000
-      }
-    );
-  } catch {
-    // Silencioso — indicador de digitando é best-effort
-  }
-}
+// Nota: a WhatsApp Cloud API pública não oferece indicador de "digitando"
+// (esse recurso só existe na Business API on-premises). Uma tentativa anterior
+// desta função enviava um texto literal "..." como mensagem real para o lead,
+// o que é pior que não ter indicador nenhum — foi removida. As pausas entre
+// mensagens (setTimeout de 1,5–3s) já criam o ritmo humano desejado.
 async function registrarAtividade(leadName, acao) {
   try {
     await pool.query(
@@ -1087,8 +1072,8 @@ setInterval(async () => {
       // Reativação 3 dias — primeira tentativa
       if (!status.reativacao3dEnviada && tempoEncerrado > REATIVACAO_3D_MS) {
         const msg = nome !== 'você'
-          ? `${nome}, passando rapidinho. Ainda temos horários disponíveis para mostrar como automatizar${negocio}. Se quiser dar uma olhada, é só me falar.`
-          : `Passando rapidinho. Ainda temos horários disponíveis para mostrar como resolver${negocio}. Se quiser dar uma olhada, é só me falar.`;
+          ? `${nome}, ainda tenho horários disponíveis pra mostrar como automatizar${negocio}. Se quiser ver como ficaria, é só me chamar.`
+          : `Ainda tenho horários disponíveis pra mostrar como automatizar${negocio}. Se quiser ver como ficaria, é só me chamar.`;
         await enviarMensagem(phone, msg);
         atualizarLead(phone, { 'Status': 'Reativação 3 dias' }).catch(() => {});
         registrarEtapaFunil(phone, FUNIL.REATIVACAO_3D).catch(() => {});
@@ -1275,8 +1260,9 @@ setInterval(async () => {
     // Lembrete 30 min antes (com link) — tem prioridade, ignora horário de silêncio
     if (tempoAteReuniao <= LEMBRETE_30MIN_MS && !ag.lembrete30minEnviado) {
       const nomeLabel = ag.nome ? `${ag.nome}, ` : '';
-      let msg = `${nomeLabel}sua conversa com o especialista começa em instantes (${ag.label}). É só entrar por aqui: ${ag.meetLink || ''}`;
-      if (!ag.meetLink) msg = `${nomeLabel}sua conversa com o especialista começa em instantes (${ag.label}). O especialista vai te enviar o link agora!`;
+      const negocioLabel = ag.tipoNegocio ? ` sobre o seu ${ag.tipoNegocio}` : '';
+      let msg = `${nomeLabel}sua conversa${negocioLabel} com o especialista começa em instantes (${ag.label}). É só entrar por aqui: ${ag.meetLink || ''}`;
+      if (!ag.meetLink) msg = `${nomeLabel}sua conversa${negocioLabel} com o especialista começa em instantes (${ag.label}). O especialista vai te enviar o link agora!`;
       msg += `\n\nTe espero lá!`;
       await enviarMensagem(phone, msg);
       ag.lembrete30minEnviado = true;
@@ -1876,7 +1862,11 @@ async function tratarPosAgendamento(userPhone, userText) {
 
   // Despedidas simples logo após a confirmação ("ok", "obrigado", "valeu") — não responde em loop.
   // Só vale na janela de 30 min após confirmar; depois disso, qualquer mensagem é respondida.
-  const despedidaSimples = /^(ok|okay|blz|beleza|tá bom|ta bom|tá|tudo bem|tudo certo|valeu|vlw|obrigad[oa]|brigad[oa]|combinado|certo|entendi|já entendi|ja entendi|isso|isso mesmo|perfeito|show|joia|jóia|👍|🙏|😊|tmj|até|até lá|até mais|fechou|tô dentro|to dentro|tranquilo|de boa)[\s!.,]*$/i.test((userText || '').trim());
+  // Quebra por vírgula/ponto/exclamação e exige que TODOS os pedaços sejam palavras
+  // simples — cobre combinações como "ótimo, combinado" e não só uma palavra isolada.
+  const PALAVRAS_DESPEDIDA_SIMPLES = ['ok', 'okay', 'blz', 'beleza', 'tá bom', 'ta bom', 'tá', 'ta', 'tudo bem', 'tudo certo', 'valeu', 'vlw', 'obrigado', 'obrigada', 'brigado', 'brigada', 'combinado', 'certo', 'entendi', 'já entendi', 'ja entendi', 'isso', 'isso mesmo', 'perfeito', 'ótimo', 'otimo', 'show', 'top', 'joia', 'jóia', '👍', '🙏', '😊', 'tmj', 'até', 'até lá', 'até mais', 'fechou', 'tô dentro', 'to dentro', 'tranquilo', 'de boa'];
+  const partesDespedida = (userText || '').trim().toLowerCase().split(/[,.!]+/).map(p => p.trim()).filter(Boolean);
+  const despedidaSimples = partesDespedida.length > 0 && partesDespedida.every(p => PALAVRAS_DESPEDIDA_SIMPLES.includes(p));
   const confirmadaRecenteParaDespedida = ag.presencaConfirmadaEm && (Date.now() - ag.presencaConfirmadaEm < 30 * 60 * 1000);
   if (despedidaSimples && confirmadaRecenteParaDespedida) {
     log(userPhone, 'info', 'Despedida simples logo após confirmação — não responde para evitar loop.');
@@ -2452,22 +2442,26 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     await new Promise(r => setTimeout(r, 1500));
 
     const nomeExibicao = nome || 'você';
-    const horarioExib = slotEscolhido.labelCG || slotEscolhido.label;
+    // O lead só deve ver o horário de Brasília — Campo Grande é só para uso interno
+    // (mensagens para o especialista), para nunca aparecer um horário diferente em
+    // mensagens seguidas da mesma confirmação.
+    const horarioLead = slotEscolhido.label;
+    const horarioInterno = slotEscolhido.labelCG || slotEscolhido.label;
 
     if (meetLink) {
       await enviarMensagem(userPhone,
-        `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioExib}. É rapidinho, 30 minutos, e você já sai com um caminho claro de como deixar seu atendimento no automático.\n\nO link da reunião é esse: ${meetLink}\n\nTe mando um lembrete antes pra você não precisar ficar de olho no horário 😊`
+        `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioLead}. É rapidinho, 30 minutos, e você já sai com um caminho claro de como deixar seu atendimento no automático.\n\nO link da reunião é esse: ${meetLink}\n\nTe mando um lembrete antes pra você não precisar ficar de olho no horário 😊`
       );
       await new Promise(r => setTimeout(r, 2000));
       await enviarMensagem(userPhone, `O especialista vai entrar em contato pelo WhatsApp antes da reunião para confirmar os detalhes. Até lá, ${nomeExibicao}!`);
-      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioExib}\nMeet: ${meetLink}`);
+      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioInterno}\nMeet: ${meetLink}`);
     } else {
       await enviarMensagem(userPhone,
-        `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioExib}. É uma conversa de 30 minutos pra te mostrar como automatizar seu atendimento.\n\nJá já te envio o link da reunião por aqui, pode ficar tranquilo. Te mando um lembrete antes também 😊`
+        `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioLead}. É uma conversa de 30 minutos pra te mostrar como automatizar seu atendimento.\n\nJá já te envio o link da reunião por aqui, pode ficar tranquilo. Te mando um lembrete antes também 😊`
       );
       await new Promise(r => setTimeout(r, 2000));
       await enviarMensagem(userPhone, `O especialista vai entrar em contato pelo WhatsApp antes da reunião para confirmar os detalhes. Até lá, ${nomeExibicao}!`);
-      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioExib}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
+      await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioInterno}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
    } catch (err) {
      console.error('Erro no processamento do agendamento:', err.message);
@@ -2489,34 +2483,36 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     log(userPhone, 'info', `Resposta Claude: "${resposta.slice(0, 100)}"`);
     conversas[userPhone].push({ role: 'assistant', content: resposta });
 
-    // Atualiza o nome no banco assim que for identificado (não espera o agendamento)
+    // Grava nome, tipo de negócio, dor e urgência assim que detectados, sem esperar
+    // o agendamento, para o painel CRM mostrar dados em tempo real. Consolidado numa
+    // única chamada a atualizarLead por turno em vez de um UPDATE por campo.
     // Prioriza o nome do marcador [NOME] (mais confiável); só usa heurística se não houver marcador
     const nomeAtual = agendamentos[userPhone]?.nomeConfirmado || extrairNomeLead(conversas[userPhone]);
-    if (nomeAtual) {
-      atualizarLead(userPhone, { 'Nome': nomeAtual }).catch(e => console.error(`[${userPhone}] atualizarLead nome:`, e.message));
-    }
-
-    // Gravação incremental — grava tipo de negócio, dor e urgência assim que detectados
-    // sem esperar o agendamento, para o painel CRM mostrar dados em tempo real
     const tipoNegocio = extrairTipoNegocio(conversas[userPhone]);
+    const dorLead = extrairDorLead(conversas[userPhone]);
+    const urgenciaDetectada = extrairUrgencia(conversas[userPhone]);
+
+    const atualizacoesIncrementais = {};
+    if (nomeAtual) atualizacoesIncrementais['Nome'] = nomeAtual;
     if (tipoNegocio && !agendamentos[userPhone]?.tipoNegocioGravado) {
-      atualizarLead(userPhone, { 'Tipo de Negócio': tipoNegocio }).catch(e => console.error(`[${userPhone}] atualizarLead tipo:`, e.message));
+      atualizacoesIncrementais['Tipo de Negócio'] = tipoNegocio;
       if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
       agendamentos[userPhone].tipoNegocioGravado = true;
     }
-
-    const dorLead = extrairDorLead(conversas[userPhone]);
     if (dorLead && !agendamentos[userPhone]?.dorGravada) {
-      atualizarLead(userPhone, { 'Dor': dorLead }).catch(e => console.error(`[${userPhone}] atualizarLead dor:`, e.message));
+      atualizacoesIncrementais['Dor'] = dorLead;
       if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
       agendamentos[userPhone].dorGravada = true;
     }
-
-    const urgenciaDetectada = extrairUrgencia(conversas[userPhone]);
     if (urgenciaDetectada && !agendamentos[userPhone]?.urgenciaGravada) {
-      atualizarLead(userPhone, { 'Urgência': urgenciaDetectada }).catch(e => console.error(`[${userPhone}] atualizarLead urgencia:`, e.message));
+      atualizacoesIncrementais['Urgência'] = urgenciaDetectada;
       if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
       agendamentos[userPhone].urgenciaGravada = true;
+    }
+    if (Object.keys(atualizacoesIncrementais).length > 0) {
+      atualizarLead(userPhone, atualizacoesIncrementais).catch(e =>
+        console.error(`[${userPhone}] atualizarLead incremental:`, e.message)
+      );
     }
 
     // Atualiza status intermediário no funil conforme a etapa da conversa
