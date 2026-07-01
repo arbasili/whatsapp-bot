@@ -772,6 +772,26 @@ async function buscarSlotDisponivel(dia, periodos) {
   return null;
 }
 
+// Revalida se um horário específico (já oferecido antes) ainda está livre —
+// usada bem no momento da confirmação, para evitar que dois leads que receberam
+// a mesma oferta acabem os dois com evento criado no mesmo horário.
+async function slotAindaDisponivel(inicioISO, fimISO) {
+  try {
+    const res = await calendar.freebusy.query({
+      requestBody: {
+        timeMin: inicioISO,
+        timeMax: fimISO,
+        timeZone: 'America/Campo_Grande',
+        items: [{ id: CALENDAR_ID }],
+      },
+    });
+    return res.data.calendars[CALENDAR_ID].busy.length === 0;
+  } catch (err) {
+    console.error('Erro ao revalidar disponibilidade do slot:', err.message);
+    return true; // checagem falhou — segue com o agendamento em vez de travar o lead
+  }
+}
+
 function proximoDiaUtil(data, offset = 1) {
   const d = new Date(data);
   d.setDate(d.getDate() + offset);
@@ -856,9 +876,10 @@ async function interpretarPedidoData(texto) {
   // b) dia da semana
   if (!diaAlvo) for (const [nome, num] of Object.entries(diasMap)) {
     if (t.includes(nome)) {
-      // próxima ocorrência desse dia da semana (a partir de amanhã)
+      // próxima ocorrência desse dia da semana (inclui hoje, se ainda houver
+      // margem de horário — isso é filtrado depois pela checagem de 2h mínimas)
       const d = new Date(horaCG);
-      for (let i = 1; i <= LIMITE_DIAS; i++) {
+      for (let i = 0; i <= LIMITE_DIAS; i++) {
         const cand = new Date(d);
         cand.setDate(cand.getDate() + i);
         if (cand.getDay() === num) { diaAlvo = cand; break; }
@@ -1659,9 +1680,13 @@ app.post('/webhook', async (req, res) => {
     // Reação de emoji — ignorar silenciosamente, não responder
     return res.sendStatus(200);
   } else {
-    // Vídeo, documento, figurinha, etc. — ainda não suportado
-    await enviarMensagem(userPhone, 'Por enquanto consigo ler apenas texto, áudio e imagem. Pode me escrever por texto?');
-    return res.sendStatus(200);
+    // Vídeo, documento, figurinha, etc. — ainda não suportado.
+    // Responde 200 à Meta imediatamente (mesmo padrão de imagem/áudio) antes de
+    // enviar a mensagem, para não arriscar timeout do webhook e reenvio duplicado.
+    res.sendStatus(200);
+    enviarMensagem(userPhone, 'Por enquanto consigo ler apenas texto, áudio e imagem. Pode me escrever por texto?')
+      .catch(err => console.error('Erro ao avisar tipo de mensagem não suportado:', err.message));
+    return;
   }
 
   // Limite de tamanho para outros tipos (já tratado acima para texto)
@@ -1773,6 +1798,9 @@ async function tratarPosAgendamento(userPhone, userText) {
         ag.labelCG = escolhido.labelCG || escolhido.label;
         ag.remarcando = false;
         ag.novosSlots = null;
+        // Só consome a tentativa de remarcação quando ela de fato se confirma —
+        // uma falha do lado do Calendar não deveria custar uma das 2 chances do lead.
+        ag.totalRemarcacoes = (ag.totalRemarcacoes || 0) + 1;
         // Recalcula se o novo horário está a menos de 24h
         const msAteNovoSlot = new Date(escolhido.inicio).getTime() - Date.now();
         ag.lembrete24hEnviado = msAteNovoSlot < LEMBRETE_24H_MS;
@@ -1882,7 +1910,8 @@ async function tratarPosAgendamento(userPhone, userText) {
     }
     ag.remarcando = true;
     ag.novosSlots = novosSlots;
-    ag.totalRemarcacoes = totalRemarcacoes + 1;
+    // totalRemarcacoes só é incrementado quando a remarcação é de fato confirmada
+    // (ver bloco acima), para uma falha da API não custar uma das 2 chances do lead.
     await atualizarLead(userPhone, { 'Status': 'Remarcando' });
     registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando:', e.message));
     const opcoes = novosSlots.length >= 2
@@ -2227,11 +2256,6 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     processandoAgendamento.add(userPhone);
    try {
     const slots = agendamentos[userPhone].slots;
-    const historicoMsgsUsuario = conversas[userPhone]
-      .filter(m => m.role === 'user')
-      .map(m => textoDoConteudo(m.content))
-      .join(' ')
-      .toLowerCase();
     // Fonte primária: slot confirmado via marcador [SLOT: X] durante a conversa
     // Fallback: heurística por texto das mensagens do lead
     let slotEscolhido = agendamentos[userPhone]?.slotConfirmado || slots[0];
@@ -2273,8 +2297,20 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       }
     }
 
-    const emailMatch = historicoMsgsUsuario.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
-    const emailLead = emailMatch ? emailMatch.find(e => !e.includes('cliqueefecha')) || emailMatch[0] : '';
+    // Busca o email a partir da mensagem mais recente do lead que contiver um —
+    // em vez de olhar a conversa toda de uma vez, evita pegar um email de terceiros
+    // mencionado de passagem antes do lead informar o próprio email.
+    const msgsUsuarioParaEmail = conversas[userPhone]
+      .filter(m => m.role === 'user')
+      .map(m => textoDoConteudo(m.content).toLowerCase());
+    let emailLead = '';
+    for (let i = msgsUsuarioParaEmail.length - 1; i >= 0; i--) {
+      const matches = msgsUsuarioParaEmail[i].match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
+      if (matches) {
+        emailLead = matches.find(e => !e.includes('cliqueefecha')) || matches[0];
+        break;
+      }
+    }
 
     // Extrair nome direto do histórico
     // Fonte primária: nome capturado via marcador [NOME: X] durante a conversa
@@ -2335,6 +2371,24 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     // Avisar que está gerando antes de processar
     log(userPhone, 'info', `Iniciando agendamento — slot: ${slotEscolhido.label} | email: ${emailLead} | nome: ${nome || 'não identificado'}`);
     await enviarMensagem(userPhone, 'Um segundo, deixa eu confirmar aqui.');
+
+    // Revalida a vaga bem no momento da confirmação — ela foi checada quando foi
+    // oferecida, mas outro lead pode ter fechado o mesmo horário nesse meio-tempo.
+    const aindaDisponivel = await slotAindaDisponivel(slotEscolhido.inicio, slotEscolhido.fim);
+    if (!aindaDisponivel) {
+      log(userPhone, 'warn', `Slot ${slotEscolhido.label} foi ocupado por outro lead entre a oferta e a confirmação.`);
+      const novosSlots = await buscarHorariosDisponiveis().catch(() => []);
+      if (novosSlots.length > 0) {
+        agendamentos[userPhone].slots = novosSlots;
+        agendamentos[userPhone].slotConfirmado = null;
+        const opcoes = novosSlots.length >= 2 ? `${novosSlots[0].label} ou ${novosSlots[1].label}` : novosSlots[0].label;
+        await enviarMensagem(userPhone, `Esse horário acabou de ser ocupado por outra pessoa. Tenho esses outros disponíveis: ${opcoes}. Qual funciona melhor?`);
+      } else {
+        await enviarMensagem(userPhone, 'Esse horário acabou de ser ocupado por outra pessoa. Nossa equipe vai entrar em contato para encontrar um novo horário com você.');
+      }
+      await persistirLead(userPhone);
+      return;
+    }
 
     const { meetLink, eventId } = await criarEvento(nome, emailLead, userPhone, slotEscolhido.inicio, slotEscolhido.fim, resumoConversa);
 
@@ -2784,6 +2838,9 @@ function escolherSlot(texto, slots) {
 
   // 3. Tentar por hora ("9h", "às 14", "14 horas", "as 15") — label está em horário de Brasília
   const textoEhCurto = t.trim().split(/\s+/).length <= 4; // confirmação curta, ex: "pode as 15"
+  // Evita que um número solto sem relação a horário (ex: "9 pessoas", "faz 3 anos")
+  // seja lido como confirmação de horário só por aparecer numa mensagem curta.
+  const temContextoDeQuantidade = /\b\d{1,2}\s*(pessoas?|reais?|anos?|meses?|dias?|vezes|clientes?|funcion[áa]rios?|km|%|porcento)\b/.test(t);
   for (const slot of slots) {
     const matchHora = slot.label.match(/às\s+(\d{1,2})h/);
     const hora = matchHora ? matchHora[1] : null;
@@ -2793,7 +2850,7 @@ function escolherSlot(texto, slots) {
       t.includes('às ' + hora) ||
       t.includes('as ' + hora) ||
       t.includes(hora + ' hora') ||
-      (textoEhCurto && new RegExp(`\\b${hora}\\b`).test(t))  // hora isolada só em texto curto
+      (textoEhCurto && !temContextoDeQuantidade && new RegExp(`\\b${hora}\\b`).test(t))  // hora isolada só em texto curto e sem contexto de quantidade
     )) {
       return slot;
     }
