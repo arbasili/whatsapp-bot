@@ -38,12 +38,35 @@ const supabase = createClient(
 );
 
 // Middleware de autenticação — valida token JWT do painel antes de cada rota protegida
+// e confirma que o usuário tem permissão sobre o CLIENT_ID deste deployment (tabela
+// user_clients), não só que o JWT é de algum usuário válido do projeto Supabase.
 async function verificarToken(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'Não autorizado' });
   try {
     const { data: { user }, error } = await supabase.auth.getUser(token);
     if (error || !user) return res.status(401).json({ error: 'Token inválido' });
+
+    const vinculosDoCliente = await pool.query(
+      'SELECT user_id FROM user_clients WHERE client_id = $1',
+      [CLIENT_ID]
+    );
+    const jaAutorizado = vinculosDoCliente.rows.some(r => r.user_id === user.id);
+
+    if (!jaAutorizado) {
+      if (vinculosDoCliente.rows.length === 0) {
+        // Bootstrap: ninguém ainda está vinculado a este CLIENT_ID — o primeiro
+        // usuário autenticado com sucesso vira o dono, sem precisar de INSERT manual.
+        await pool.query(
+          'INSERT INTO user_clients (user_id, client_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [user.id, CLIENT_ID]
+        );
+        console.log(`Usuário ${user.id} vinculado automaticamente ao client_id ${CLIENT_ID} (primeiro acesso).`);
+      } else {
+        return res.status(403).json({ error: 'Usuário sem permissão para este cliente' });
+      }
+    }
+
     req.user = user;
     next();
   } catch (err) {
@@ -52,11 +75,24 @@ async function verificarToken(req, res, next) {
   }
 }
 
+// Conexão interna do Railway não passa por rede pública — sem SSL.
+// Conexão pública: se houver um certificado de CA configurado, valida a cadeia
+// de verdade; sem ele, cai no fallback inseguro (aceita qualquer certificado)
+// só para não quebrar ambientes que ainda não configuraram DB_CA_CERT.
+function resolverSslPostgres() {
+  if (process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway.internal')) {
+    return false;
+  }
+  if (process.env.DB_CA_CERT) {
+    return { ca: process.env.DB_CA_CERT, rejectUnauthorized: true };
+  }
+  console.warn('DB_CA_CERT não configurado — conexão Postgres pública sem verificação de certificado (rejectUnauthorized: false). Configure DB_CA_CERT assim que o provedor disponibilizar a CA.');
+  return { rejectUnauthorized: false };
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway.internal')
-    ? false
-    : { rejectUnauthorized: false }
+  ssl: resolverSslPostgres()
 });
 
 async function initDb() {
@@ -68,6 +104,18 @@ async function initDb() {
       email TEXT UNIQUE NOT NULL,
       whatsapp_number TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Associa usuários autenticados do Supabase ao(s) client_id que eles podem acessar.
+  // Sem isso, qualquer usuário válido do mesmo projeto Supabase conseguiria ler/editar
+  // os leads de qualquer CLIENT_ID — ver verificarToken.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_clients (
+      user_id UUID NOT NULL,
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (user_id, client_id)
     )
   `);
 
@@ -186,6 +234,15 @@ function prepararConversaParaPersistencia(conversa) {
   });
 }
 
+// Redação de PII nos logs — nunca expõe o telefone completo do lead em console.log/error/warn
+// (mensagens enviadas ao especialista via WhatsApp continuam com o número completo,
+// pois ali é necessário para o trabalho; isso afeta só a saída de log do servidor)
+function mascararTelefone(tel) {
+  if (!tel) return tel;
+  const str = String(tel);
+  return str.length > 4 ? `***${str.slice(-4)}` : '***';
+}
+
 // Salva o estado atual de um lead no banco (upsert)
 async function persistirLead(phone) {
   try {
@@ -214,7 +271,7 @@ async function persistirLead(phone) {
       ]
     );
   } catch (err) {
-    console.error(`Erro ao persistir lead ${phone}:`, err.message);
+    console.error(`Erro ao persistir lead ${mascararTelefone(phone)}:`, err.message);
   }
 }
 
@@ -291,9 +348,10 @@ const EXPIRACAO_ENCERRADO_MS = 30 * 24 * 60 * 60 * 1000;
 
 // Follow-ups dentro da janela de 24h da Meta
 // Após 24h da última mensagem do lead, a janela fecha e não podemos mais enviar mensagens livres
-const FOLLOWUP_1_MS  =  1 * 60 * 60 * 1000; //  1h — primeira tentativa
-const FOLLOWUP_2_MS  =  6 * 60 * 60 * 1000; //  6h — segunda tentativa
-const FOLLOWUP_3_MS  = 22 * 60 * 60 * 1000; // 22h — última tentativa dentro da janela
+// Reduzido de 3 para 2 toques dentro da janela (era 1h/6h/22h) — o toque de 6h
+// foi eliminado por ser o principal risco de reputação do número conforme o volume cresce.
+const FOLLOWUP_1_MS  =  4 * 60 * 60 * 1000; //  4h — primeira tentativa
+const FOLLOWUP_2_MS  = 22 * 60 * 60 * 1000; // 22h — última tentativa dentro da janela
 const JANELA_META_MS = 24 * 60 * 60 * 1000; // 24h — após isso, silêncio (janela fechada)
 
 // Reativação de leads encerrados
@@ -409,7 +467,7 @@ async function registrarLeadInicial(phone, origem = '') {
       [CLIENT_ID, phone, FUNIL.EM_CONVERSA, origem]
     );
   } catch (err) {
-    console.error(`[${phone}] Erro ao registrar lead inicial:`, err.message);
+    console.error(`[${mascararTelefone(phone)}] Erro ao registrar lead inicial:`, err.message);
     leadsRegistradosPg.delete(phone); // libera lock para permitir nova tentativa
   }
 }
@@ -467,7 +525,7 @@ async function atualizarLead(phone, dados) {
       );
     }
   } catch (err) {
-    console.error(`[${phone}] Erro ao atualizar lead:`, err.message);
+    console.error(`[${mascararTelefone(phone)}] Erro ao atualizar lead:`, err.message);
   }
 }
 
@@ -509,7 +567,7 @@ async function registrarEtapaFunil(phone, sigla) {
       [`%${sigla}%`, sigla, CLIENT_ID, phone]
     );
   } catch (err) {
-    console.error(`[${phone}] Erro ao registrar etapa ${sigla}:`, err.message);
+    console.error(`[${mascararTelefone(phone)}] Erro ao registrar etapa ${sigla}:`, err.message);
   }
 }
 
@@ -643,10 +701,10 @@ Regras:
     );
 
     registrarAtividade(nome || 'Lead', agendou ? 'Gerou score pós-agendamento' : 'Gerou score parcial').catch(() => {});
-    console.log(`[IA] Score calculado para ${phone}: score=${dados.score}, close=${dados.close_probability}%`);
+    console.log(`[IA] Score calculado para ${mascararTelefone(phone)}: score=${dados.score}, close=${dados.close_probability}%`);
     return dados;
   } catch (err) {
-    console.error(`[${phone}] Erro ao calcular inteligência do lead:`, err.message);
+    console.error(`[${mascararTelefone(phone)}] Erro ao calcular inteligência do lead:`, err.message);
     return null;
   }
 }
@@ -1020,10 +1078,11 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
       dorConhecida ? `Dor relatada: ${dorConhecida.slice(0, 100)}` : '',
     ].filter(Boolean).join(' | ');
 
+    // Cadência reduzida para 2 toques (era 3): a tentativa 1 é a retomada contextual de
+    // sempre; a tentativa 2 já é a última antes da janela fechar, então usa o tom de
+    // "porta aberta, sem cobrança" que antes só aparecia na 3ª tentativa.
     const instrucao = tentativa === 1
       ? `Você é o Lucas, do time da Clique e Fecha. O lead parou de responder.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Com base na conversa, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. Se souber a dor do lead, mencione ela de forma leve e direta (ex: "vi que você falou que perde cliente por demora..."). A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases. Assine como Lucas apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
-      : tentativa === 2
-      ? `Você é o Lucas, do time da Clique e Fecha. Esta é a segunda tentativa de retomar contato com o lead que não respondeu.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem curta, calorosa e sem pressão, com tom leve e natural, diferente da primeira tentativa. Se souber a dor do lead, pode mencionar o impacto dela de forma humana. Sem travessão, sem emoji. Máximo 2 frases. Responda APENAS com o texto da mensagem, sem aspas.`
       : `Você é o Lucas, do time da Clique e Fecha. Esta é a última tentativa antes de encerrar o contato.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem muito curta, sem pressão, deixando a porta aberta. Tom: "tudo bem se não for o momento certo, só queria deixar o caminho aberto". Sem cobrar resposta, sem urgência. Máximo 1 frase. Sem emoji, sem travessão. Responda APENAS com o texto da mensagem, sem aspas.`;
 
     const inicioFollowUp = Date.now();
@@ -1153,15 +1212,9 @@ setInterval(async () => {
         await enviarMensagem(phone, msg);
         followUpStatus[phone] = { tentativas: 2, ultimoFollowUp: agora };
         await persistirLead(phone);
-
-      } else if (status.tentativas === 2 && tempoSemResposta > FOLLOWUP_3_MS) {
-        const msg = await gerarMsgFollowUp(phone, nome, 3);
-        await enviarMensagem(phone, msg);
-        followUpStatus[phone] = { tentativas: 3, ultimoFollowUp: agora };
-        await persistirLead(phone);
       }
 
-    } else if (status.tentativas >= 3 || (status.tentativas > 0 && !dentroJanela)) {
+    } else if (status.tentativas >= 2 || (status.tentativas > 0 && !dentroJanela)) {
       // ── Janela fechou — mover para reativação e encerrar ───────────────────
       const negocio = extrairTipoNegocio(conversas[phone]);
       const nomeExib = nome !== 'você' ? nome : '';
@@ -1199,7 +1252,7 @@ setInterval(async () => {
     }
     processados++;
    } catch (err) {
-     console.error(`Erro no follow-up de ${phone}:`, err.message);
+     console.error(`Erro no follow-up de ${mascararTelefone(phone)}:`, err.message);
    }
   }
   } catch (errJob) {
@@ -1293,7 +1346,7 @@ setInterval(async () => {
       await persistirLead(phone);
     }
    } catch (err) {
-     console.error(`Erro no lembrete de ${phone}:`, err.message);
+     console.error(`Erro no lembrete de ${mascararTelefone(phone)}:`, err.message);
    }
   }
   } catch (errJob) {
@@ -1646,7 +1699,7 @@ app.post('/webhook', async (req, res) => {
         if (midiaAudio && midiaAudio.buffer) {
           const transcricao = await transcreverAudio(midiaAudio.buffer, midiaAudio.mimeType);
           if (transcricao) {
-            console.log(`[Claude] Áudio transcrito de ${userPhone}: "${transcricao.slice(0, 80)}"`);
+            console.log(`[Claude] Áudio transcrito de ${mascararTelefone(userPhone)}: "${transcricao.slice(0, 80)}"`);
             processarComLock(userPhone, transcricao, null, nomePerfilWhatsApp).catch(err =>
               console.error('Erro ao processar áudio:', err.message)
             );
@@ -1920,7 +1973,7 @@ async function tratarPosAgendamento(userPhone, userText) {
 
 // Helper de log estruturado por lead
 function log(phone, nivel, ...args) {
-  const tag = `[${phone}]`;
+  const tag = `[${mascararTelefone(phone)}]`;
   if (nivel === 'error') console.error(tag, ...args);
   else if (nivel === 'warn') console.warn(tag, ...args);
   else console.log(tag, ...args);
@@ -2511,7 +2564,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     }
     if (Object.keys(atualizacoesIncrementais).length > 0) {
       atualizarLead(userPhone, atualizacoesIncrementais).catch(e =>
-        console.error(`[${userPhone}] atualizarLead incremental:`, e.message)
+        console.error(`[${mascararTelefone(userPhone)}] atualizarLead incremental:`, e.message)
       );
     }
 
@@ -2536,7 +2589,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       statusIntermediario = 'Qualificando';
     }
     if (statusIntermediario) {
-      atualizarLead(userPhone, { 'Status': statusIntermediario }).catch(e => console.error(`[${userPhone}] atualizarLead status:`, e.message));
+      atualizarLead(userPhone, { 'Status': statusIntermediario }).catch(e => console.error(`[${mascararTelefone(userPhone)}] atualizarLead status:`, e.message));
       if (statusIntermediario === 'Qualificando') {
         registrarEtapaFunil(userPhone, FUNIL.QUALIFICANDO).catch(() => {});
         registrarAtividade(nomeAtual || 'Lead', 'Qualificou lead').catch(() => {});
@@ -2554,7 +2607,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       log(userPhone, 'info', `Nome capturado via marcador: ${nomeCapturado}`);
       if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
       agendamentos[userPhone].nomeConfirmado = nomeCapturado;
-      atualizarLead(userPhone, { 'Nome': nomeCapturado }).catch(e => console.error(`[${userPhone}] atualizarLead nome marcador:`, e.message));
+      atualizarLead(userPhone, { 'Nome': nomeCapturado }).catch(e => console.error(`[${mascararTelefone(userPhone)}] atualizarLead nome marcador:`, e.message));
     }
 
     // Detectar marcador de slot [SLOT: label] emitido pelo Claude
@@ -2667,7 +2720,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
     const encerrarEfetivo = deveEncerrar && agendamentoFoiOferecido;
     if (deveEncerrar && !agendamentoFoiOferecido) {
-      console.warn(`[${userPhone}] [ENCERRAR] ignorado — agendamento ainda não foi oferecido nesta conversa.`);
+      console.warn(`[${mascararTelefone(userPhone)}] [ENCERRAR] ignorado — agendamento ainda não foi oferecido nesta conversa.`);
     }
 
     const partes = respostaSemMarcador.split('|||').map(p => p.trim()).filter(Boolean);
@@ -2726,7 +2779,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       [userPhone, CLIENT_ID]
     );
   } catch (err) {
-    console.error(`[${userPhone}] Erro ao gravar first_response_at:`, err.message);
+    console.error(`[${mascararTelefone(userPhone)}] Erro ao gravar first_response_at:`, err.message);
   }
 }
 
@@ -3110,7 +3163,7 @@ async function gravarConversa(userPhone, mensagens) {
       [leadId, CLIENT_ID, JSON.stringify(mensagensFormatadas)]
     );
   } catch (err) {
-    console.error(`[${userPhone}] Erro ao gravar conversa:`, err.message);
+    console.error(`[${mascararTelefone(userPhone)}] Erro ao gravar conversa:`, err.message);
   }
 }
 
@@ -3137,7 +3190,7 @@ async function enviarMensagem(para, texto, tentativa = 1) {
   } catch (err) {
     const codigoErro = err.response?.data?.error?.code;
     if (codigoErro && ERROS_NUMERO_INVALIDO.has(codigoErro)) {
-      console.warn(`[${para}] Número inválido ou inacessível (código ${codigoErro}) — marcando como inativo.`);
+      console.warn(`[${mascararTelefone(para)}] Número inválido ou inacessível (código ${codigoErro}) — marcando como inativo.`);
       // Limpa o lead da memória para não continuar tentando
       leadsEncerrados.add(para);
       delete followUpStatus[para];
@@ -3152,11 +3205,11 @@ async function enviarMensagem(para, texto, tentativa = 1) {
     const status = err.response?.status;
     const reintentavel = !status || status === 429 || status >= 500;
     if (tentativa < MAX_TENTATIVAS_ENVIO && reintentavel) {
-      console.warn(`[${para}] Falha ao enviar (tentativa ${tentativa}) — tentando novamente...`);
+      console.warn(`[${mascararTelefone(para)}] Falha ao enviar (tentativa ${tentativa}) — tentando novamente...`);
       await new Promise(r => setTimeout(r, tentativa * 1500));
       return enviarMensagem(para, texto, tentativa + 1);
     }
-    console.error(`[${para}] Erro WhatsApp:`, err.response?.data || err.message);
+    console.error(`[${mascararTelefone(para)}] Erro WhatsApp:`, err.response?.data || err.message);
     return false; // falhou após as tentativas
   }
 }
