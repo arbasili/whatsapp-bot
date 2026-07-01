@@ -1294,7 +1294,7 @@ setInterval(async () => {
           : `Oi, senti sua falta na conversa de hoje. Aconteceu alguma coisa? Se quiser remarcar, é só me falar.`;
         await enviarMensagem(phone, msgNS);
         await enviarMensagem(MEU_NUMERO, `*Possível no-show*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${phone}\nHorário: ${ag.labelCG || ag.label}\n\nLead não apareceu na reunião. Mensagem de retomada enviada automaticamente.`);
-        atualizarLead(phone, { 'Status': 'No-show' }).catch(e => console.error('atualizarLead no-show:', e.message));
+        atualizarLead(phone, { 'Status': 'Reunião agendada' }).catch(e => console.error('atualizarLead no-show:', e.message));
         registrarEtapaFunil(phone, FUNIL.NO_SHOW).catch(e => console.error('funil no-show:', e.message));
         ag.noShowEnviado = true;
         await persistirLead(phone);
@@ -1858,7 +1858,7 @@ async function tratarPosAgendamento(userPhone, userText) {
         await enviarMensagem(userPhone, msg);
       } else {
         await enviarMensagem(userPhone, 'Tive um problema pra remarcar aqui. Nosso time vai entrar em contato pra ajustar com você.');
-        await atualizarLead(userPhone, { 'Status': 'Remarcando' });
+        await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
         registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando:', e.message));
         ag.remarcando = false;
       }
@@ -1933,7 +1933,7 @@ async function tratarPosAgendamento(userPhone, userText) {
       log(userPhone, 'warn', `Limite de remarcações atingido (${totalRemarcacoes})`);
       await enviarMensagem(userPhone, 'Entendo! Como já remarcamos algumas vezes, vou pedir para nossa equipe entrar em contato diretamente para encontrar o melhor horário para você.');
       await enviarMensagem(MEU_NUMERO, `*Limite de remarcações atingido*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário atual: ${ag.labelCG || ag.label}\n\nLead tentou remarcar pela ${totalRemarcacoes + 1}ª vez. Tratar manualmente.`);
-      await atualizarLead(userPhone, { 'Status': 'Remarcando' });
+      await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
       registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando limite:', e.message));
       return true;
     }
@@ -1947,7 +1947,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     }
     if (novosSlots.length === 0) {
       await enviarMensagem(userPhone, 'Sem problema! No momento não consegui localizar novos horários automaticamente, mas nossa equipe vai entrar em contato para remarcar com você.');
-      await atualizarLead(userPhone, { 'Status': 'Remarcando' });
+      await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
       registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando sem slot:', e.message));
       return true;
     }
@@ -1955,7 +1955,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     ag.novosSlots = novosSlots;
     // totalRemarcacoes só é incrementado quando a remarcação é de fato confirmada
     // (ver bloco acima), para uma falha da API não custar uma das 2 chances do lead.
-    await atualizarLead(userPhone, { 'Status': 'Remarcando' });
+    await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
     registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando:', e.message));
     const opcoes = novosSlots.length >= 2
       ? `${novosSlots[0].label} ou ${novosSlots[1].label}`
@@ -2582,9 +2582,9 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     } else if (/conversa gratuita|sem compromisso|google meet|30 minutos.*especialista|especialista.*30 minutos/.test(respostaTextoCompleto)) {
       statusIntermediario = 'Pronto para agendar';
     } else if (/posso usar o número|prefere outro/.test(respostaTexto)) {
-      statusIntermediario = 'Aguardando confirmação de contato';
+      statusIntermediario = 'Qualificando';
     } else if (/qual é o seu email|email para eu registrar/.test(respostaTexto)) {
-      statusIntermediario = 'Aguardando email';
+      statusIntermediario = 'Qualificando';
     } else if (nomeAtual && conversas[userPhone].filter(m => m.role === 'user').length <= 5) {
       statusIntermediario = 'Qualificando';
     }
@@ -2745,7 +2745,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       leadsEncerrados.add(userPhone);
       // Marca como encerrado no banco apenas se não tiver agendado
       if (!leadsAgendados.has(userPhone)) {
-        atualizarLead(userPhone, { 'Status': 'Encerrado sem agendar' })
+        atualizarLead(userPhone, { 'Status': 'Perdido sem resposta' })
           .catch(e => console.error('atualizarLead encerramento:', e.message));
         registrarEtapaFunil(userPhone, FUNIL.ENCERRADO_SEM).catch(() => {});
       }
