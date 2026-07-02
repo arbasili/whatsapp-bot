@@ -6,13 +6,44 @@ const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
 require('dotenv/config');
 
+// Heurísticas puras de interpretação de texto — extraídas para módulo próprio
+// para permitir testes unitários (npm test) sem subir o servidor
+const {
+  textoDoConteudo,
+  escolherSlot,
+  extrairTipoNegocio,
+  extrairDorLead,
+  extrairUrgencia,
+  extrairNomeLead,
+} = require('./heuristicas');
+
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.8.1';
-const BOT_VERSION_DATA = '2026-06-28'; // data desta versão
+const BOT_VERSION = '1.9.0';
+const BOT_VERSION_DATA = '2026-07-02'; // data desta versão
+
+const helmet = require('helmet');
+const { rateLimit: criarRateLimiter } = require('express-rate-limit');
 
 const app = express();
+
+// Atrás do proxy do Railway: necessário para req.ip refletir o IP real do cliente
+// (sem isso o rate limit por IP trataria todos os requests como vindos do proxy)
+app.set('trust proxy', 1);
+
+// Headers de segurança em todas as rotas
+app.use(helmet());
+
+// Rate limit nas rotas da API do painel — o webhook tem proteção própria por telefone
+const apiLimiter = criarRateLimiter({
+  windowMs: 60 * 1000,
+  max: 120, // por IP por minuto — folga para o painel com auto-refresh
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas requisições. Tente novamente em instantes.' }
+});
+app.use('/api', apiLimiter);
 
 // CORS — aceita requisições do painel CRM
 app.use(cors({
@@ -40,27 +71,42 @@ const supabase = createClient(
 // Middleware de autenticação — valida token JWT do painel antes de cada rota protegida
 // e confirma que o usuário tem permissão sobre o CLIENT_ID deste deployment (tabela
 // user_clients), não só que o JWT é de algum usuário válido do projeto Supabase.
+// Ambas as validações são cacheadas por 60s: sem isso, cada request do painel custa
+// uma chamada ao Supabase + uma query no Postgres.
+const AUTH_CACHE_TTL_MS = 60 * 1000;
+const cacheTokens = new Map(); // token -> { user, expira }
+let cacheAutorizados = { ids: new Set(), expira: 0 };
+
 async function verificarToken(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'Não autorizado' });
   try {
-    const { data: { user }, error } = await supabase.auth.getUser(token);
-    if (error || !user) return res.status(401).json({ error: 'Token inválido' });
+    let user;
+    const emCache = cacheTokens.get(token);
+    if (emCache && emCache.expira > Date.now()) {
+      user = emCache.user;
+    } else {
+      const { data: { user: u }, error } = await supabase.auth.getUser(token);
+      if (error || !u) return res.status(401).json({ error: 'Token inválido' });
+      user = u;
+      if (cacheTokens.size > 500) cacheTokens.clear(); // limite de memória
+      cacheTokens.set(token, { user, expira: Date.now() + AUTH_CACHE_TTL_MS });
+    }
 
-    const vinculosDoCliente = await pool.query(
-      'SELECT user_id FROM user_clients WHERE client_id = $1',
-      [CLIENT_ID]
-    );
-    const jaAutorizado = vinculosDoCliente.rows.some(r => r.user_id === user.id);
+    if (cacheAutorizados.expira <= Date.now()) {
+      const r = await pool.query('SELECT user_id FROM user_clients WHERE client_id = $1', [CLIENT_ID]);
+      cacheAutorizados = { ids: new Set(r.rows.map(x => x.user_id)), expira: Date.now() + AUTH_CACHE_TTL_MS };
+    }
 
-    if (!jaAutorizado) {
-      if (vinculosDoCliente.rows.length === 0) {
+    if (!cacheAutorizados.ids.has(user.id)) {
+      if (cacheAutorizados.ids.size === 0) {
         // Bootstrap: ninguém ainda está vinculado a este CLIENT_ID — o primeiro
         // usuário autenticado com sucesso vira o dono, sem precisar de INSERT manual.
         await pool.query(
           'INSERT INTO user_clients (user_id, client_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
           [user.id, CLIENT_ID]
         );
+        cacheAutorizados.ids.add(user.id);
         console.log(`Usuário ${user.id} vinculado automaticamente ao client_id ${CLIENT_ID} (primeiro acesso).`);
       } else {
         return res.status(403).json({ error: 'Usuário sem permissão para este cliente' });
@@ -243,6 +289,14 @@ function mascararTelefone(tel) {
   return str.length > 4 ? `***${str.slice(-4)}` : '***';
 }
 
+// Conteúdo de mensagens nos logs: por padrão é registrado (a validação do produto
+// depende de ler transcrições reais). Em produção, defina LOG_CONTEUDO=false para
+// redigir o texto das mensagens e ficar aderente à LGPD.
+const LOG_CONTEUDO = process.env.LOG_CONTEUDO !== 'false';
+function conteudoParaLog(texto) {
+  return LOG_CONTEUDO ? texto : '[conteúdo redigido]';
+}
+
 // Salva o estado atual de um lead no banco (upsert)
 async function persistirLead(phone) {
   try {
@@ -329,6 +383,11 @@ const mensagensPendentes = {};
 const debounceTimers = {};
 const processandoAgendamento = new Set();
 const mensagensProcessadas = new Set(); // deduplicação de webhooks repetidos da Meta
+// Bloqueio real de abuso: a detecção de spam adicionava o lead a leadsEncerrados,
+// mas a próxima mensagem qualquer o reativava — o "bloqueio" durava uma mensagem.
+// Este mapa segura o bloqueio por 24h independente da reativação.
+const leadsBloqueados = new Map(); // phone -> timestamp do bloqueio
+const BLOQUEIO_ABUSO_MS = 24 * 60 * 60 * 1000;
 const MENSAGENS_PROCESSADAS_MAX = 500; // evita crescimento indefinido
 // Estado dinâmico de agendamentos confirmados, por telefone. Campos possíveis:
 //   nome, email, slotInicio, label (Brasília), labelCG (Campo Grande), meetLink, eventId,
@@ -389,12 +448,41 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
+// Limpeza diária do bot_state no Postgres — a limpeza acima só apaga a memória;
+// sem esta, as linhas ficam para sempre no banco e um restart re-hidrata leads
+// que já tinham expirado (carregarLeads recarrega tudo). Não toca na tabela leads
+// (o histórico do CRM é preservado), só no estado de runtime.
+setInterval(async () => {
+  try {
+    const res = await pool.query(
+      `DELETE FROM bot_state
+       WHERE client_id = $1
+         AND updated_at < NOW() - INTERVAL '30 days'
+         AND agendamento_confirmado IS NULL`,
+      [CLIENT_ID]
+    );
+    if (res.rowCount > 0) console.log(`Limpeza bot_state: ${res.rowCount} registros antigos removidos.`);
+  } catch (err) {
+    console.error('Erro na limpeza diária do bot_state:', err.message);
+  }
+}, 24 * 60 * 60 * 1000);
+
 const MEU_NUMERO = process.env.MEU_NUMERO || '';
 const CALENDAR_ID = 'comercial@cliqueefecha.com.br';
 
 // Horário de silêncio: não envia mensagens entre 20h e 8h (Campo Grande)
 const SILENCIO_INICIO = 20;
 const SILENCIO_FIM = 8;
+
+// Saudação correta para o momento atual (horário de Campo Grande)
+function saudacaoAtualCG() {
+  const h = parseInt(new Date().toLocaleString('en-US', {
+    hour: 'numeric', hour12: false, timeZone: 'America/Campo_Grande'
+  }), 10);
+  if (h >= 5 && h < 12) return 'Bom dia';
+  if (h >= 12 && h < 18) return 'Boa tarde';
+  return 'Boa noite';
+}
 
 function dentroDoHorarioSilencio() {
   const agora = new Date();
@@ -1142,8 +1230,8 @@ setInterval(async () => {
       // Reativação 7 dias — segunda tentativa (se não respondeu à de 3 dias)
       } else if (status.reativacao3dEnviada && !status.reativacao7dEnviada && tempoEncerrado > REATIVACAO_7D_MS) {
         const msg = nome !== 'você'
-          ? `${nome}, tentei te alcançar há alguns dias. Se o momento não era o certo antes, tudo bem. Se ainda fizer sentido melhorar${negocio}, pode me chamar quando quiser.`
-          : `Tentei entrar em contato há alguns dias. Se ainda fizer sentido melhorar${negocio}, pode me chamar quando quiser.`;
+          ? `${nome}, tudo bem por aí? Se o momento não era o certo antes, sem problema. Se em algum momento fizer sentido melhorar${negocio}, é só me chamar.`
+          : `Tudo bem por aí? Se o momento não era o certo antes, sem problema. Se em algum momento fizer sentido melhorar${negocio}, é só me chamar.`;
         await enviarMensagem(phone, msg);
         atualizarLead(phone, { 'Status': 'Reativação 7 dias' }).catch(() => {});
         registrarEtapaFunil(phone, FUNIL.REATIVACAO_7D).catch(() => {});
@@ -1214,8 +1302,11 @@ setInterval(async () => {
         await persistirLead(phone);
       }
 
-    } else if (status.tentativas >= 2 || (status.tentativas > 0 && !dentroJanela)) {
+    } else {
       // ── Janela fechou — mover para reativação e encerrar ───────────────────
+      // Vale para QUALQUER quantidade de tentativas, inclusive zero: se o bot ficou
+      // fora do ar e a janela fechou sem nenhum follow-up, o lead ainda precisa
+      // entrar em reativação em vez de ficar órfão como "Em conversa" no CRM.
       const negocio = extrairTipoNegocio(conversas[phone]);
       const nomeExib = nome !== 'você' ? nome : '';
 
@@ -1699,7 +1790,7 @@ app.post('/webhook', async (req, res) => {
         if (midiaAudio && midiaAudio.buffer) {
           const transcricao = await transcreverAudio(midiaAudio.buffer, midiaAudio.mimeType);
           if (transcricao) {
-            console.log(`[Claude] Áudio transcrito de ${mascararTelefone(userPhone)}: "${transcricao.slice(0, 80)}"`);
+            console.log(`[Claude] Áudio transcrito de ${mascararTelefone(userPhone)}: "${conteudoParaLog(transcricao.slice(0, 80))}"`);
             processarComLock(userPhone, transcricao, null, nomePerfilWhatsApp).catch(err =>
               console.error('Erro ao processar áudio:', err.message)
             );
@@ -1871,6 +1962,21 @@ async function tratarPosAgendamento(userPhone, userText) {
     }
   }
 
+  // Despedidas simples logo após a confirmação ("ok", "obrigado", "valeu") — não responde em loop.
+  // Verificado ANTES da classificação de intenção via Claude: mensagem trivial não deve
+  // custar uma chamada de API nem esperar a resposta dela.
+  // Quebra por vírgula/ponto/exclamação e exige que TODOS os pedaços sejam palavras
+  // simples — cobre combinações como "ótimo, combinado" e não só uma palavra isolada.
+  // Só vale na janela de 30 min após confirmar; depois disso, qualquer mensagem é respondida.
+  const PALAVRAS_DESPEDIDA_SIMPLES = ['ok', 'okay', 'blz', 'beleza', 'tá bom', 'ta bom', 'tá', 'ta', 'tudo bem', 'tudo certo', 'valeu', 'vlw', 'obrigado', 'obrigada', 'brigado', 'brigada', 'combinado', 'certo', 'entendi', 'já entendi', 'ja entendi', 'isso', 'isso mesmo', 'perfeito', 'ótimo', 'otimo', 'show', 'top', 'joia', 'jóia', '👍', '🙏', '😊', 'tmj', 'até', 'até lá', 'até mais', 'fechou', 'tô dentro', 'to dentro', 'tranquilo', 'de boa'];
+  const partesDespedida = (userText || '').trim().toLowerCase().split(/[,.!]+/).map(p => p.trim()).filter(Boolean);
+  const despedidaSimples = partesDespedida.length > 0 && partesDespedida.every(p => PALAVRAS_DESPEDIDA_SIMPLES.includes(p));
+  const confirmadaRecenteParaDespedida = ag.presencaConfirmadaEm && (Date.now() - ag.presencaConfirmadaEm < 30 * 60 * 1000);
+  if (despedidaSimples && confirmadaRecenteParaDespedida) {
+    log(userPhone, 'info', 'Despedida simples logo após confirmação — não responde para evitar loop.');
+    return true;
+  }
+
   // Classificar a intenção da mensagem via Claude
   let intencao = 'duvida';
   try {
@@ -1910,19 +2016,6 @@ async function tratarPosAgendamento(userPhone, userText) {
     const saud = ag.nome ? `Combinado, ${ag.nome}!` : 'Combinado!';
     const refHorario = ag.label ? ` Nossa conversa está confirmada para ${ag.label}.` : ' Sua reunião está confirmada.';
     await enviarMensagem(userPhone, `${saud}${refHorario} Te espero lá!`);
-    return true;
-  }
-
-  // Despedidas simples logo após a confirmação ("ok", "obrigado", "valeu") — não responde em loop.
-  // Só vale na janela de 30 min após confirmar; depois disso, qualquer mensagem é respondida.
-  // Quebra por vírgula/ponto/exclamação e exige que TODOS os pedaços sejam palavras
-  // simples — cobre combinações como "ótimo, combinado" e não só uma palavra isolada.
-  const PALAVRAS_DESPEDIDA_SIMPLES = ['ok', 'okay', 'blz', 'beleza', 'tá bom', 'ta bom', 'tá', 'ta', 'tudo bem', 'tudo certo', 'valeu', 'vlw', 'obrigado', 'obrigada', 'brigado', 'brigada', 'combinado', 'certo', 'entendi', 'já entendi', 'ja entendi', 'isso', 'isso mesmo', 'perfeito', 'ótimo', 'otimo', 'show', 'top', 'joia', 'jóia', '👍', '🙏', '😊', 'tmj', 'até', 'até lá', 'até mais', 'fechou', 'tô dentro', 'to dentro', 'tranquilo', 'de boa'];
-  const partesDespedida = (userText || '').trim().toLowerCase().split(/[,.!]+/).map(p => p.trim()).filter(Boolean);
-  const despedidaSimples = partesDespedida.length > 0 && partesDespedida.every(p => PALAVRAS_DESPEDIDA_SIMPLES.includes(p));
-  const confirmadaRecenteParaDespedida = ag.presencaConfirmadaEm && (Date.now() - ag.presencaConfirmadaEm < 30 * 60 * 1000);
-  if (despedidaSimples && confirmadaRecenteParaDespedida) {
-    log(userPhone, 'info', 'Despedida simples logo após confirmação — não responde para evitar loop.');
     return true;
   }
 
@@ -1980,7 +2073,7 @@ function log(phone, nivel, ...args) {
 }
 
 async function processarMensagem(userPhone, userText, imagem = null, nomePerfil = '') {
-  log(userPhone, 'info', `Mensagem recebida: "${(userText || '').slice(0, 80)}"${imagem ? ' [+imagem]' : ''}${nomePerfil ? ` | perfil: ${nomePerfil}` : ''}`);
+  log(userPhone, 'info', `Mensagem recebida: "${conteudoParaLog((userText || '').slice(0, 80))}"${imagem ? ' [+imagem]' : ''}${nomePerfil ? ` | perfil: ${nomePerfil}` : ''}`);
 
   // Valida o nome vindo do perfil do WhatsApp
   // Considera inválido: vazio, muito curto, só números, nomes genéricos, frases/slogans
@@ -2005,6 +2098,16 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
   }
   const nomeDoWebhook = nomePerfilValido(nomePerfil) ? nomePerfil.trim().split(' ')[0] : '';
 
+  // Lead bloqueado por abuso: ignora silenciosamente até o bloqueio expirar (24h)
+  const bloqueadoEm = leadsBloqueados.get(userPhone);
+  if (bloqueadoEm) {
+    if (Date.now() - bloqueadoEm < BLOQUEIO_ABUSO_MS) {
+      log(userPhone, 'warn', 'Mensagem ignorada — lead bloqueado por abuso.');
+      return;
+    }
+    leadsBloqueados.delete(userPhone); // bloqueio expirou
+  }
+
   // Detecção de abuso/spam — antes de qualquer processamento
   if (userText) {
     const t = userText.trim();
@@ -2020,11 +2123,12 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
       (t.length > 10 && !/[a-záàãâéêíóôõúüçA-Z]/.test(t));
 
     if (padraoSpam) {
-      log(userPhone, 'warn', `Padrão de abuso detectado — mensagem ignorada: "${t.slice(0, 60)}"`);
-      // Encerra silenciosamente sem responder ao abusador
+      log(userPhone, 'warn', `Padrão de abuso detectado — mensagem ignorada: "${conteudoParaLog(t.slice(0, 60))}"`);
+      // Bloqueia por 24h e encerra silenciosamente, sem responder ao abusador
+      leadsBloqueados.set(userPhone, Date.now());
       leadsEncerrados.add(userPhone);
       persistirLead(userPhone).catch(() => {});
-      enviarMensagem(MEU_NUMERO, `*Possível abuso detectado*\n\nWhatsApp: ${userPhone}\nMensagem: "${t.slice(0, 100)}"\n\nLead bloqueado automaticamente.`).catch(() => {});
+      enviarMensagem(MEU_NUMERO, `*Possível abuso detectado*\n\nWhatsApp: ${userPhone}\nMensagem: "${t.slice(0, 100)}"\n\nLead bloqueado por 24h.`).catch(() => {});
       return;
     }
   }
@@ -2060,16 +2164,10 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
       console.error('Erro ou timeout ao buscar horários:', err.message);
     }
 
-    agendamentos[userPhone] = { slots: slotsDisponiveis };
+    agendamentos[userPhone] = { slots: slotsDisponiveis, slotsGeradosEm: Date.now() };
 
     // Calcula a saudação correta com base na hora real de Campo Grande
-    const horaAtualCG = parseInt(new Date().toLocaleString('en-US', {
-      hour: 'numeric', hour12: false, timeZone: 'America/Campo_Grande'
-    }), 10);
-    let saudacaoHora;
-    if (horaAtualCG >= 5 && horaAtualCG < 12) saudacaoHora = 'Bom dia';
-    else if (horaAtualCG >= 12 && horaAtualCG < 18) saudacaoHora = 'Boa tarde';
-    else saudacaoHora = 'Boa noite';
+    const saudacaoHora = saudacaoAtualCG();
 
     // Detecta a origem do lead pela primeira mensagem.
     // Sites geralmente enviam um texto pré-preenchido no link do WhatsApp.
@@ -2417,17 +2515,25 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
     // Revalida a vaga bem no momento da confirmação — ela foi checada quando foi
     // oferecida, mas outro lead pode ter fechado o mesmo horário nesse meio-tempo.
-    const aindaDisponivel = await slotAindaDisponivel(slotEscolhido.inicio, slotEscolhido.fim);
+    // Também rejeita slot que já passou ou está em cima da hora: um lead que retoma
+    // a conversa dias depois carrega slots antigos, e o free/busy do Calendar não
+    // acusa horário no passado como ocupado (criaria evento retroativo).
+    const slotNoFuturo = new Date(slotEscolhido.inicio).getTime() > Date.now() + 30 * 60 * 1000;
+    const aindaDisponivel = slotNoFuturo && await slotAindaDisponivel(slotEscolhido.inicio, slotEscolhido.fim);
     if (!aindaDisponivel) {
-      log(userPhone, 'warn', `Slot ${slotEscolhido.label} foi ocupado por outro lead entre a oferta e a confirmação.`);
+      const motivo = slotNoFuturo
+        ? 'Esse horário acabou de ser ocupado por outra pessoa.'
+        : 'Esse horário que tínhamos conversado já passou.';
+      log(userPhone, 'warn', `Slot ${slotEscolhido.label} inválido na confirmação (${slotNoFuturo ? 'ocupado por outro lead' : 'já passou'}).`);
       const novosSlots = await buscarHorariosDisponiveis().catch(() => []);
       if (novosSlots.length > 0) {
         agendamentos[userPhone].slots = novosSlots;
+        agendamentos[userPhone].slotsGeradosEm = Date.now();
         agendamentos[userPhone].slotConfirmado = null;
         const opcoes = novosSlots.length >= 2 ? `${novosSlots[0].label} ou ${novosSlots[1].label}` : novosSlots[0].label;
-        await enviarMensagem(userPhone, `Esse horário acabou de ser ocupado por outra pessoa. Tenho esses outros disponíveis: ${opcoes}. Qual funciona melhor?`);
+        await enviarMensagem(userPhone, `${motivo} Tenho esses outros disponíveis: ${opcoes}. Qual funciona melhor?`);
       } else {
-        await enviarMensagem(userPhone, 'Esse horário acabou de ser ocupado por outra pessoa. Nossa equipe vai entrar em contato para encontrar um novo horário com você.');
+        await enviarMensagem(userPhone, `${motivo} Nossa equipe vai entrar em contato para encontrar um novo horário com você.`);
       }
       await persistirLead(userPhone);
       return;
@@ -2506,14 +2612,14 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
         `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioLead}. É rapidinho, 30 minutos, e você já sai com um caminho claro de como deixar seu atendimento no automático.\n\nO link da reunião é esse: ${meetLink}\n\nTe mando um lembrete antes pra você não precisar ficar de olho no horário 😊`
       );
       await new Promise(r => setTimeout(r, 2000));
-      await enviarMensagem(userPhone, `O especialista vai entrar em contato pelo WhatsApp antes da reunião para confirmar os detalhes. Até lá, ${nomeExibicao}!`);
+      await enviarMensagem(userPhone, `Qualquer dúvida até a reunião, é só me chamar por aqui. Até lá, ${nomeExibicao}!`);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioInterno}\nMeet: ${meetLink}`);
     } else {
       await enviarMensagem(userPhone,
         `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioLead}. É uma conversa de 30 minutos pra te mostrar como automatizar seu atendimento.\n\nJá já te envio o link da reunião por aqui, pode ficar tranquilo. Te mando um lembrete antes também 😊`
       );
       await new Promise(r => setTimeout(r, 2000));
-      await enviarMensagem(userPhone, `O especialista vai entrar em contato pelo WhatsApp antes da reunião para confirmar os detalhes. Até lá, ${nomeExibicao}!`);
+      await enviarMensagem(userPhone, `Qualquer dúvida até a reunião, é só me chamar por aqui. Até lá, ${nomeExibicao}!`);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioInterno}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
    } catch (err) {
@@ -2531,9 +2637,41 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
      processandoAgendamento.delete(userPhone);
    }
   } else {
+    // Renova os horários se ficaram velhos: os slots são buscados no início da conversa
+    // e congelam; um lead que retoma horas/dias depois receberia oferta de horário que
+    // já passou. Refresh só quando necessário para não bater no Calendar a toda mensagem.
+    const agLead = agendamentos[userPhone];
+    const SLOTS_VALIDADE_MS = 3 * 60 * 60 * 1000;
+    if (agLead && !leadsAgendados.has(userPhone)) {
+      const slotsVencidos = !agLead.slotsGeradosEm ||
+        (Date.now() - agLead.slotsGeradosEm > SLOTS_VALIDADE_MS) ||
+        (agLead.slots || []).some(s => new Date(s.inicio).getTime() < Date.now());
+      if (slotsVencidos) {
+        try {
+          const novos = await buscarHorariosDisponiveis();
+          if (novos.length) {
+            agLead.slots = novos;
+            agLead.slotsGeradosEm = Date.now();
+            delete agLead.slotConfirmado; // confirmação antiga aponta para slot que não existe mais
+          }
+        } catch (e) {
+          console.error('Erro ao renovar horários:', e.message);
+        }
+      }
+    }
+
+    // Contexto dinâmico: saudação e horários corretos NESTE momento. Os valores gravados
+    // no roteiro inicial congelam no início da conversa e ficam errados quando o lead
+    // retoma em outro período do dia (ex: "Boa noite" às 9h da manhã).
+    const slotsAtuais = agLead?.slots || [];
+    const opcoesAtuais = slotsAtuais.length >= 2
+      ? `${slotsAtuais[0].label} ou ${slotsAtuais[1].label}`
+      : (slotsAtuais.length === 1 ? slotsAtuais[0].label : 'nenhum horário disponível no momento');
+    const contextoDinamico = `CONTEXTO ATUAL (gerado agora, prevalece sobre qualquer valor anterior do roteiro ou da conversa): a saudação correta neste momento é "${saudacaoAtualCG()}". Os horários realmente disponíveis agora são: ${opcoesAtuais}. Se horários mencionados antes na conversa forem diferentes destes, ofereça estes.`;
+
     log(userPhone, 'info', `Chamando Claude — histórico: ${conversas[userPhone].length} msgs`);
-    const resposta = await chamarClaude(conversas[userPhone]);
-    log(userPhone, 'info', `Resposta Claude: "${resposta.slice(0, 100)}"`);
+    const resposta = await chamarClaude(conversas[userPhone], contextoDinamico);
+    log(userPhone, 'info', `Resposta Claude: "${conteudoParaLog(resposta.slice(0, 100))}"`);
     conversas[userPhone].push({ role: 'assistant', content: resposta });
 
     // Grava nome, tipo de negócio, dor e urgência assim que detectados, sem esperar
@@ -2639,6 +2777,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       if (resultado.tipo === 'completo') {
         // Dia e hora livres: adiciona como opção escolhível e confirma
         agendamentos[userPhone].slots = [resultado.slot];
+        agendamentos[userPhone].slotsGeradosEm = Date.now();
         await enviarERegistrar(userPhone, `Tenho ${resultado.slot.label} disponível. Posso reservar esse horário para você?`);
       } else if (resultado.tipo === 'sohdia') {
         // Só o dia (ou período): oferecer horários concretos disponíveis nesse dia
@@ -2664,11 +2803,13 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
         if (opcoesDia.length >= 2) {
           agendamentos[userPhone].slots = opcoesDia;
+          agendamentos[userPhone].slotsGeradosEm = Date.now();
           const h1 = horaDoLabel(opcoesDia[0].label).replace(' (horário de Brasília)', '');
           const h2 = horaDoLabel(opcoesDia[1].label).replace(' (horário de Brasília)', '');
           await enviarERegistrar(userPhone, `Para ${nomeDia}, tenho ${h1} ou ${h2} (horário de Brasília). Qual funciona melhor para você?`);
         } else if (opcoesDia.length === 1) {
           agendamentos[userPhone].slots = opcoesDia;
+          agendamentos[userPhone].slotsGeradosEm = Date.now();
           const h1 = horaDoLabel(opcoesDia[0].label).replace(' (horário de Brasília)', '');
           await enviarERegistrar(userPhone, `Para ${nomeDia}, tenho disponível às ${h1} (horário de Brasília). Posso reservar para você?`);
         } else {
@@ -2677,6 +2818,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
           try { alternativas = await buscarHorariosDisponiveis(); } catch (e) { console.error(e.message); }
           if (alternativas.length >= 2) {
             agendamentos[userPhone].slots = alternativas;
+            agendamentos[userPhone].slotsGeradosEm = Date.now();
             await enviarERegistrar(userPhone, `Nesse dia eu não tenho horário livre. As opções mais próximas são: ${alternativas[0].label} ou ${alternativas[1].label}. Alguma funciona para você?`);
           } else {
             await enviarERegistrar(userPhone, 'Nesse dia eu não tenho horário livre. Pode me sugerir outro dia?');
@@ -2688,9 +2830,11 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
         try { alternativas = await buscarHorariosDisponiveis(); } catch (e) { console.error(e.message); }
         if (alternativas.length >= 2) {
           agendamentos[userPhone].slots = alternativas;
+          agendamentos[userPhone].slotsGeradosEm = Date.now();
           await enviarERegistrar(userPhone, `Nesse horário eu não tenho disponibilidade. As opções mais próximas que tenho são: ${alternativas[0].label} ou ${alternativas[1].label}. Alguma funciona para você?`);
         } else if (alternativas.length === 1) {
           agendamentos[userPhone].slots = alternativas;
+          agendamentos[userPhone].slotsGeradosEm = Date.now();
           await enviarERegistrar(userPhone, `Nesse horário eu não tenho disponibilidade. O horário mais próximo que tenho é ${alternativas[0].label}. Funciona para você?`);
         } else {
           await enviarERegistrar(userPhone, 'Nesse horário eu não tenho disponibilidade no momento. Pode me sugerir outro dia ou horário?');
@@ -2783,17 +2927,29 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
   }
 }
 
-async function chamarClaude(historico) {
+async function chamarClaude(historico, contextoDinamico = '') {
   const MAX_MSGS_RECENTES = 30;
-  let historicoEnviado = historico;
-  if (historico.length > MAX_MSGS_RECENTES + 2) {
-    const cabecalho = historico.slice(0, 2); // system + ack do assistant
-    let cauda = historico.slice(-(MAX_MSGS_RECENTES));
-    // Garante que a cauda nunca comece com assistant (API rejeita com 400)
-    while (cauda.length > 0 && cauda[0].role === 'assistant') {
-      cauda = cauda.slice(1);
-    }
-    historicoEnviado = [...cabecalho, ...cauda];
+
+  // O roteiro (historico[0], ~2,5k tokens) vai no parâmetro system com cache_control:
+  // a Anthropic reaproveita o prefixo do cache entre chamadas próximas (TTL ~5min)
+  // em vez de reprocessar o prompt inteiro a cada mensagem — corta o custo de input.
+  // O contexto dinâmico (saudação/horários atuais) vai num bloco separado DEPOIS do
+  // breakpoint de cache, para variar sem invalidar o cache do roteiro.
+  const system = [
+    { type: 'text', text: textoDoConteudo(historico[0].content), cache_control: { type: 'ephemeral' } }
+  ];
+  if (contextoDinamico) {
+    system.push({ type: 'text', text: contextoDinamico });
+  }
+
+  // historico[1] é o ack fixo do assistant ("Entendido...") — desnecessário no formato system
+  let mensagens = historico.slice(2);
+  if (mensagens.length > MAX_MSGS_RECENTES) {
+    mensagens = mensagens.slice(-MAX_MSGS_RECENTES);
+  }
+  // Garante que a lista nunca comece com assistant (API rejeita com 400)
+  while (mensagens.length > 0 && mensagens[0].role === 'assistant') {
+    mensagens = mensagens.slice(1);
   }
 
   const MAX_TENTATIVAS = 3;
@@ -2802,7 +2958,7 @@ async function chamarClaude(historico) {
     try {
       const response = await axios.post(
         'https://api.anthropic.com/v1/messages',
-        { model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6', max_tokens: 500, messages: historicoEnviado },
+        { model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6', max_tokens: 500, system, messages: mensagens },
         {
           headers: {
             'x-api-key': process.env.ANTHROPIC_API_KEY,
@@ -2814,7 +2970,8 @@ async function chamarClaude(historico) {
       );
       const duracao = Date.now() - inicio;
       const uso = response.data.usage || {};
-      console.log(`[Claude] ${duracao}ms | input: ${uso.input_tokens || '?'} tokens | output: ${uso.output_tokens || '?'} tokens | msgs enviadas: ${historicoEnviado.length}`);
+      const cacheInfo = uso.cache_read_input_tokens ? ` | cache lido: ${uso.cache_read_input_tokens}` : (uso.cache_creation_input_tokens ? ` | cache criado: ${uso.cache_creation_input_tokens}` : '');
+      console.log(`[Claude] ${duracao}ms | input: ${uso.input_tokens || '?'} tokens | output: ${uso.output_tokens || '?'} tokens${cacheInfo} | msgs enviadas: ${mensagens.length}`);
       return response.data.content[0].text;
     } catch (err) {
       const duracao = Date.now() - inicio;
@@ -2831,223 +2988,9 @@ async function chamarClaude(historico) {
   }
 }
 
-function textoDoConteudo(content) {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content.filter(c => c.type === 'text').map(c => c.text).join(' ');
-  }
-  return '';
-}
-
-const PERGUNTAS_NOME = ['qual o seu nome', 'como posso te chamar', 'como posso chamá-lo', 'como posso chamá-la', 'posso te chamar de'];
-// Palavras que não são nomes (a pessoa responde com frase em vez do nome direto)
-const PALAVRAS_NAO_NOME = new Set([
-  'sou', 'eu', 'meu', 'minha', 'me', 'chamo', 'nome', 'é', 'o', 'a', 'da', 'do', 'de',
-  'aqui', 'oi', 'ola', 'olá', 'bom', 'boa', 'dia', 'tarde', 'noite', 'tudo', 'bem',
-  'proprietario', 'proprietaria', 'dono', 'dona', 'sócio', 'socio', 'gerente', 'responsavel',
-  'pode', 'chamar', 'falar', 'com', 'senhor', 'senhora', 'sr', 'sra',
-  'uso', 'use', 'usando', 'usar', 'utilizo', 'utilizando'
-]);
-
-// Identifica qual slot o lead escolheu, cruzando dia da semana, data (dia do mês) e hora.
-// Retorna o slot escolhido ou null se não conseguir identificar.
-function escolherSlot(texto, slots) {
-  if (!texto || !slots || slots.length === 0) return null;
-  const t = texto.toLowerCase();
-
-  // Mapa de dias da semana (com e sem acento, formas curtas)
-  const diasSemana = {
-    'segunda': 'segunda', 'segunda-feira': 'segunda', 'segundafeira': 'segunda',
-    'terça': 'terça', 'terca': 'terça', 'terça-feira': 'terça', 'terca-feira': 'terça',
-    'quarta': 'quarta', 'quarta-feira': 'quarta', 'quartafeira': 'quarta',
-    'quinta': 'quinta', 'quinta-feira': 'quinta', 'quintafeira': 'quinta',
-    'sexta': 'sexta', 'sexta-feira': 'sexta', 'sextafeira': 'sexta',
-  };
-
-  // 1. Tentar por dia da semana mencionado no texto
-  let diaMencionado = null;
-  for (const [chave, valor] of Object.entries(diasSemana)) {
-    if (t.includes(chave)) { diaMencionado = valor; break; }
-  }
-  if (diaMencionado) {
-    const match = slots.find(s => s.label.toLowerCase().includes(diaMencionado));
-    if (match) return match;
-  }
-
-  // 2. Tentar por dia do mês ("dia 18", "18 de junho", "no 18")
-  const matchDia = t.match(/\bdia\s+(\d{1,2})\b/) || t.match(/\b(\d{1,2})\s+de\s+\w+/);
-  if (matchDia) {
-    const numDia = matchDia[1];
-    const match = slots.find(s => {
-      const labelDia = s.label.match(/(\d{1,2})\s+de\s+\w+/);
-      return labelDia && labelDia[1] === numDia;
-    });
-    if (match) return match;
-  }
-
-  // 3. Tentar por hora ("9h", "às 14", "14 horas", "as 15") — label está em horário de Brasília
-  const textoEhCurto = t.trim().split(/\s+/).length <= 4; // confirmação curta, ex: "pode as 15"
-  // Evita que um número solto sem relação a horário (ex: "9 pessoas", "faz 3 anos")
-  // seja lido como confirmação de horário só por aparecer numa mensagem curta.
-  const temContextoDeQuantidade = /\b\d{1,2}\s*(pessoas?|reais?|anos?|meses?|dias?|vezes|clientes?|funcion[áa]rios?|km|%|porcento)\b/.test(t);
-  for (const slot of slots) {
-    const matchHora = slot.label.match(/às\s+(\d{1,2})h/);
-    const hora = matchHora ? matchHora[1] : null;
-    if (hora && (
-      t.includes(hora + 'h') ||
-      t.includes(hora + ' h') ||
-      t.includes('às ' + hora) ||
-      t.includes('as ' + hora) ||
-      t.includes(hora + ' hora') ||
-      (textoEhCurto && !temContextoDeQuantidade && new RegExp(`\\b${hora}\\b`).test(t))  // hora isolada só em texto curto e sem contexto de quantidade
-    )) {
-      return slot;
-    }
-  }
-
-  // 4. Tentar por ordem ("primeira/primeiro/1", "segunda opção/2")
-  if (/\bprimeir|1[ªao]?\b|op[çc][ãa]o 1/.test(t) && slots[0]) return slots[0];
-  if (/\bsegund|2[ªao]?\b|op[çc][ãa]o 2/.test(t) && slots[1]) return slots[1];
-
-  return null;
-}
-
-// Extrai o tipo de negócio do lead a partir da conversa
-function extrairTipoNegocio(historico) {
-  if (!historico || historico.length < 3) return null;
-
-  const mensagensUsuario = historico
-    .filter(m => m.role === 'user')
-    .slice(-5)
-    .map(m => textoDoConteudo(m.content))
-    .join(' ')
-    .toLowerCase();
-
-  const respostasBot = historico
-    .filter(m => m.role === 'assistant')
-    .slice(-5)
-    .map(m => textoDoConteudo(m.content))
-    .join(' ')
-    .toLowerCase();
-
-  const padroes = [
-    /(?:tenho|trabalho com|sou dono de|tenho um[a]?)\s+([^.!?\n]{3,40})/i,
-    /(?:meu negócio|minha empresa|meu estabelecimento)\s+(?:é|são)\s+([^.!?\n]{3,40})/i,
-    /(?:trabalho|atuo)\s+(?:com|no|na|em)\s+([^.!?\n]{3,40})/i,
-    /(?:tenho um[a]?|é um[a]?)\s+([^.!?\n]{3,40})(?:\s+aqui|\s+no bairro|\s+na cidade)?/i,
-    /meu\s+(?:negócio|trabalho|ramo)\s+(?:é|são|é de)\s+([^.!?\n]{3,40})/i,
-  ];
-
-  for (const padrao of padroes) {
-    const match = mensagensUsuario.match(padrao);
-    if (match) return match[1].trim();
-  }
-
-  const confirmacaoBot = respostasBot.match(/(?:^|\s)([\w\s]{3,30})\s+(?:é um negócio|é uma área|é um segmento)/i);
-  if (confirmacaoBot) return confirmacaoBot[1].trim();
-
-  return null;
-}
-
-// Extrai a dor principal do lead a partir das mensagens do usuário
-function extrairDorLead(historico) {
-  if (!historico || historico.length < 4) return null;
-
-  const mensagensUsuario = historico
-    .filter(m => m.role === 'user')
-    .slice(-8)
-    .map(m => textoDoConteudo(m.content))
-    .filter(m => m.length > 15)
-    .join(' | ');
-
-  if (mensagensUsuario.length < 20) return null;
-
-  return mensagensUsuario.slice(0, 200);
-}
-
-// Detecta urgência com base nas palavras usadas pelo lead
-function extrairUrgencia(historico) {
-  if (!historico || historico.length < 4) return null;
-
-  const mensagensUsuario = historico.filter(m => m.role === 'user');
-
-  // Só detecta urgência a partir da 4ª mensagem do usuário
-  // Antes disso qualquer "hoje", "agora" é contexto casual, não urgência real
-  if (mensagensUsuario.length < 4) return null;
-
-  const texto = mensagensUsuario
-    .slice(3) // ignora as 3 primeiras mensagens (saudação, nome, tipo de negócio)
-    .map(m => textoDoConteudo(m.content))
-    .join(' ')
-    .toLowerCase();
-
-  if (/agora|urgente|hoje|essa semana|o mais rápido|quanto antes|imediato|imediata/.test(texto)) {
-    return 'imediata';
-  }
-  if (/próxim[ao]s? (dias?|semanas?)|em breve|logo/.test(texto)) {
-    return 'próximos dias';
-  }
-  if (/próxim[ao]s? (meses?)|futuramente|sem pressa|quando der/.test(texto)) {
-    return 'próximos meses';
-  }
-
-  return null;
-}
-
-function extrairNomeLead(conversa) {
-  if (!conversa) return '';
-
-  // Palavras de confirmação — quando o lead responde isso após "posso te chamar de X",
-  // significa que confirmou o nome X, não que seu nome é a palavra de confirmação
-  const CONFIRMACOES = new Set(['sim', 'pode', 'claro', 'isso', 'correto', 'exato', 'isso mesmo',
-    'pode sim', 'com certeza', 'ok', 'isso aí', 'perfeito', 'certo', 'é isso', 'é']);
-
-  // Começa do índice 2: índice 0 é o prompt do sistema (contém exemplos com "qual o seu nome"
-  // e "Sou o Lucas") e índice 1 é o "Entendido" do assistant. Nenhum deles tem o nome real
-  // do lead, e varrê-los causava captura errada (ex: pegar "Lucas" da apresentação).
-  for (let i = 2; i < conversa.length - 1; i++) {
-    const conteudo = textoDoConteudo(conversa[i].content).toLowerCase().replace(/\|\|\|/g, ' ');
-    const perguntouNome = PERGUNTAS_NOME.some(p => conteudo.includes(p));
-    if (perguntouNome && conversa[i+1] && conversa[i+1].role === 'user') {
-      const respostaLead = textoDoConteudo(conversa[i+1].content).trim();
-      const respostaLower = respostaLead.toLowerCase();
-
-      // Se a pergunta foi "posso te chamar de X?" e o lead confirmou,
-      // extrai o nome X diretamente da pergunta do bot
-      if (conteudo.includes('posso te chamar de')) {
-        const ehConfirmacaoPura = CONFIRMACOES.has(respostaLower) ||
-          (respostaLower.split(/\s+/).length <= 2 &&
-           [...CONFIRMACOES].some(c => respostaLower.startsWith(c)) &&
-           !respostaLower.match(/[a-záàãâéêíóôõúüç]{3,}/g)?.some(p => !CONFIRMACOES.has(p)));
-        if (ehConfirmacaoPura) {
-          // Lead confirmou o nome sugerido — extrai da pergunta do bot
-          const matchNome = conteudo.match(/posso te chamar de ([a-záàãâéêíóôõúüç]+)/i);
-          if (matchNome) {
-            const nomeConfirmado = matchNome[1].trim();
-            return nomeConfirmado.charAt(0).toUpperCase() + nomeConfirmado.slice(1).toLowerCase();
-          }
-        }
-        // Se não foi confirmação pura, cai no fluxo normal abaixo (extrai da resposta do lead)
-      }
-
-      // Caso normal: extrai o nome da resposta do lead
-      const palavras = respostaLead.split(/\s+/);
-      for (const palavra of palavras) {
-        const limpa = palavra.replace(/[.,!?;:]/g, '');
-        const ehNome = limpa &&
-          !limpa.includes('@') &&
-          limpa.length > 1 && limpa.length < 30 &&
-          !/\d/.test(limpa) &&
-          !PALAVRAS_NAO_NOME.has(limpa.toLowerCase()) &&
-          !CONFIRMACOES.has(limpa.toLowerCase());
-        if (ehNome) {
-          return limpa.charAt(0).toUpperCase() + limpa.slice(1).toLowerCase();
-        }
-      }
-    }
-  }
-  return '';
-}
+// textoDoConteudo, escolherSlot, extrairTipoNegocio, extrairDorLead, extrairUrgencia
+// e extrairNomeLead agora vivem em heuristicas.js (importadas no topo do arquivo)
+// para permitir testes unitários sem subir o servidor.
 
 async function baixarMidia(mediaId, fallbackMimeType = 'application/octet-stream') {
   try {
