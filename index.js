@@ -22,7 +22,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.7';
+const BOT_VERSION = '1.9.8';
 const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
 
 const helmet = require('helmet');
@@ -704,7 +704,7 @@ function calcularTemperatura(urgency, pain, historico = null) {
 // independente do fuso do servidor (Railway roda em UTC).
 // Calcula score, probabilidade, insights, bullets e próxima ação via Claude
 // Chamado no agendamento (score completo) e no encerramento (score parcial)
-async function calcularInteligenciaLead(phone, { nome, tipoNegocio, dor, urgencia, temperatura, agendou }) {
+async function calcularInteligenciaLead(phone, { nome, tipoNegocio, dor, urgencia, temperatura, agendou, agendadoPara }) {
   try {
     const historico = conversas[phone] || [];
     const historicoTexto = historico
@@ -714,11 +714,13 @@ async function calcularInteligenciaLead(phone, { nome, tipoNegocio, dor, urgenci
       .join('\n');
 
     const contexto = [
+      `Data/hora atual: ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Campo_Grande' })} (Campo Grande)`,
       tipoNegocio ? `Tipo de negócio: ${tipoNegocio}` : '',
       dor ? `Dor principal: ${dor.slice(0, 200)}` : '',
       urgencia ? `Urgência: ${urgencia}` : '',
       temperatura ? `Temperatura: ${temperatura}` : '',
       `Agendou reunião: ${agendou ? 'sim' : 'não'}`,
+      agendadoPara ? `Reunião marcada para: ${new Date(agendadoPara).toLocaleString('pt-BR', { timeZone: 'America/Campo_Grande' })} (Campo Grande)` : '',
     ].filter(Boolean).join(' | ');
 
     const horasFollowup = agendou ? '24h' : '3 dias';
@@ -753,7 +755,8 @@ Regras:
 - score alto (70+): urgência imediata, dor clara, engajado, agendou
 - score médio (40-69): dor identificada mas sem urgência clara
 - score baixo (<40): pouco engajamento, dor vaga, não agendou
-- next_action deve ser específico como: "Realizar consultoria", "Enviar proposta", "Fazer follow-up em ${horasFollowup}"`;
+- next_action deve ser específico como: "Realizar consultoria", "Enviar proposta", "Fazer follow-up em ${horasFollowup}"
+- A empresa está começando e AINDA NÃO TEM cases, clientes ou números de resultado: NUNCA recomende apresentar cases, depoimentos ou métricas de clientes. Recomendações devem se apoiar em demonstração ao vivo, diagnóstico do caso específico do lead e proposta personalizada.`;
 
     const inicioIA = Date.now();
     const resp = await axios.post(
@@ -775,9 +778,13 @@ Regras:
     const texto = resp.data.content[0].text.replace(/```json|```/g, '').trim();
     const dados = JSON.parse(texto);
 
-    const nextActionAt = dados.next_action_at_horas
-      ? new Date(Date.now() + dados.next_action_at_horas * 3600000).toISOString()
-      : null;
+    // Com reunião marcada, a próxima ação É a reunião: usa o horário real do slot em
+    // vez da estimativa em horas da IA (que chutava errado por não saber a hora atual)
+    const nextActionAt = agendadoPara
+      ? new Date(agendadoPara).toISOString()
+      : (dados.next_action_at_horas
+        ? new Date(Date.now() + dados.next_action_at_horas * 3600000).toISOString()
+        : null);
 
     await pool.query(
       `UPDATE leads SET
@@ -2664,7 +2671,8 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       dor: dorPrincipal,
       urgencia: urgenciaLead,
       temperatura: calcularTemperatura(urgenciaLead, dorPrincipal, conversas[userPhone]),
-      agendou: true
+      agendou: true,
+      agendadoPara: slotEscolhido.inicio
     }).catch(() => {});
 
     registrarAtividade(nome || 'Lead', 'Agendou reunião').catch(() => {});
