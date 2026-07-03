@@ -21,7 +21,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.2';
+const BOT_VERSION = '1.9.3';
 const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
 
 const helmet = require('helmet');
@@ -2606,6 +2606,12 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     leadsAgendados.add(userPhone);
     log(userPhone, 'info', `Agendamento confirmado — Meet: ${meetLink || 'não gerado'} | eventId: ${eventId || 'sem id'}`);
     delete followUpStatus[userPhone];
+    // Limpa o estado de agendamento em aberto (slots oferecidos, email pendente/confirmado,
+    // slot confirmado) — nada disso serve mais uma vez que agendamentosConfirmados assume a
+    // jornada pós-agendamento. Deixar isso vivo é o que permitiu, num caso real em produção,
+    // uma mensagem antiga (webhook redelivery da Meta após restart, quando o dedup em memória
+    // reseta) reabrir a confirmação de email de uma reunião que já tinha sido fechada.
+    agendamentos[userPhone] = { slots: [] };
 
     // Registrar para lembrete pré-reunião
     // Verifica se a reunião está a menos de 24h (ex: agendou agora para amanhã cedo)
