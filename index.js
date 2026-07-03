@@ -22,7 +22,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.8';
+const BOT_VERSION = '1.9.9';
 const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
 
 const helmet = require('helmet');
@@ -2555,7 +2555,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
           max_tokens: 400,
           messages: mesclarTurnosConsecutivos([
             ...historicoParaResumo,
-            { role: 'user', content: `Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "...", "dor": "...", "urgencia": "imediata ou próximos dias ou próximos meses", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}.${tipoNegocio ? ` O tipo de negócio já identificado é: "${tipoNegocio}" — use isso no campo tipo_negocio.` : ''}${dorPrincipal ? ` A dor principal relatada foi: "${dorPrincipal.slice(0, 150)}" — use isso como base para o campo dor.` : ''}${urgenciaLead ? ` A urgência identificada é: "${urgenciaLead}" — use EXATAMENTE esse valor no campo urgencia.` : ' No campo urgencia, use EXATAMENTE um desses três valores: "imediata" (problema acontecendo agora, perda de cliente ativa), "próximos dias" (quer resolver em breve), "próximos meses" (sem urgência clara).'} No resumo, NÃO inclua o horário ou data do agendamento (isso já fica em coluna própria). Foque no perfil do lead: negócio, dor principal, contexto e urgência. Se algum campo não estiver claro na conversa, use string vazia.` }
+            { role: 'user', content: `Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "...", "dor": "...", "urgencia": "imediata ou próximos dias ou próximos meses", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}.${tipoNegocio ? ` O tipo de negócio já identificado é: "${tipoNegocio}" — use isso no campo tipo_negocio.` : ''}${dorPrincipal ? ` A dor principal relatada foi: "${dorPrincipal.slice(0, 150)}" — use isso como base para o campo dor.` : ''}${urgenciaLead ? ` A urgência identificada é: "${urgenciaLead}" — use EXATAMENTE esse valor no campo urgencia.` : ' No campo urgencia, use EXATAMENTE um desses três valores: "imediata" (o lead demonstra PRESSA explícita em resolver — quer começar já, cobra rapidez; perda ativa sozinha não basta se ele não mostra pressa, ex: lead que adia a reunião sem necessidade não é imediata), "próximos dias" (dor real e disposição de resolver em breve, sem pressa explícita), "próximos meses" (sem urgência clara).'} No resumo, NÃO inclua o horário ou data do agendamento (isso já fica em coluna própria). Foque no perfil do lead: negócio, dor principal, contexto e urgência. Se algum campo não estiver claro na conversa, use string vazia.` }
           ])
         },
         { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 20000 }

@@ -13,6 +13,19 @@ const {
   mesclarTurnosConsecutivos,
 } = require('./heuristicas');
 
+// Monta uma conversa mínima: roteiro + ack + turnos reais
+function conversaCom(...msgsUsuario) {
+  const conversa = [
+    { role: 'user', content: '(roteiro do sistema)' },
+    { role: 'assistant', content: 'Entendido.' },
+  ];
+  for (const msg of msgsUsuario) {
+    conversa.push({ role: 'user', content: msg });
+    conversa.push({ role: 'assistant', content: 'ok' });
+  }
+  return conversa;
+}
+
 // Slots de exemplo: terça 10h e quarta 15h (nenhum em segunda-feira, de propósito —
 // vários testes verificam que "segunda" em outro sentido não vira escolha da opção 2)
 const slots = [
@@ -202,6 +215,68 @@ test('continua extraindo tipo de negócio de mensagem real do lead', () => {
     { role: 'user', content: 'tenho um pet shop aqui no bairro' },
   ];
   assert.strictEqual(extrairTipoNegocio(conversa), 'um pet shop aqui no bairro');
+});
+
+// ─── extrairUrgencia: "hoje"/"agora" casuais não são urgência ────────────────
+// Bug real: "hoje tem alguns anúncios no instagram..." marcou o lead como
+// urgência imediata — mas "hoje" ali significa "atualmente", induzido pela
+// própria pergunta do roteiro ("E hoje, como funciona o seu atendimento?")
+
+test('não marca urgência por "hoje" casual descrevendo a operação', () => {
+  const conversa = conversaCom(
+    'oi', 'Adriano', 'tenho um escritório',
+    'hoje tem alguns anuncios no instagram e traz lead no meu whats para eu atender',
+    'as vezes consigo recuperar, mas as vezes ele para de responder'
+  );
+  assert.strictEqual(extrairUrgencia(conversa), null);
+});
+
+test('marca urgência imediata com intenção explícita', () => {
+  const conversa = conversaCom(
+    'oi', 'Adriano', 'tenho um petshop',
+    'preciso resolver isso agora, é urgente'
+  );
+  assert.strictEqual(extrairUrgencia(conversa), 'imediata');
+});
+
+test('marca próximos dias com "essa semana"', () => {
+  const conversa = conversaCom(
+    'oi', 'Adriano', 'tenho um petshop',
+    'queria deixar isso funcionando essa semana'
+  );
+  assert.strictEqual(extrairUrgencia(conversa), 'próximos dias');
+});
+
+// ─── extrairDorLead: só mensagens com sinal de dor ───────────────────────────
+// Bug real: a descrição do negócio ("eu tenho um escritório de recuperação de
+// crédito") aparecia como "Dor relatada" no CRM
+
+test('descrição do negócio sem problema não vira dor', () => {
+  const conversa = conversaCom('oi', 'eu tenho um escritório de recuperação de crédito');
+  assert.strictEqual(extrairDorLead(conversa), null);
+});
+
+test('captura dor real e ignora a descrição do negócio', () => {
+  const conversa = conversaCom(
+    'eu tenho um escritório de recuperação de crédito',
+    'quando estou em atendimento o lead demora a ser atendido',
+    'as vezes ele para de responder'
+  );
+  const dor = extrairDorLead(conversa);
+  assert.ok(dor.includes('demora'));
+  assert.ok(dor.includes('para de responder'));
+  assert.ok(!dor.includes('recuperação de crédito'));
+});
+
+test('dor longa é cortada em limite de palavra, não no meio', () => {
+  const longa = 'o problema é que ' + 'os clientes reclamam da demora e vão embora sem resposta '.repeat(6);
+  const conversa = conversaCom('oi', longa);
+  const dor = extrairDorLead(conversa);
+  assert.ok(dor.length <= 200);
+  assert.ok(!dor.endsWith(' '));
+  // não termina em palavra picotada: o último token deve ser palavra completa do texto
+  const ultimaPalavra = dor.split(' ').pop();
+  assert.ok(longa.includes(ultimaPalavra));
 });
 
 // ─── interpretarRespostaEmail ────────────────────────────────────────────────

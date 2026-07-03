@@ -131,22 +131,33 @@ function extrairTipoNegocio(historico) {
   return null;
 }
 
-// Extrai a dor principal do lead a partir das mensagens do usuário
+// Extrai a dor principal do lead a partir das mensagens do usuário.
+// Só considera mensagens com sinal explícito de problema — descrição do negócio
+// ("tenho um petshop") não é dor. O campo fica VAZIO no CRM até o lead relatar
+// um problema de verdade; a IA de resumo refina no agendamento.
+const SINAIS_DOR = /demora|demorad|perd[eoi]|perco|\bsome\b|\bsomem\b|sumiu|para(m)? de responder|parou de responder|n[ãa]o consigo|n[ãa]o dou conta|bagun[çc]|atras[oa]|reclam|sem resposta|fica(m)? sem|vai embora|v[ãa]o embora|foi embora|escap|deixo de|dificuldade|dif[íi]cil|problema|travad|acumul|esfria/i;
+
 function extrairDorLead(historico) {
   if (!historico || historico.length < 4) return null;
 
   // slice(2): pula o roteiro (role user) e o ack — senão a "dor" do lead vira o
   // início do próprio prompt no CRM quando a conversa ainda tem poucas mensagens
-  const mensagensUsuario = historico.slice(2)
+  const mensagensDor = historico.slice(2)
     .filter(m => m.role === 'user')
-    .slice(-8)
     .map(m => textoDoConteudo(m.content))
-    .filter(m => m.length > 15)
-    .join(' | ');
+    .filter(t => t.length > 15 && SINAIS_DOR.test(t))
+    .slice(-4);
 
-  if (mensagensUsuario.length < 20) return null;
+  if (!mensagensDor.length) return null;
 
-  return mensagensUsuario.slice(0, 200);
+  let dor = mensagensDor.join(' | ');
+  if (dor.length > 200) {
+    // Corta em limite de palavra para não gravar frase picotada no CRM
+    dor = dor.slice(0, 200);
+    const ultimoEspaco = dor.lastIndexOf(' ');
+    if (ultimoEspaco > 150) dor = dor.slice(0, ultimoEspaco);
+  }
+  return dor;
 }
 
 // Detecta urgência com base nas palavras usadas pelo lead
@@ -167,13 +178,17 @@ function extrairUrgencia(historico) {
     .join(' ')
     .toLowerCase();
 
-  if (/agora|urgente|hoje|essa semana|o mais rápido|quanto antes|imediato|imediata/.test(texto)) {
+  // Exige expressão de INTENÇÃO de urgência. Palavras soltas de tempo ("hoje",
+  // "agora") não contam: em papo de negócio significam "atualmente" — e a própria
+  // pergunta do roteiro ("E hoje, como funciona...") induz o lead a usá-las.
+  // Falso positivo real em produção: "hoje tem alguns anúncios..." virou urgência.
+  if (/\burgente\b|\burg[êe]ncia\b|o mais r[áa]pido|quanto antes|\bimediat[ao]\b|pra ontem|n[ãa]o (posso|d[áa] pra) esperar|preciso resolver (isso )?(j[áa]|logo|agora)|resolver agora mesmo|come[çc]ar (j[áa]|logo|agora)/.test(texto)) {
     return 'imediata';
   }
-  if (/próxim[ao]s? (dias?|semanas?)|em breve|logo/.test(texto)) {
+  if (/próxim[ao]s? (dias?|semanas?)|essa semana|em breve|semana que vem/.test(texto)) {
     return 'próximos dias';
   }
-  if (/próxim[ao]s? (meses?)|futuramente|sem pressa|quando der/.test(texto)) {
+  if (/próxim[ao]s? (meses?)|futuramente|sem pressa|quando der|mais pra frente|m[êe]s que vem/.test(texto)) {
     return 'próximos meses';
   }
 
