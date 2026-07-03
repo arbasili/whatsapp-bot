@@ -250,7 +250,9 @@ async function initDb() {
     await pool.query(`ALTER TABLE conversations ADD CONSTRAINT conversations_lead_client_unique UNIQUE (lead_id, client_id)`);
     console.log('Migração: constraint UNIQUE(lead_id, client_id) adicionada em conversations.');
   } catch (err) {
-    if (err.code !== '42710') { // 42710 = já existe — ok, nada a fazer
+    // 42710 (duplicate_object) e 42P07 (relation already exists) = constraint já
+    // existe, que é o estado desejado — silencioso. Qualquer outro erro é real.
+    if (err.code !== '42710' && err.code !== '42P07') {
       console.error('ERRO ao migrar constraint de conversations — histórico do painel pode não estar sendo salvo:', err.message);
     }
   }
