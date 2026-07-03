@@ -22,7 +22,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.6';
+const BOT_VERSION = '1.9.7';
 const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
 
 const helmet = require('helmet');
@@ -2775,21 +2775,24 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const urgenciaDetectada = extrairUrgencia(conversas[userPhone]);
 
     const atualizacoesIncrementais = {};
+    if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
+    const agInc = agendamentos[userPhone];
     if (nomeAtual) atualizacoesIncrementais['Nome'] = nomeAtual;
-    if (tipoNegocio && !agendamentos[userPhone]?.tipoNegocioGravado) {
+    // Grava quando o valor extraído MUDA, não "uma vez só": o campo se corrige sozinho
+    // se uma extração anterior tiver sido ruim (ex: roteiro vazado antes da v1.9.6),
+    // e continua sem regravar o mesmo valor a toda mensagem. Flags antigas persistidas
+    // como boolean true também são substituídas naturalmente (true !== string).
+    if (tipoNegocio && agInc.tipoNegocioGravado !== tipoNegocio) {
       atualizacoesIncrementais['Tipo de Negócio'] = tipoNegocio;
-      if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
-      agendamentos[userPhone].tipoNegocioGravado = true;
+      agInc.tipoNegocioGravado = tipoNegocio;
     }
-    if (dorLead && !agendamentos[userPhone]?.dorGravada) {
+    if (dorLead && agInc.dorGravada !== dorLead) {
       atualizacoesIncrementais['Dor'] = dorLead;
-      if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
-      agendamentos[userPhone].dorGravada = true;
+      agInc.dorGravada = dorLead;
     }
-    if (urgenciaDetectada && !agendamentos[userPhone]?.urgenciaGravada) {
+    if (urgenciaDetectada && agInc.urgenciaGravada !== urgenciaDetectada) {
       atualizacoesIncrementais['Urgência'] = urgenciaDetectada;
-      if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
-      agendamentos[userPhone].urgenciaGravada = true;
+      agInc.urgenciaGravada = urgenciaDetectada;
     }
     if (Object.keys(atualizacoesIncrementais).length > 0) {
       atualizarLead(userPhone, atualizacoesIncrementais).catch(e =>
