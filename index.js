@@ -22,7 +22,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.4';
+const BOT_VERSION = '1.9.5';
 const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
 
 const helmet = require('helmet');
@@ -2240,12 +2240,12 @@ SEU ROTEIRO (siga esta ordem):
 
 1. BOAS-VINDAS
 Na primeira mensagem do lead, responda em EXATAMENTE 3 partes separadas pelo marcador "|||". Siga este formato obrigatório:
-[resposta à saudação do lead, natural e breve]|||Sou o Lucas, do time da *Clique e Fecha*. A gente ajuda pequenos negócios a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
+[resposta à saudação do lead, natural e breve]|||Sou o Lucas, do time da *Clique e Fecha*. A gente ajuda empresas a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
 
 Exemplos:
-- Lead diz "oi": Olá!|||Sou o Lucas, do time da *Clique e Fecha*. A gente ajuda pequenos negócios a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
-- Lead diz "bom dia": Bom dia!|||Sou o Lucas, do time da *Clique e Fecha*. A gente ajuda pequenos negócios a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
-- Lead diz "boa tarde, tudo bem?": Boa tarde! Tudo bem, obrigado.|||Sou o Lucas, do time da *Clique e Fecha*. A gente ajuda pequenos negócios a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
+- Lead diz "oi": Olá!|||Sou o Lucas, do time da *Clique e Fecha*. A gente ajuda empresas a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
+- Lead diz "bom dia": Bom dia!|||Sou o Lucas, do time da *Clique e Fecha*. A gente ajuda empresas a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
+- Lead diz "boa tarde, tudo bem?": Boa tarde! Tudo bem, obrigado.|||Sou o Lucas, do time da *Clique e Fecha*. A gente ajuda empresas a venderem mais sem perder tempo no atendimento.|||Qual o seu nome?
 
 A partir da segunda mensagem do lead, responda normalmente sem o marcador "|||"."
 
@@ -2303,10 +2303,13 @@ DATA ESPECÍFICA PEDIDA PELO LEAD: se em qualquer momento da etapa de agendament
 
 ATENÇÃO — diferença entre ESCOLHER um horário oferecido e PEDIR um novo:
 - Se o lead mencionar um horário que JÁ ESTÁ entre as opções que você ofereceu (ex: você ofereceu "11h ou 15h" e o lead diz "as 15h", "pode as 15", "o das 15", "o segundo"), isso é uma ESCOLHA — emita [SLOT: ...] com o horário escolhido, NÃO use [VERIFICAR_DATA]. Confirmações curtas só com a hora ("as 15h", "15h", "pode 15") são escolhas do horário oferecido.
+- "Hoje" ou "amanhã" que caia no MESMO DIA de uma opção já oferecida também é ESCOLHA (a data de hoje está no contexto atual — use-a para comparar). Ex: você ofereceu "sexta-feira, 3 de julho às 15h", hoje é sexta-feira 3 de julho e o lead diz "hoje mesmo": emita [SLOT: sexta-feira, 3 de julho às 15h]. Se houver mais de uma opção no mesmo dia, aí sim pergunte qual horário.
 - Use [VERIFICAR_DATA] APENAS quando o lead pedir algo que NÃO está entre as opções oferecidas.
 
-c. Após a escolha do horário, avance com leveza: "Perfeito, vou reservar esse horário. Vou usar esse número mesmo pra contato, tá? Se preferir outro, é só me avisar." Não espere resposta — siga direto para pedir o email. Confirmar o número é leve e não bloqueia o fluxo.
-d. Após confirmar o WhatsApp, peça o email com esta mensagem: "E qual é o seu email para eu registrar o agendamento?" Quando o lead informar o email NESTA etapa (em resposta ao seu pedido), NÃO responda nada: o sistema confirma o email de volta com o lead ("Anotei aqui: ... Tá certinho?") e cuida do agendamento após a confirmação. Se o lead corrigir o email, o sistema também trata. Você só volta a falar se o lead fizer uma pergunta que não seja sobre o email. Fora desta etapa (ex: lead menciona um email qualquer no meio da qualificação), responda normalmente.
+c. Após a escolha do horário, responda em EXATAMENTE 2 partes separadas pelo marcador "|||" — a confirmação do número e o pedido do email são mensagens separadas, nunca uma só (duas perguntas na mesma mensagem é proibido):
+"Perfeito, vou reservar esse horário. Vou usar esse número mesmo pra contato, tá? Se preferir outro, é só me avisar.|||E qual é o seu email para eu registrar o agendamento?"
+Não espere resposta entre as partes. Confirmar o número é leve e não bloqueia o fluxo.
+d. Quando o lead informar o email NESTA etapa (em resposta ao seu pedido), NÃO responda nada: o sistema confirma o email de volta com o lead ("Anotei aqui: ... Tá certinho?") e cuida do agendamento após a confirmação. Se o lead corrigir o email, o sistema também trata. Você só volta a falar se o lead fizer uma pergunta que não seja sobre o email. Fora desta etapa (ex: lead menciona um email qualquer no meio da qualificação), responda normalmente.
 
 5. CONFIRMAÇÃO
 Após receber o email, não envie nenhuma mensagem. Não mencione link, Meet, confirmação, agendamento ou qualquer coisa relacionada. O sistema cuidará disso automaticamente. Somente retome a conversa se o cliente enviar uma nova mensagem.
@@ -2350,7 +2353,7 @@ EMOJIS: pode usar emoji de forma ocasional e com moderação, em momentos certos
 NUNCA use travessão (—) em nenhuma hipótese. Nem nas mensagens ao lead, nem internamente. Substitua sempre por vírgula ou ponto. Exemplos do que nunca fazer: "o cliente espera — e vai embora", "me conta sobre o negócio — o que você faz?", "responde na hora — mesmo fora do horário". Se sentir vontade de usar travessão, use vírgula ou reescreva a frase.
 Nunca coloque negrito em emails, números ou dados pessoais.
 Use asterisco simples para negrito: *palavra* e nunca **palavra**.
-Faça apenas uma pergunta por mensagem. Esta regra é absoluta.
+Faça apenas uma pergunta por mensagem. Esta regra é absoluta. Uma mensagem com dois pontos de interrogação está SEMPRE errada, sem exceção — inclusive quando a segunda pergunta é só uma reformulação da primeira ("O que você faz? Qual é o seu negócio?" são DUAS perguntas: escolha uma) e quando é uma pergunta de apoio com opções ("Como funciona o atendimento hoje? Tem alguém dedicado ou você mesmo responde?" também são DUAS: ou pergunta como funciona, ou pergunta quem responde). Antes de enviar, confira: se há mais de um "?", corte e fique só com a melhor pergunta.
 Mensagens curtas. No máximo dois parágrafos, preferencialmente um. Seja direto e objetivo.
 Nunca escreva instruções internas, meta-comentários ou textos entre parênteses como resposta ao cliente.
 
@@ -2745,7 +2748,16 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       const opcoesAtuais = slotsAtuais.length >= 2
         ? `${slotsAtuais[0].label} ou ${slotsAtuais[1].label}`
         : (slotsAtuais.length === 1 ? slotsAtuais[0].label : 'nenhum horário disponível no momento');
-      contextoDinamico = `CONTEXTO ATUAL (gerado agora, prevalece sobre qualquer valor anterior do roteiro ou da conversa): a saudação correta neste momento é "${saudacaoAtualCG()}". Os horários realmente disponíveis agora são: ${opcoesAtuais}. Se horários mencionados antes na conversa forem diferentes destes, ofereça estes.`;
+      const dataHoje = new Date().toLocaleDateString('pt-BR', {
+        weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Campo_Grande'
+      });
+      contextoDinamico = `CONTEXTO ATUAL (gerado agora, prevalece sobre qualquer valor anterior do roteiro ou da conversa): hoje é ${dataHoje}. A saudação correta neste momento é "${saudacaoAtualCG()}". Os horários realmente disponíveis agora são: ${opcoesAtuais}. Se horários mencionados antes na conversa forem diferentes destes, ofereça estes.`;
+      // Trava anti-alucinação: se há um email aguardando confirmação, o agendamento AINDA
+      // NÃO EXISTE. Sem isso, uma confirmação que a heurística não reconheça (visto em
+      // produção com "está") cai no Claude, que fecha a conversa como se estivesse agendado.
+      if (agLead?.emailPendente) {
+        contextoDinamico += ` ATENÇÃO CRÍTICA: o sistema perguntou ao lead se o email ${agLead.emailPendente} está correto e AINDA AGUARDA a confirmação — o agendamento NÃO FOI CRIADO. Não diga que está agendado, confirmado ou "tudo certo". Se a mensagem do lead parecer confirmar o email, responda APENAS pedindo uma confirmação clara, por exemplo: "Perfeito! Só me confirma com um sim que eu já registro o agendamento aqui." Se o lead corrigir o email, o sistema trata sozinho.`;
+      }
     }
 
     log(userPhone, 'info', `Chamando Claude — histórico: ${conversas[userPhone].length} msgs`);

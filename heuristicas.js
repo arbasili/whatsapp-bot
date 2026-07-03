@@ -232,7 +232,9 @@ function extrairNomeLead(conversa) {
 function interpretarRespostaEmail(texto) {
   const t = (texto || '').trim().toLowerCase();
   if (!t) return null;
-  if (/^(sim|isso|isso mesmo|isso aí|certinho|certo|correto|exato|t[áa] certo|t[áa] certinho|t[áa] sim|t[áa]|pode ser|pode|confirmo|confirmado|perfeito|show|ok|okay|beleza|blz|esse mesmo|é esse|é esse mesmo|👍)[\s!.,]*$/.test(t)) {
+  // Lista generosa de propósito: "está" (fora da lista original) travou um agendamento
+  // real em produção — o lead confirmou, o sistema não reconheceu e nada foi agendado.
+  if (/^(sim( sim)?|isso|isso mesmo|isso aí|é isso|certinho|certo|cert[íi]ssimo|correto|exato|exatamente|t[áa] certo|t[áa] certinho|t[áa] sim|t[áa] [óo]timo|t[áa]|est[áa] certo|est[áa] certinho|est[áa] sim|est[áa] [óo]timo|est[áa]|pode ser|pode|confirmo|confirmado|perfeito|show|ok|okay|beleza|blz|uhum|aham|esse mesmo|é esse|é esse mesmo|👍)[\s!.,]*$/.test(t)) {
     return 'confirmou';
   }
   if (/^n[ãa]o\b/.test(t) || /\b(errad[oa]|errei|escrevi errado|corrig)/.test(t)) {

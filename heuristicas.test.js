@@ -160,6 +160,14 @@ test('confirmações simples de email', () => {
   assert.strictEqual(interpretarRespostaEmail('pode ser'), 'confirmou');
 });
 
+test('confirmações com "está" (bug real: não era reconhecido e nada era agendado)', () => {
+  assert.strictEqual(interpretarRespostaEmail('está'), 'confirmou');
+  assert.strictEqual(interpretarRespostaEmail('está certo'), 'confirmou');
+  assert.strictEqual(interpretarRespostaEmail('está certinho!'), 'confirmou');
+  assert.strictEqual(interpretarRespostaEmail('uhum'), 'confirmou');
+  assert.strictEqual(interpretarRespostaEmail('exatamente'), 'confirmou');
+});
+
 test('negações de email', () => {
   assert.strictEqual(interpretarRespostaEmail('não, tá errado'), 'negou');
   assert.strictEqual(interpretarRespostaEmail('errei uma letra'), 'negou');
