@@ -15,13 +15,14 @@ const {
   extrairDorLead,
   extrairUrgencia,
   extrairNomeLead,
+  interpretarRespostaEmail,
 } = require('./heuristicas');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.0';
-const BOT_VERSION_DATA = '2026-07-02'; // data desta versão
+const BOT_VERSION = '1.9.1';
+const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
 
 const helmet = require('helmet');
 const { rateLimit: criarRateLimiter } = require('express-rate-limit');
@@ -2258,20 +2259,27 @@ De forma natural, entenda se o lead já tentou resolver o problema antes: "Você
 Depois, entenda o tempo da dor: "Isso está te gerando problema agora ou é algo que você quer resolver nos próximos meses?" Se o lead indicar urgência, você pode, em uma única pergunta natural, entender o gatilho: "O que fez você buscar isso agora?" Não force se a conversa já estiver fluindo para o agendamento.
 
 4. PONTE E AGENDAMENTO
-Antes de propor a reunião, faça a PONTE: conecte a dor que o lead trouxe à ideia de que isso tem solução, de forma leve e sem soar vendedor. Não pule direto para "vamos marcar com o especialista" — isso fica abrupto. Primeiro mostre que entendeu e que dá pra resolver. Exemplo de ponte natural: se o lead falou que perde clientes por demora, algo como "Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você não pode." Uma frase curta que liga a dor à solução, sem entrar em detalhes técnicos (isso fica para a reunião).
+SE O LEAD JÁ TEM UMA SOLUÇÃO (um bot, uma ferramenta, um atendente contratado): antes de propor qualquer reunião, faça UMA pergunta curta sobre essa tentativa (ex: "O que você já tentou ajustar nele?" ou "Faz tempo que ele tá assim?"). A resposta te dá o gancho exato para a proposta e evita que a reunião pareça vender algo que ele já tem. Só uma pergunta, sem virar interrogatório.
 
-Depois da ponte, proponha a conversa. Responda em EXATAMENTE 2 partes separadas pelo marcador "|||". A primeira parte é a ponte, a segunda é a proposta de reunião — sempre separadas, com uma pausa natural entre elas:
-[ponte curta conectando a dor à solução, usando as palavras que o lead usou]|||[proposta de reunião que retoma a dor específica do lead, nunca genérica]
+Antes de propor a reunião, faça a PONTE em dois movimentos dentro da primeira parte da mensagem:
+1º) ESPELHE a consequência que o lead acabou de verbalizar, em uma frase curta e humana que mostre que você registrou o peso do problema (ex: se ele disse que o cliente vai embora, algo como "Cliente que já te chamou e vai embora sem resposta é a pior perda, ele tava na sua mão."). Não pule direto para a solução: acolha primeiro, resolva depois.
+2º) Conecte a dor à ideia de que isso tem solução, de forma leve e sem soar vendedor (ex: "Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você não pode."). Sem detalhes técnicos — isso fica para a reunião.
+
+Em seguida, proponha a conversa. REGRA CRÍTICA DA PRIMEIRA MENÇÃO: a reunião com o especialista ainda não existe na cabeça do lead — APRESENTE a ideia em vez de falar como se já fosse assunto combinado. NUNCA diga "a conversa com o especialista" na primeira menção (o artigo definido pressupõe algo que ele ainda não conhece). Diga "uma conversa" e inclua já na proposta os três redutores de risco: gratuita, rápida (30 minutos) e sem compromisso. É isso que evita que o lead precise perguntar "que conversa?" ou "é paga?" antes de aceitar.
+
+Responda em EXATAMENTE 2 partes separadas pelo marcador "|||". A primeira parte é o espelhamento + ponte, a segunda é a proposta:
+[espelhamento da consequência + ponte curta ligando a dor à solução, com as palavras do lead]|||[proposta APRESENTANDO a reunião: retoma a dor específica e oferece uma conversa gratuita de 30 minutos com um especialista, sem compromisso]
 
 Exemplo completo com pet shop:
-"Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você tá ocupado com outro cliente.|||Já que você falou que perde cliente quando não dá conta de responder rápido, a conversa é justamente pra te mostrar como o atendimento responde na hora, até quando você não tá disponível. Faz sentido marcar?"
+"Cliente que chama e vai embora sem resposta é a pior perda, ele já tava decidido a falar com você. E esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você tá ocupado.|||Se fizer sentido, a gente oferece uma conversa gratuita de uns 30 minutos com um especialista, sem compromisso: ele olha como funciona o seu atendimento hoje e te mostra o que dá pra automatizar. Quer que eu veja um horário?"
 
-IMPORTANTE na proposta: retome em uma frase a dor principal que o lead citou, usando as palavras dele sempre que possível, antes de oferecer os horários. Nunca proponha a reunião de forma genérica se o lead já contou um problema específico.
+IMPORTANTE na proposta: retome em uma frase a dor principal que o lead citou, usando as palavras dele sempre que possível. Nunca proponha a reunião de forma genérica se o lead já contou um problema específico.
 
 A partir daqui, siga esta sequência obrigatória, uma mensagem por vez:
-b. Somente após a confirmação, explique a reunião e ofereça os horários em EXATAMENTE 2 partes separadas pelo marcador "|||". A primeira parte explica o que é a conversa, a segunda oferece os horários:
+b. Somente após a confirmação, ofereça os horários. Você já apresentou o formato (gratuita, 30 minutos, sem compromisso) na proposta, então NÃO repita a explicação inteira — vá direto: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor pra você?"
+Exceção: se o lead chegou aqui sem ter visto a apresentação do formato (ex: fast-track de lead quente), explique antes, em EXATAMENTE 2 partes separadas pelo marcador "|||":
 "É uma conversa gratuita e sem compromisso, pelo Google Meet, com um dos nossos especialistas. Em 30 minutos ele entende o seu caso e te mostra o que dá pra fazer pra resolver isso no seu negócio.|||Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor pra você?"
-Adapte a primeira parte ao contexto do lead (ex: "no seu pet shop", "na sua empresa", etc).
+Adapte ao contexto do lead (ex: "no seu pet shop", "na sua empresa", etc).
 
 MARCADOR DE SLOT — OBRIGATÓRIO: Quando o lead escolher ou confirmar um horário (qualquer resposta indicando aceitação de um slot, mesmo indireta como "pode ser", "esse mesmo", "pode", "tá bom"), inclua na sua resposta o marcador exato com o horário completo escolhido: [SLOT: label completo do slot escolhido]
 Exemplo: se os slots são "quinta-feira, 19 de junho às 9h" e "sexta-feira, 20 de junho às 14h", e o lead escolheu o segundo, inclua [SLOT: sexta-feira, 20 de junho às 14h]. Use o label EXATO como foi oferecido, sem alterar texto. O sistema remove esse marcador automaticamente antes de enviar ao lead. Faça isso UMA única vez, logo após o lead confirmar o horário — é essencial mesmo que a confirmação seja vaga (ex: "pode sim", "tá bom", "pode"), pois é o que garante que o agendamento real bata com o horário correto.
@@ -2284,7 +2292,7 @@ ATENÇÃO — diferença entre ESCOLHER um horário oferecido e PEDIR um novo:
 - Use [VERIFICAR_DATA] APENAS quando o lead pedir algo que NÃO está entre as opções oferecidas.
 
 c. Após a escolha do horário, avance com leveza: "Perfeito, vou reservar esse horário. Vou usar esse número mesmo pra contato, tá? Se preferir outro, é só me avisar." Não espere resposta — siga direto para pedir o email. Confirmar o número é leve e não bloqueia o fluxo.
-d. Após confirmar o WhatsApp, peça o email com esta mensagem: "E qual é o seu email para eu registrar o agendamento?" Quando o lead informar o email, confirme antes de agendar: "Anotei aqui: [email informado]. Tá certinho?" — Se o lead corrigir, atualize. Só então avance para o passo 5.
+d. Após confirmar o WhatsApp, peça o email com esta mensagem: "E qual é o seu email para eu registrar o agendamento?" Quando o lead informar o email NESTA etapa (em resposta ao seu pedido), NÃO responda nada: o sistema confirma o email de volta com o lead ("Anotei aqui: ... Tá certinho?") e cuida do agendamento após a confirmação. Se o lead corrigir o email, o sistema também trata. Você só volta a falar se o lead fizer uma pergunta que não seja sobre o email. Fora desta etapa (ex: lead menciona um email qualquer no meio da qualificação), responda normalmente.
 
 5. CONFIRMAÇÃO
 Após receber o email, não envie nenhuma mensagem. Não mencione link, Meet, confirmação, agendamento ou qualquer coisa relacionada. O sistema cuidará disso automaticamente. Somente retome a conversa se o cliente enviar uma nova mensagem.
@@ -2388,9 +2396,48 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     // se não tratou (ex: ainda no meio de uma remarcação), segue o fluxo normal abaixo
   }
 
-  // Verificar email ANTES de chamar o Claude — se for agendamento, Claude não fala
-  const emailNaMensagem = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.test(userText || '');
-  const confirmaAgendamento = emailNaMensagem && agendamentos[userPhone]?.slots?.length > 0 && !leadsAgendados.has(userPhone) && !processandoAgendamento.has(userPhone);
+  // ── Captura e confirmação de email (etapa d do roteiro) ─────────────────────
+  // O sistema intercepta o email ANTES do Claude, mas em duas etapas: primeiro
+  // confirma de volta com o lead ("Anotei aqui: ... Tá certinho?") e só agenda
+  // após a confirmação. Antes, qualquer mensagem com email agendava direto — um
+  // typo ia parar no convite do Calendar sem chance de correção.
+  const agEmail = agendamentos[userPhone];
+  const podeAgendar = agEmail?.slots?.length > 0 && !leadsAgendados.has(userPhone) && !processandoAgendamento.has(userPhone);
+  const matchesEmail = (userText || '').match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
+  const emailDaMensagem = matchesEmail
+    ? (matchesEmail.find(e => !e.toLowerCase().includes('cliqueefecha')) || matchesEmail[0]).toLowerCase()
+    : null;
+
+  if (emailDaMensagem && podeAgendar && !agEmail.emailConfirmado) {
+    // Só entra em modo de confirmação se a conversa já está na etapa de agendamento
+    // (horário escolhido, bot pediu o email há pouco, ou já havia email pendente) —
+    // um email citado de passagem no meio da qualificação não dispara agendamento.
+    const botPediuEmail = (conversas[userPhone] || []).slice(-4).some(m =>
+      m.role === 'assistant' && /email/i.test(textoDoConteudo(m.content))
+    );
+    if (agEmail.slotConfirmado || agEmail.emailPendente || botPediuEmail) {
+      agEmail.emailPendente = emailDaMensagem;
+      await enviarERegistrar(userPhone, `Anotei aqui: ${emailDaMensagem}. Tá certinho?`);
+      await persistirLead(userPhone);
+      return;
+    }
+  } else if (agEmail?.emailPendente && podeAgendar) {
+    const resposta = interpretarRespostaEmail(userText);
+    if (resposta === 'confirmou') {
+      agEmail.emailConfirmado = agEmail.emailPendente;
+      delete agEmail.emailPendente;
+      // segue para o bloco de agendamento logo abaixo
+    } else if (resposta === 'negou') {
+      delete agEmail.emailPendente;
+      await enviarERegistrar(userPhone, 'Sem problema! Me passa o email certinho então, por favor?');
+      await persistirLead(userPhone);
+      return;
+    }
+    // Resposta ambígua (ex: outra pergunta): o Claude responde pelo fluxo normal
+    // e o email continua pendente para a próxima mensagem do lead.
+  }
+
+  const confirmaAgendamento = podeAgendar && !!agEmail?.emailConfirmado;
 
   if (confirmaAgendamento) {
     // Lock: marca como em processamento para evitar evento duplicado
@@ -2438,18 +2485,20 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       }
     }
 
-    // Busca o email a partir da mensagem mais recente do lead que contiver um —
-    // em vez de olhar a conversa toda de uma vez, evita pegar um email de terceiros
-    // mencionado de passagem antes do lead informar o próprio email.
-    const msgsUsuarioParaEmail = conversas[userPhone]
-      .filter(m => m.role === 'user')
-      .map(m => textoDoConteudo(m.content).toLowerCase());
-    let emailLead = '';
-    for (let i = msgsUsuarioParaEmail.length - 1; i >= 0; i--) {
-      const matches = msgsUsuarioParaEmail[i].match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
-      if (matches) {
-        emailLead = matches.find(e => !e.includes('cliqueefecha')) || matches[0];
-        break;
+    // Email que o lead confirmou na etapa "Anotei aqui: ... Tá certinho?".
+    // Fallback (não deveria acontecer, mas evita agendar com email vazio se o
+    // estado se perder): varre as mensagens do lead da mais recente para a antiga.
+    let emailLead = agendamentos[userPhone]?.emailConfirmado || '';
+    if (!emailLead) {
+      const msgsUsuarioParaEmail = conversas[userPhone]
+        .filter(m => m.role === 'user')
+        .map(m => textoDoConteudo(m.content).toLowerCase());
+      for (let i = msgsUsuarioParaEmail.length - 1; i >= 0; i--) {
+        const matches = msgsUsuarioParaEmail[i].match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
+        if (matches) {
+          emailLead = matches.find(e => !e.includes('cliqueefecha')) || matches[0];
+          break;
+        }
       }
     }
 

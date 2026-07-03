@@ -225,6 +225,22 @@ function extrairNomeLead(conversa) {
   return '';
 }
 
+// Interpreta a resposta do lead à confirmação de email ("Anotei aqui: X. Tá certinho?").
+// Retorna 'confirmou', 'negou' ou null (resposta ambígua — deixa o fluxo normal responder).
+// Correção com um novo email não passa por aqui: o fluxo detecta o endereço na mensagem
+// antes de consultar esta função.
+function interpretarRespostaEmail(texto) {
+  const t = (texto || '').trim().toLowerCase();
+  if (!t) return null;
+  if (/^(sim|isso|isso mesmo|isso aí|certinho|certo|correto|exato|t[áa] certo|t[áa] certinho|t[áa] sim|t[áa]|pode ser|pode|confirmo|confirmado|perfeito|show|ok|okay|beleza|blz|esse mesmo|é esse|é esse mesmo|👍)[\s!.,]*$/.test(t)) {
+    return 'confirmou';
+  }
+  if (/^n[ãa]o\b/.test(t) || /\b(errad[oa]|errei|escrevi errado|corrig)/.test(t)) {
+    return 'negou';
+  }
+  return null;
+}
+
 module.exports = {
   textoDoConteudo,
   escolherSlot,
@@ -232,4 +248,5 @@ module.exports = {
   extrairDorLead,
   extrairUrgencia,
   extrairNomeLead,
+  interpretarRespostaEmail,
 };

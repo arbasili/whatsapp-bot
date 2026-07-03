@@ -7,6 +7,7 @@ const {
   escolherSlot,
   extrairNomeLead,
   extrairUrgencia,
+  interpretarRespostaEmail,
 } = require('./heuristicas');
 
 // Slots de exemplo: terça 10h e quarta 15h (nenhum em segunda-feira, de propósito —
@@ -147,6 +148,27 @@ test('detecta urgência imediata a partir da 4ª mensagem do lead', () => {
     { role: 'user', content: 'tô perdendo cliente agora, preciso resolver urgente' },
   ];
   assert.strictEqual(extrairUrgencia(conversa), 'imediata');
+});
+
+// ─── interpretarRespostaEmail ────────────────────────────────────────────────
+
+test('confirmações simples de email', () => {
+  assert.strictEqual(interpretarRespostaEmail('sim'), 'confirmou');
+  assert.strictEqual(interpretarRespostaEmail('tá certinho!'), 'confirmou');
+  assert.strictEqual(interpretarRespostaEmail('isso mesmo'), 'confirmou');
+  assert.strictEqual(interpretarRespostaEmail('pode ser'), 'confirmou');
+});
+
+test('negações de email', () => {
+  assert.strictEqual(interpretarRespostaEmail('não, tá errado'), 'negou');
+  assert.strictEqual(interpretarRespostaEmail('errei uma letra'), 'negou');
+  assert.strictEqual(interpretarRespostaEmail('escrevi errado'), 'negou');
+});
+
+test('resposta ambígua não confirma nem nega', () => {
+  assert.strictEqual(interpretarRespostaEmail('quanto custa a reunião?'), null);
+  assert.strictEqual(interpretarRespostaEmail('vocês mandam convite?'), null);
+  assert.strictEqual(interpretarRespostaEmail(''), null);
 });
 
 // ─── textoDoConteudo ─────────────────────────────────────────────────────────
