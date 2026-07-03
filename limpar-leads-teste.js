@@ -9,8 +9,14 @@
 //   - meeting_analyses (análises de reunião; disc/roda/plano caem em cascata)
 // Mantém: clients, user_clients, vendedores.
 //
+// Com --tudo, apaga TAMBÉM user_clients e o próprio registro em clients.
+// É seguro: o bot re-registra o CLIENT_ID no próximo boot (auto-registro do
+// initDb) e o usuário do painel se re-vincula no primeiro login (bootstrap
+// do verificarToken).
+//
 // Uso (Railway Console do serviço whatsapp-bot, igual ao seed-leads.js):
-//   node limpar-leads-teste.js --confirmo
+//   node limpar-leads-teste.js --confirmo           (mantém clients/user_clients)
+//   node limpar-leads-teste.js --confirmo --tudo    (zera 100%, todas as tabelas)
 //
 // Sem o --confirmo o script só mostra as contagens (dry-run).
 
@@ -33,6 +39,7 @@ function resolverSslPostgres() {
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: resolverSslPostgres() });
 
 const confirmado = process.argv.includes('--confirmo');
+const limparTudo = process.argv.includes('--tudo');
 
 async function contar(tabela) {
   try {
@@ -54,6 +61,15 @@ async function main() {
     bot_state: await contar('bot_state'),
     meeting_analyses: await contar('meeting_analyses'),
   };
+  if (limparTudo) {
+    antes.user_clients = await contar('user_clients');
+    try {
+      const r = await pool.query('SELECT COUNT(*) AS n FROM clients WHERE id = $1', [CLIENT_ID]);
+      antes.clients = Number(r.rows[0].n);
+    } catch {
+      antes.clients = null;
+    }
+  }
   console.log('Registros deste client_id:');
   for (const [tabela, n] of Object.entries(antes)) {
     console.log(`  ${tabela.padEnd(18)} ${n === null ? '(tabela não existe)' : n}`);
@@ -80,6 +96,12 @@ async function main() {
     await client.query('DELETE FROM leads WHERE client_id = $1', [CLIENT_ID]);
     await client.query('DELETE FROM ai_activity WHERE client_id = $1', [CLIENT_ID]);
     await client.query('DELETE FROM bot_state WHERE client_id = $1', [CLIENT_ID]);
+    if (limparTudo) {
+      await client.query('DELETE FROM user_clients WHERE client_id = $1', [CLIENT_ID]);
+      // Por último: clients é referenciado pelas outras (ON DELETE CASCADE cobriria,
+      // mas os deletes explícitos acima deixam as contagens claras)
+      await client.query('DELETE FROM clients WHERE id = $1', [CLIENT_ID]);
+    }
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -90,11 +112,15 @@ async function main() {
 
   console.log('Feito. Contagens após a limpeza:');
   for (const tabela of Object.keys(antes)) {
-    if (antes[tabela] === null) continue;
+    if (antes[tabela] === null || tabela === 'clients') continue;
     console.log(`  ${tabela.padEnd(18)} ${await contar(tabela)}`);
   }
   console.log('\nIMPORTANTE: reinicie o serviço do bot (Railway → Restart) para limpar');
   console.log('o estado em memória (conversas, agendamentos, lembretes pendentes).');
+  if (limparTudo) {
+    console.log('Como --tudo apagou clients/user_clients: o restart re-registra o cliente');
+    console.log('automaticamente, e o primeiro login no painel re-vincula o seu usuário.');
+  }
 }
 
 main()
