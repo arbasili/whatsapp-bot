@@ -21,7 +21,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.1';
+const BOT_VERSION = '1.9.2';
 const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
 
 const helmet = require('helmet');
@@ -240,6 +240,19 @@ async function initDb() {
       UNIQUE (lead_id, client_id)
     )
   `);
+
+  // Migração: bancos criados antes desta constraint existir não a recebem
+  // automaticamente do CREATE TABLE IF NOT EXISTS acima (é um no-op nesse caso).
+  // Sem ela, TODO gravarConversa() falha com "no unique or exclusion constraint
+  // matching the ON CONFLICT specification" e o histórico do painel nunca é salvo.
+  try {
+    await pool.query(`ALTER TABLE conversations ADD CONSTRAINT conversations_lead_client_unique UNIQUE (lead_id, client_id)`);
+    console.log('Migração: constraint UNIQUE(lead_id, client_id) adicionada em conversations.');
+  } catch (err) {
+    if (err.code !== '42710') { // 42710 = já existe — ok, nada a fazer
+      console.error('ERRO ao migrar constraint de conversations — histórico do painel pode não estar sendo salvo:', err.message);
+    }
+  }
 
   console.log('Tabelas do banco prontas (bot_state, clients, leads, conversations).');
 
@@ -2802,7 +2815,12 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     if (matchSlot) {
       const labelEscolhido = matchSlot[1].trim();
       const slots = agendamentos[userPhone]?.slots || [];
-      const slotEncontrado = slots.find(s => s.label.toLowerCase() === labelEscolhido.toLowerCase());
+      // Compara exato primeiro; se falhar, ignora o sufixo "(horário de X)" nos dois
+      // lados — o Claude às vezes emite o marcador sem repetir esse sufixo do label
+      // original, o que fazia a comparação exata falhar e o slot nunca ser confirmado.
+      const normalizarLabel = s => s.toLowerCase().replace(/\s*\(hor[áa]rio de [^)]+\)\s*$/i, '').trim();
+      const slotEncontrado = slots.find(s => s.label.toLowerCase() === labelEscolhido.toLowerCase())
+        || slots.find(s => normalizarLabel(s.label) === normalizarLabel(labelEscolhido));
       if (slotEncontrado) {
         if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
         agendamentos[userPhone].slotConfirmado = slotEncontrado;
