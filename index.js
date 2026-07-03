@@ -22,7 +22,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.5';
+const BOT_VERSION = '1.9.6';
 const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
 
 const helmet = require('helmet');

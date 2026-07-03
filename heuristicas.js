@@ -92,14 +92,20 @@ function escolherSlot(texto, slots) {
 function extrairTipoNegocio(historico) {
   if (!historico || historico.length < 3) return null;
 
-  const mensagensUsuario = historico
+  // Ignora o cabeçalho (índice 0 = roteiro com role user, índice 1 = ack do assistant).
+  // Sem isso, no início da conversa os padrões abaixo casavam com o texto do PRÓPRIO
+  // roteiro (ex: "Tenho duas opções disponíveis: sexta-feira...") e o campo Segmento
+  // do CRM nascia poluído com pedaço do prompt.
+  const conversa = historico.slice(2);
+
+  const mensagensUsuario = conversa
     .filter(m => m.role === 'user')
     .slice(-5)
     .map(m => textoDoConteudo(m.content))
     .join(' ')
     .toLowerCase();
 
-  const respostasBot = historico
+  const respostasBot = conversa
     .filter(m => m.role === 'assistant')
     .slice(-5)
     .map(m => textoDoConteudo(m.content))
@@ -129,7 +135,9 @@ function extrairTipoNegocio(historico) {
 function extrairDorLead(historico) {
   if (!historico || historico.length < 4) return null;
 
-  const mensagensUsuario = historico
+  // slice(2): pula o roteiro (role user) e o ack — senão a "dor" do lead vira o
+  // início do próprio prompt no CRM quando a conversa ainda tem poucas mensagens
+  const mensagensUsuario = historico.slice(2)
     .filter(m => m.role === 'user')
     .slice(-8)
     .map(m => textoDoConteudo(m.content))
@@ -145,7 +153,9 @@ function extrairDorLead(historico) {
 function extrairUrgencia(historico) {
   if (!historico || historico.length < 4) return null;
 
-  const mensagensUsuario = historico.filter(m => m.role === 'user');
+  // slice(2): pula o roteiro (role user) e o ack — o roteiro contém palavras como
+  // "agora"/"hoje" que inflavam a detecção, além de contar como mensagem do lead
+  const mensagensUsuario = historico.slice(2).filter(m => m.role === 'user');
 
   // Só detecta urgência a partir da 4ª mensagem do usuário
   // Antes disso qualquer "hoje", "agora" é contexto casual, não urgência real

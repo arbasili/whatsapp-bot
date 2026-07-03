@@ -7,6 +7,8 @@ const {
   escolherSlot,
   extrairNomeLead,
   extrairUrgencia,
+  extrairTipoNegocio,
+  extrairDorLead,
   interpretarRespostaEmail,
   mesclarTurnosConsecutivos,
 } = require('./heuristicas');
@@ -149,6 +151,57 @@ test('detecta urgência imediata a partir da 4ª mensagem do lead', () => {
     { role: 'user', content: 'tô perdendo cliente agora, preciso resolver urgente' },
   ];
   assert.strictEqual(extrairUrgencia(conversa), 'imediata');
+});
+
+// ─── extrairTipoNegocio / extrairDorLead: roteiro não pode vazar pro CRM ─────
+// Bug real: no início da conversa, o roteiro (primeira mensagem com role user)
+// entrava na varredura e o painel mostrava Segmento "duas opções disponíveis:
+// sexta-feira, 3" e Dor "Você é o Lucas, do time de atendimento..."
+
+const ROTEIRO_FAKE = 'Você é o Lucas, do time de atendimento da Clique e Fecha. Tenho duas opções disponíveis: sexta-feira, 3 de julho às 15h ou segunda às 10h. Isso está te gerando problema agora ou algo urgente?';
+
+test('não extrai tipo de negócio do próprio roteiro no início da conversa', () => {
+  const conversa = [
+    { role: 'user', content: ROTEIRO_FAKE },
+    { role: 'assistant', content: 'Entendido. Estou pronto.' },
+    { role: 'user', content: 'Boa tarde' },
+    { role: 'assistant', content: 'Boa tarde!|||Sou o Lucas.|||Posso te chamar de Adriano?' },
+    { role: 'user', content: 'Pode sim' },
+  ];
+  assert.strictEqual(extrairTipoNegocio(conversa), null);
+});
+
+test('não extrai dor do próprio roteiro no início da conversa', () => {
+  const conversa = [
+    { role: 'user', content: ROTEIRO_FAKE },
+    { role: 'assistant', content: 'Entendido. Estou pronto.' },
+    { role: 'user', content: 'Boa tarde' },
+    { role: 'assistant', content: 'Posso te chamar de Adriano?' },
+    { role: 'user', content: 'Pode sim' },
+  ];
+  assert.strictEqual(extrairDorLead(conversa), null);
+});
+
+test('não detecta urgência com palavras do roteiro ("agora", "urgente")', () => {
+  const conversa = [
+    { role: 'user', content: ROTEIRO_FAKE },
+    { role: 'assistant', content: 'Entendido.' },
+    { role: 'user', content: 'oi' },
+    { role: 'user', content: 'Adriano' },
+    { role: 'user', content: 'tenho uma clínica' },
+  ];
+  assert.strictEqual(extrairUrgencia(conversa), null);
+});
+
+test('continua extraindo tipo de negócio de mensagem real do lead', () => {
+  const conversa = [
+    { role: 'user', content: ROTEIRO_FAKE },
+    { role: 'assistant', content: 'Entendido.' },
+    { role: 'user', content: 'oi' },
+    { role: 'assistant', content: 'O que você faz?' },
+    { role: 'user', content: 'tenho um pet shop aqui no bairro' },
+  ];
+  assert.strictEqual(extrairTipoNegocio(conversa), 'um pet shop aqui no bairro');
 });
 
 // ─── interpretarRespostaEmail ────────────────────────────────────────────────
