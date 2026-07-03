@@ -16,12 +16,13 @@ const {
   extrairUrgencia,
   extrairNomeLead,
   interpretarRespostaEmail,
+  mesclarTurnosConsecutivos,
 } = require('./heuristicas');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.3';
+const BOT_VERSION = '1.9.4';
 const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
 
 const helmet = require('helmet');
@@ -1193,7 +1194,7 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
       {
         model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
         max_tokens: 120,
-        messages: [...historicoReal, { role: 'user', content: instrucao }]
+        messages: mesclarTurnosConsecutivos([...historicoReal, { role: 'user', content: instrucao }])
       },
       {
         headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
@@ -1235,7 +1236,7 @@ setInterval(async () => {
         const msg = nome !== 'você'
           ? `${nome}, ainda tenho horários disponíveis pra mostrar como automatizar${negocio}. Se quiser ver como ficaria, é só me chamar.`
           : `Ainda tenho horários disponíveis pra mostrar como automatizar${negocio}. Se quiser ver como ficaria, é só me chamar.`;
-        await enviarMensagem(phone, msg);
+        await enviarERegistrar(phone, msg);
         atualizarLead(phone, { 'Status': 'Reativação 3 dias' }).catch(() => {});
         registrarEtapaFunil(phone, FUNIL.REATIVACAO_3D).catch(() => {});
         followUpStatus[phone] = { ...status, reativacao3dEnviada: true, ultimoFollowUp: agora };
@@ -1246,7 +1247,7 @@ setInterval(async () => {
         const msg = nome !== 'você'
           ? `${nome}, tudo bem por aí? Se o momento não era o certo antes, sem problema. Se em algum momento fizer sentido melhorar${negocio}, é só me chamar.`
           : `Tudo bem por aí? Se o momento não era o certo antes, sem problema. Se em algum momento fizer sentido melhorar${negocio}, é só me chamar.`;
-        await enviarMensagem(phone, msg);
+        await enviarERegistrar(phone, msg);
         atualizarLead(phone, { 'Status': 'Reativação 7 dias' }).catch(() => {});
         registrarEtapaFunil(phone, FUNIL.REATIVACAO_7D).catch(() => {});
         followUpStatus[phone] = { ...status, reativacao7dEnviada: true, ultimoFollowUp: agora };
@@ -1305,13 +1306,13 @@ setInterval(async () => {
     if (dentroJanela) {
       if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
         const msg = await gerarMsgFollowUp(phone, nome, 1);
-        await enviarMensagem(phone, msg);
+        await enviarERegistrar(phone, msg);
         followUpStatus[phone] = { tentativas: 1, ultimoFollowUp: agora };
         await persistirLead(phone);
 
       } else if (status.tentativas === 1 && tempoSemResposta > FOLLOWUP_2_MS) {
         const msg = await gerarMsgFollowUp(phone, nome, 2);
-        await enviarMensagem(phone, msg);
+        await enviarERegistrar(phone, msg);
         followUpStatus[phone] = { tentativas: 2, ultimoFollowUp: agora };
         await persistirLead(phone);
       }
@@ -1397,7 +1398,7 @@ setInterval(async () => {
         const msgNS = nomeNS
           ? `Oi ${nomeNS}, senti sua falta na conversa de hoje. Aconteceu alguma coisa? Se quiser, a gente acha um novo horário, é só me falar.`
           : `Oi, senti sua falta na conversa de hoje. Aconteceu alguma coisa? Se quiser remarcar, é só me falar.`;
-        await enviarMensagem(phone, msgNS);
+        await enviarERegistrar(phone, msgNS);
         await enviarMensagem(MEU_NUMERO, `*Possível no-show*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${phone}\nHorário: ${ag.labelCG || ag.label}\n\nLead não apareceu na reunião. Mensagem de retomada enviada automaticamente.`);
         atualizarLead(phone, { 'Status': 'Reunião agendada' }).catch(e => console.error('atualizarLead no-show:', e.message));
         registrarEtapaFunil(phone, FUNIL.NO_SHOW).catch(e => console.error('funil no-show:', e.message));
@@ -1422,7 +1423,7 @@ setInterval(async () => {
       let msg = `${nomeLabel}sua conversa${negocioLabel} com o especialista começa em instantes (${ag.label}). É só entrar por aqui: ${ag.meetLink || ''}`;
       if (!ag.meetLink) msg = `${nomeLabel}sua conversa${negocioLabel} com o especialista começa em instantes (${ag.label}). O especialista vai te enviar o link agora!`;
       msg += `\n\nTe espero lá!`;
-      await enviarMensagem(phone, msg);
+      await enviarERegistrar(phone, msg);
       ag.lembrete30minEnviado = true;
       ag.lembrete2hEnviado = true;
       ag.lembrete24hEnviado = true;
@@ -1433,7 +1434,7 @@ setInterval(async () => {
       let msg = `${saud}! Só passando pra lembrar que sua conversa é hoje, ${ag.label}.`;
       msg += negocio ? ` O especialista já sabe que você tem${negocio} e vai chegar preparado pro seu caso.` : '';
       msg += ` Daqui a pouco te mando o link pra entrar, tá? 😊`;
-      await enviarMensagem(phone, msg);
+      await enviarERegistrar(phone, msg);
       ag.lembrete2hEnviado = true;
       ag.lembrete24hEnviado = true;
       await persistirLead(phone);
@@ -1446,7 +1447,7 @@ setInterval(async () => {
       let msg = `${saud}! Passando pra confirmar nossa conversa de amanhã, ${ag.label}.`;
       msg += negocio ? ` O especialista já está ciente que você tem${negocio} e vai chegar preparado.` : '';
       msg += ` Você consegue comparecer?`;
-      await enviarMensagem(phone, msg);
+      await enviarERegistrar(phone, msg);
       ag.lembrete24hEnviado = true;
       await persistirLead(phone);
     }
@@ -1787,7 +1788,7 @@ app.post('/webhook', async (req, res) => {
             console.error('Erro ao processar imagem:', err.message)
           );
         } else {
-          await enviarMensagem(userPhone, 'Não consegui abrir a imagem. Pode tentar enviar de novo ou me explicar por texto?');
+          await enviarERegistrar(userPhone, 'Não consegui abrir a imagem. Pode tentar enviar de novo ou me explicar por texto?');
         }
       } catch (err) {
         console.error('Erro no processamento assíncrono de imagem:', err.message);
@@ -1809,10 +1810,10 @@ app.post('/webhook', async (req, res) => {
               console.error('Erro ao processar áudio:', err.message)
             );
           } else {
-            await enviarMensagem(userPhone, 'Não consegui entender o áudio dessa vez. Pode tentar de novo ou me escrever por texto?');
+            await enviarERegistrar(userPhone, 'Não consegui entender o áudio dessa vez. Pode tentar de novo ou me escrever por texto?');
           }
         } else {
-          await enviarMensagem(userPhone, 'Não consegui abrir o áudio. Pode tentar de novo ou me escrever por texto?');
+          await enviarERegistrar(userPhone, 'Não consegui abrir o áudio. Pode tentar de novo ou me escrever por texto?');
         }
       } catch (err) {
         console.error('Erro no processamento assíncrono de áudio:', err.message);
@@ -1960,9 +1961,9 @@ async function tratarPosAgendamento(userPhone, userText) {
         let msg = `Prontinho, remarcado pra ${escolhido.label}.`;
         if (ag.meetLink) msg += ` O link do Google Meet continua o mesmo: ${ag.meetLink}`;
         msg += `\n\nQualquer coisa é só me chamar. Até lá!`;
-        await enviarMensagem(userPhone, msg);
+        await enviarERegistrar(userPhone, msg);
       } else {
-        await enviarMensagem(userPhone, 'Tive um problema pra remarcar aqui. Nosso time vai entrar em contato pra ajustar com você.');
+        await enviarERegistrar(userPhone, 'Tive um problema pra remarcar aqui. Nosso time vai entrar em contato pra ajustar com você.');
         await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
         registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando:', e.message));
         ag.remarcando = false;
@@ -1971,7 +1972,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     } else {
       // Não entendeu o horário — repete as opções
       const opcoes = ag.novosSlots.map(s => s.label).join(' ou ');
-      await enviarMensagem(userPhone, `Só para confirmar, qual desses fica melhor: ${opcoes}?`);
+      await enviarERegistrar(userPhone, `Só para confirmar, qual desses fica melhor: ${opcoes}?`);
       return true;
     }
   }
@@ -2029,7 +2030,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     ag.presencaConfirmadaEm = Date.now();
     const saud = ag.nome ? `Combinado, ${ag.nome}!` : 'Combinado!';
     const refHorario = ag.label ? ` Nossa conversa está confirmada para ${ag.label}.` : ' Sua reunião está confirmada.';
-    await enviarMensagem(userPhone, `${saud}${refHorario} Te espero lá!`);
+    await enviarERegistrar(userPhone, `${saud}${refHorario} Te espero lá!`);
     return true;
   }
 
@@ -2038,7 +2039,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     const totalRemarcacoes = ag.totalRemarcacoes || 0;
     if (totalRemarcacoes >= 2) {
       log(userPhone, 'warn', `Limite de remarcações atingido (${totalRemarcacoes})`);
-      await enviarMensagem(userPhone, 'Entendo! Como já remarcamos algumas vezes, vou pedir para nossa equipe entrar em contato diretamente para encontrar o melhor horário para você.');
+      await enviarERegistrar(userPhone, 'Entendo! Como já remarcamos algumas vezes, vou pedir para nossa equipe entrar em contato diretamente para encontrar o melhor horário para você.');
       await enviarMensagem(MEU_NUMERO, `*Limite de remarcações atingido*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário atual: ${ag.labelCG || ag.label}\n\nLead tentou remarcar pela ${totalRemarcacoes + 1}ª vez. Tratar manualmente.`);
       await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
       registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando limite:', e.message));
@@ -2053,7 +2054,7 @@ async function tratarPosAgendamento(userPhone, userText) {
       console.error('Erro ao buscar horários para remarcação:', err.message);
     }
     if (novosSlots.length === 0) {
-      await enviarMensagem(userPhone, 'Sem problema! No momento não consegui localizar novos horários automaticamente, mas nossa equipe vai entrar em contato para remarcar com você.');
+      await enviarERegistrar(userPhone, 'Sem problema! No momento não consegui localizar novos horários automaticamente, mas nossa equipe vai entrar em contato para remarcar com você.');
       await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
       registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando sem slot:', e.message));
       return true;
@@ -2068,9 +2069,9 @@ async function tratarPosAgendamento(userPhone, userText) {
       ? `${novosSlots[0].label} ou ${novosSlots[1].label}`
       : novosSlots[0].label;
     const refAtual = ag.label ? `Sua conversa está marcada para ${ag.label}.` : 'Sem problema!';
-    await enviarMensagem(userPhone, `${refAtual} Vamos remarcar então.`);
+    await enviarERegistrar(userPhone, `${refAtual} Vamos remarcar então.`);
     await new Promise(r => setTimeout(r, 1500));
-    await enviarMensagem(userPhone, `Tenho estes horários disponíveis: ${opcoes}. Qual funciona melhor para você?`);
+    await enviarERegistrar(userPhone, `Tenho estes horários disponíveis: ${opcoes}. Qual funciona melhor para você?`);
     return true;
   }
 
@@ -2540,10 +2541,10 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
         {
           model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
           max_tokens: 400,
-          messages: [
+          messages: mesclarTurnosConsecutivos([
             ...historicoParaResumo,
             { role: 'user', content: `Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "...", "dor": "...", "urgencia": "imediata ou próximos dias ou próximos meses", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}.${tipoNegocio ? ` O tipo de negócio já identificado é: "${tipoNegocio}" — use isso no campo tipo_negocio.` : ''}${dorPrincipal ? ` A dor principal relatada foi: "${dorPrincipal.slice(0, 150)}" — use isso como base para o campo dor.` : ''}${urgenciaLead ? ` A urgência identificada é: "${urgenciaLead}" — use EXATAMENTE esse valor no campo urgencia.` : ' No campo urgencia, use EXATAMENTE um desses três valores: "imediata" (problema acontecendo agora, perda de cliente ativa), "próximos dias" (quer resolver em breve), "próximos meses" (sem urgência clara).'} No resumo, NÃO inclua o horário ou data do agendamento (isso já fica em coluna própria). Foque no perfil do lead: negócio, dor principal, contexto e urgência. Se algum campo não estiver claro na conversa, use string vazia.` }
-          ]
+          ])
         },
         { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 20000 }
       );
@@ -2573,7 +2574,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
 
     // Avisar que está gerando antes de processar
     log(userPhone, 'info', `Iniciando agendamento — slot: ${slotEscolhido.label} | email: ${emailLead} | nome: ${nome || 'não identificado'}`);
-    await enviarMensagem(userPhone, 'Um segundo, deixa eu confirmar aqui.');
+    await enviarERegistrar(userPhone, 'Um segundo, deixa eu confirmar aqui.');
 
     // Revalida a vaga bem no momento da confirmação — ela foi checada quando foi
     // oferecida, mas outro lead pode ter fechado o mesmo horário nesse meio-tempo.
@@ -2593,9 +2594,9 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
         agendamentos[userPhone].slotsGeradosEm = Date.now();
         agendamentos[userPhone].slotConfirmado = null;
         const opcoes = novosSlots.length >= 2 ? `${novosSlots[0].label} ou ${novosSlots[1].label}` : novosSlots[0].label;
-        await enviarMensagem(userPhone, `${motivo} Tenho esses outros disponíveis: ${opcoes}. Qual funciona melhor?`);
+        await enviarERegistrar(userPhone, `${motivo} Tenho esses outros disponíveis: ${opcoes}. Qual funciona melhor?`);
       } else {
-        await enviarMensagem(userPhone, `${motivo} Nossa equipe vai entrar em contato para encontrar um novo horário com você.`);
+        await enviarERegistrar(userPhone, `${motivo} Nossa equipe vai entrar em contato para encontrar um novo horário com você.`);
       }
       await persistirLead(userPhone);
       return;
@@ -2676,24 +2677,24 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const horarioInterno = slotEscolhido.labelCG || slotEscolhido.label;
 
     if (meetLink) {
-      await enviarMensagem(userPhone,
+      await enviarERegistrar(userPhone,
         `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioLead}. É rapidinho, 30 minutos, e você já sai com um caminho claro de como deixar seu atendimento no automático.\n\nO link da reunião é esse: ${meetLink}\n\nTe mando um lembrete antes pra você não precisar ficar de olho no horário 😊`
       );
       await new Promise(r => setTimeout(r, 2000));
-      await enviarMensagem(userPhone, `Qualquer dúvida até a reunião, é só me chamar por aqui. Até lá, ${nomeExibicao}!`);
+      await enviarERegistrar(userPhone, `Qualquer dúvida até a reunião, é só me chamar por aqui. Até lá, ${nomeExibicao}!`);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioInterno}\nMeet: ${meetLink}`);
     } else {
-      await enviarMensagem(userPhone,
+      await enviarERegistrar(userPhone,
         `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioLead}. É uma conversa de 30 minutos pra te mostrar como automatizar seu atendimento.\n\nJá já te envio o link da reunião por aqui, pode ficar tranquilo. Te mando um lembrete antes também 😊`
       );
       await new Promise(r => setTimeout(r, 2000));
-      await enviarMensagem(userPhone, `Qualquer dúvida até a reunião, é só me chamar por aqui. Até lá, ${nomeExibicao}!`);
+      await enviarERegistrar(userPhone, `Qualquer dúvida até a reunião, é só me chamar por aqui. Até lá, ${nomeExibicao}!`);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioInterno}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
    } catch (err) {
      console.error('Erro no processamento do agendamento:', err.message);
      // Tranquiliza o lead e sinaliza para a equipe finalizar manualmente
-     await enviarMensagem(userPhone, 'Recebi seus dados! Tive uma instabilidade aqui pra gerar o link na hora, mas pode ficar tranquilo: alguém do nosso time finaliza seu agendamento e te manda o link em breve. Até lá!')
+     await enviarERegistrar(userPhone, 'Recebi seus dados! Tive uma instabilidade aqui pra gerar o link na hora, mas pode ficar tranquilo: alguém do nosso time finaliza seu agendamento e te manda o link em breve. Até lá!')
        .catch(() => {});
      await enviarMensagem(MEU_NUMERO, `*Agendamento pendente — finalizar manualmente!*\n\nWhatsApp: ${userPhone}\nErro: ${err.message}\n\nO lead recebeu seus dados mas o link não foi gerado. Finalize o agendamento e envie o link.`)
        .catch(() => {});
@@ -2731,11 +2732,21 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     // Contexto dinâmico: saudação e horários corretos NESTE momento. Os valores gravados
     // no roteiro inicial congelam no início da conversa e ficam errados quando o lead
     // retoma em outro período do dia (ex: "Boa noite" às 9h da manhã).
-    const slotsAtuais = agLead?.slots || [];
-    const opcoesAtuais = slotsAtuais.length >= 2
-      ? `${slotsAtuais[0].label} ou ${slotsAtuais[1].label}`
-      : (slotsAtuais.length === 1 ? slotsAtuais[0].label : 'nenhum horário disponível no momento');
-    const contextoDinamico = `CONTEXTO ATUAL (gerado agora, prevalece sobre qualquer valor anterior do roteiro ou da conversa): a saudação correta neste momento é "${saudacaoAtualCG()}". Os horários realmente disponíveis agora são: ${opcoesAtuais}. Se horários mencionados antes na conversa forem diferentes destes, ofereça estes.`;
+    // Quando o lead JÁ TEM reunião confirmada, o contexto muda de figura: em vez de
+    // oferecer horários, informa o estágio real do funil — sem isso o Claude trata um
+    // lead agendado como se estivesse no meio da qualificação (visto em produção:
+    // lead com reunião fechada recebeu confirmação de email de novo no dia seguinte).
+    const agConfirmado = agendamentosConfirmados[userPhone];
+    let contextoDinamico;
+    if (agConfirmado) {
+      contextoDinamico = `CONTEXTO ATUAL (gerado agora, prevalece sobre qualquer valor anterior do roteiro ou da conversa): a saudação correta neste momento é "${saudacaoAtualCG()}". ESTE LEAD JÁ TEM REUNIÃO CONFIRMADA para ${agConfirmado.label}${agConfirmado.meetLink ? ` (link do Meet: ${agConfirmado.meetLink})` : ''}. O agendamento está fechado: NÃO reinicie a qualificação, NÃO ofereça horários, NÃO peça nem confirme email. Responda como quem conversa com um cliente aguardando a reunião: acolha a mensagem, tire dúvidas e, se fizer sentido, reforce com leveza o compromisso marcado. Se o lead pedir para remarcar ou cancelar, apenas acolha o pedido com naturalidade, sem oferecer horários você mesmo (o sistema cuida da remarcação).`;
+    } else {
+      const slotsAtuais = agLead?.slots || [];
+      const opcoesAtuais = slotsAtuais.length >= 2
+        ? `${slotsAtuais[0].label} ou ${slotsAtuais[1].label}`
+        : (slotsAtuais.length === 1 ? slotsAtuais[0].label : 'nenhum horário disponível no momento');
+      contextoDinamico = `CONTEXTO ATUAL (gerado agora, prevalece sobre qualquer valor anterior do roteiro ou da conversa): a saudação correta neste momento é "${saudacaoAtualCG()}". Os horários realmente disponíveis agora são: ${opcoesAtuais}. Se horários mencionados antes na conversa forem diferentes destes, ofereça estes.`;
+    }
 
     log(userPhone, 'info', `Chamando Claude — histórico: ${conversas[userPhone].length} msgs`);
     const resposta = await chamarClaude(conversas[userPhone], contextoDinamico);
@@ -3024,6 +3035,9 @@ async function chamarClaude(historico, contextoDinamico = '') {
   while (mensagens.length > 0 && mensagens[0].role === 'assistant') {
     mensagens = mensagens.slice(1);
   }
+  // Mescla turnos consecutivos do mesmo role — o histórico registra também as
+  // mensagens automáticas do sistema, e a API exige alternância user/assistant.
+  mensagens = mesclarTurnosConsecutivos(mensagens);
 
   const MAX_TENTATIVAS = 3;
   for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {

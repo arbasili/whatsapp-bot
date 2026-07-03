@@ -8,6 +8,7 @@ const {
   extrairNomeLead,
   extrairUrgencia,
   interpretarRespostaEmail,
+  mesclarTurnosConsecutivos,
 } = require('./heuristicas');
 
 // Slots de exemplo: terça 10h e quarta 15h (nenhum em segunda-feira, de propósito —
@@ -169,6 +170,40 @@ test('resposta ambígua não confirma nem nega', () => {
   assert.strictEqual(interpretarRespostaEmail('quanto custa a reunião?'), null);
   assert.strictEqual(interpretarRespostaEmail('vocês mandam convite?'), null);
   assert.strictEqual(interpretarRespostaEmail(''), null);
+});
+
+// ─── mesclarTurnosConsecutivos ───────────────────────────────────────────────
+
+test('mescla assistants consecutivos preservando alternância', () => {
+  const resultado = mesclarTurnosConsecutivos([
+    { role: 'user', content: 'oi' },
+    { role: 'assistant', content: 'Fechado, tá marcado!' },
+    { role: 'assistant', content: 'Qualquer dúvida é só chamar.' },
+    { role: 'user', content: 'combinado' },
+    { role: 'user', content: 'obrigado' },
+  ]);
+  assert.deepStrictEqual(resultado.map(m => m.role), ['user', 'assistant', 'user']);
+  assert.strictEqual(resultado[1].content, 'Fechado, tá marcado!\nQualquer dúvida é só chamar.');
+  assert.strictEqual(resultado[2].content, 'combinado\nobrigado');
+});
+
+test('não mescla conteúdo multimodal (array)', () => {
+  const multimodal = [{ type: 'text', text: 'foto' }];
+  const resultado = mesclarTurnosConsecutivos([
+    { role: 'user', content: 'olha isso' },
+    { role: 'user', content: multimodal },
+  ]);
+  assert.strictEqual(resultado.length, 2);
+  assert.strictEqual(resultado[1].content, multimodal);
+});
+
+test('não muta as mensagens originais ao mesclar', () => {
+  const original = [
+    { role: 'assistant', content: 'a' },
+    { role: 'assistant', content: 'b' },
+  ];
+  mesclarTurnosConsecutivos(original);
+  assert.strictEqual(original[0].content, 'a');
 });
 
 // ─── textoDoConteudo ─────────────────────────────────────────────────────────

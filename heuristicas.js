@@ -241,6 +241,24 @@ function interpretarRespostaEmail(texto) {
   return null;
 }
 
+// Mescla turnos consecutivos do mesmo role num único turno (separados por quebra de
+// linha). A API da Anthropic exige alternância user/assistant; como o histórico
+// registra também as mensagens automáticas do sistema (confirmações, lembretes,
+// follow-ups), turnos assistant consecutivos são comuns — sem a mescla, a chamada
+// retornaria 400. Conteúdo multimodal (array) não é mesclado, vira turno próprio.
+function mesclarTurnosConsecutivos(mensagens) {
+  const mescladas = [];
+  for (const m of mensagens) {
+    const anterior = mescladas[mescladas.length - 1];
+    if (anterior && anterior.role === m.role && typeof anterior.content === 'string' && typeof m.content === 'string') {
+      anterior.content += '\n' + m.content;
+    } else {
+      mescladas.push({ role: m.role, content: m.content });
+    }
+  }
+  return mescladas;
+}
+
 module.exports = {
   textoDoConteudo,
   escolherSlot,
@@ -249,4 +267,5 @@ module.exports = {
   extrairUrgencia,
   extrairNomeLead,
   interpretarRespostaEmail,
+  mesclarTurnosConsecutivos,
 };
