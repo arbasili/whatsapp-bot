@@ -22,7 +22,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.9';
+const BOT_VERSION = '1.9.10';
 const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
 
 const helmet = require('helmet');
@@ -37,10 +37,16 @@ app.set('trust proxy', 1);
 // Headers de segurança em todas as rotas
 app.use(helmet());
 
-// Rate limit nas rotas da API do painel — o webhook tem proteção própria por telefone
+// Rate limit nas rotas da API do painel — o webhook tem proteção própria por telefone.
+// Limite deliberadamente generoso: o painel é SSR (Server Components), então TODO o
+// tráfego dele chega de UM único IP de egress do Railway — não é um navegador por IP.
+// Uma navegação entre abas + AutoRefresh (15s) + getAllLeads paginando com muitos leads
+// soma dezenas de requisições/min desse único IP. Com 120/min o painel batia em 429 e
+// caía no boundary de erro. As rotas /api são todas autenticadas (verificarToken), então
+// o vetor de abuso é pequeno; o limite existe só como teto contra flood óbvio.
 const apiLimiter = criarRateLimiter({
   windowMs: 60 * 1000,
-  max: 120, // por IP por minuto — folga para o painel com auto-refresh
+  max: 1200, // por IP por minuto — acomoda o padrão SSR de IP compartilhado do painel
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Muitas requisições. Tente novamente em instantes.' }
