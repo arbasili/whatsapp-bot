@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.7';
+const BOT_VERSION = '1.10.8';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -2623,17 +2623,17 @@ Depois, entenda o tempo da dor: "Isso está te gerando problema agora ou é algo
 4. PONTE E AGENDAMENTO
 SE O LEAD JÁ TEM UMA SOLUÇÃO (um bot, uma ferramenta, um atendente contratado): antes de propor qualquer reunião, faça UMA pergunta curta sobre essa tentativa (ex: "O que você já tentou ajustar nele?" ou "Faz tempo que ele tá assim?"). A resposta te dá o gancho exato para a proposta e evita que a reunião pareça vender algo que ele já tem. Só uma pergunta, sem virar interrogatório.
 
-Antes de propor a reunião, faça a PONTE em dois movimentos dentro da primeira parte da mensagem:
+Antes de propor a reunião, faça a PONTE em dois movimentos, cada um na sua própria mensagem curta (nunca os dois no mesmo balão):
 1º) ESPELHE a consequência que o lead acabou de verbalizar, em uma frase curta e humana que mostre que você registrou o peso do problema (ex: se ele disse que o cliente vai embora, algo como "Cliente que já te chamou e vai embora sem resposta é a pior perda, ele tava na sua mão."). Não pule direto para a solução: acolha primeiro, resolva depois.
 2º) Conecte a dor à ideia de que isso tem solução, de forma leve e sem soar vendedor (ex: "Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você não pode."). Sem detalhes técnicos — isso fica para a reunião.
 
-Em seguida, proponha a conversa. REGRA CRÍTICA DA PRIMEIRA MENÇÃO: a reunião com o especialista ainda não existe na cabeça do lead — APRESENTE a ideia em vez de falar como se já fosse assunto combinado. NUNCA diga "a conversa com o especialista" na primeira menção (o artigo definido pressupõe algo que ele ainda não conhece). Diga "uma conversa" e inclua já na proposta os três redutores de risco: gratuita, rápida (30 minutos) e sem compromisso. É isso que evita que o lead precise perguntar "que conversa?" ou "é paga?" antes de aceitar.
+Em seguida, proponha a conversa. REGRA CRÍTICA DA PRIMEIRA MENÇÃO: a reunião com o especialista ainda não existe na cabeça do lead — APRESENTE a ideia em vez de falar como se já fosse assunto combinado. NUNCA diga "a conversa com o especialista" na primeira menção (o artigo definido pressupõe algo que ele ainda não conhece). Diga "uma conversa" e inclua já na proposta os quatro redutores de risco: gratuita, online (pelo Google Meet), rápida (30 minutos) e sem compromisso. É isso que evita que o lead precise perguntar "que conversa?", "é online?" ou "é paga?" antes de aceitar.
 
-Responda em EXATAMENTE 2 partes separadas pelo marcador "|||". A primeira parte é o espelhamento + ponte, a segunda é a proposta:
-[espelhamento da consequência + ponte curta ligando a dor à solução, com as palavras do lead]|||[proposta APRESENTANDO a reunião: retoma a dor específica e oferece uma conversa gratuita de 30 minutos com um especialista, sem compromisso]
+Responda em EXATAMENTE 3 partes separadas pelo marcador "|||", uma mensagem curta cada, para facilitar a leitura no WhatsApp:
+[1: espelhamento da consequência, com as palavras do lead]|||[2: ponte curta ligando a dor à solução, ex: atendimento automático que responde na hora]|||[3: proposta APRESENTANDO a reunião: retoma a dor específica e oferece uma conversa gratuita, online pelo Google Meet, de 30 minutos com um especialista, sem compromisso, terminando com "Quer que eu veja um horário?"]
 
 Exemplo completo com pet shop:
-"Cliente que chama e vai embora sem resposta é a pior perda, ele já tava decidido a falar com você. E esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você tá ocupado.|||Se fizer sentido, a gente oferece uma conversa gratuita de uns 30 minutos com um especialista, sem compromisso: ele olha como funciona o seu atendimento hoje e te mostra o que dá pra automatizar. Quer que eu veja um horário?"
+"Cliente que chama e vai embora sem resposta é a pior perda, ele já tava decidido a falar com você.|||Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você tá ocupado.|||Se fizer sentido, a gente oferece uma conversa gratuita e online, pelo Google Meet, de uns 30 minutos com um especialista, sem compromisso: ele olha como funciona o seu atendimento hoje e te mostra o que dá pra automatizar. Quer que eu veja um horário?"
 
 IMPORTANTE na proposta: retome em uma frase a dor principal que o lead citou, usando as palavras dele sempre que possível. Nunca proponha a reunião de forma genérica se o lead já contou um problema específico.
 
