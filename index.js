@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.5';
+const BOT_VERSION = '1.10.6';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -2418,6 +2418,13 @@ function log(phone, nivel, ...args) {
 
 async function processarMensagem(userPhone, userText, imagem = null, nomePerfil = '') {
   log(userPhone, 'info', `Mensagem recebida: "${conteudoParaLog((userText || '').slice(0, 80))}"${imagem ? ' [+imagem]' : ''}${nomePerfil ? ` | perfil: ${nomePerfil}` : ''}`);
+
+  // Marca a atividade do lead para TODOS os tipos de mensagem. O webhook só atualiza
+  // ultimaMensagem no caminho de texto; imagem e áudio caem direto aqui (via setImmediate),
+  // então sem esta linha um lead que manda só áudio/imagem nunca entra no job de follow-up
+  // (que pula quem não tem ultimaMensagem) nem expira da memória, e o timer de follow-up de
+  // quem mistura texto e áudio contaria a partir do último texto, disparando cedo demais.
+  ultimaMensagem[userPhone] = Date.now();
 
   // Valida o nome vindo do perfil do WhatsApp
   // Considera inválido: vazio, muito curto, só números, nomes genéricos, frases/slogans
