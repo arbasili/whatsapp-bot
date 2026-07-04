@@ -32,7 +32,8 @@
 #>
 param(
   [switch]$Confirmo,
-  [switch]$Tudo
+  [switch]$Tudo,
+  [switch]$Sim   # pula a confirmação interativa (para execução automática/não-interativa)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -73,8 +74,10 @@ if ($Confirmo) {
   $escopo = if ($Tudo) { 'TUDO (inclui clients e user_clients)' } else { 'leads, conversas, bot_state, ai_activity e meeting_analyses' }
   Write-Host ''
   Write-Host "Vai APAGAR: $escopo" -ForegroundColor Yellow
-  $resp = Read-Host "Tem certeza? digite 'sim' para confirmar"
-  if ($resp -ne 'sim') { Write-Host 'Cancelado.'; exit 0 }
+  if (-not $Sim) {
+    $resp = Read-Host "Tem certeza? digite 'sim' para confirmar"
+    if ($resp -ne 'sim') { Write-Host 'Cancelado.'; exit 0 }
+  }
 } else {
   Write-Host ''
   Write-Host '=== DRY-RUN (nada sera apagado) ===' -ForegroundColor Cyan
