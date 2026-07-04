@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.0';
+const BOT_VERSION = '1.10.1';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -845,6 +845,53 @@ Regras:
   }
 }
 
+// Gera um Segmento + Dor LIMPOS via IA (1 chamada curta), uma única vez por lead.
+// As heurísticas de tempo real deixam esses campos com texto cru (frase cortada,
+// transcrição de áudio inteira); esta função os deixa apresentáveis no CRM assim que
+// o lead é qualificado — importante pra quem trava antes de agendar. Roda no momento
+// da proposta e no encerramento por inatividade.
+async function gerarResumoParcial(phone) {
+  const ag = agendamentos[phone];
+  if (ag?.camposLimpos) return; // já foi limpo — não repete nem gasta IA de novo
+  const historico = conversas[phone];
+  if (!historico || historico.length < 4) return;
+  try {
+    let hist = historico.slice(2)
+      .map(m => ({ role: m.role, content: textoDoConteudo(m.content) }))
+      .filter(m => m.content && m.content.trim());
+    while (hist.length && hist[0].role !== 'user') hist.shift();
+    if (!hist.length) return;
+
+    const resp = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        max_tokens: 200,
+        messages: mesclarTurnosConsecutivos([
+          ...hist,
+          { role: 'user', content: `Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois: {"tipo_negocio": "...", "dor": "..."}. tipo_negocio: o segmento do lead em poucas palavras, capitalizado (ex: "Clínica odontológica", "Software house", "Pet shop"). dor: a dor principal do lead em UMA frase curta e limpa, escrita por você (NÃO copie a fala crua do lead, não use "então", não inclua transcrição). Se algum campo não estiver claro na conversa, use string vazia.` }
+        ])
+      },
+      { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 15000 }
+    );
+    const texto = resp.data.content[0].text.trim();
+    const m = texto.match(/\{[\s\S]*\}/);
+    if (!m) return;
+    const dados = JSON.parse(m[0]);
+
+    const atualizacoes = {};
+    if (dados.tipo_negocio) atualizacoes['Tipo de Negócio'] = dados.tipo_negocio;
+    if (dados.dor) atualizacoes['Dor'] = dados.dor;
+    if (Object.keys(atualizacoes).length > 0) await atualizarLead(phone, atualizacoes);
+
+    if (!agendamentos[phone]) agendamentos[phone] = { slots: [] };
+    agendamentos[phone].camposLimpos = true; // trava a heurística crua de sobrescrever
+    log(phone, 'info', `Resumo parcial gerado: ${dados.tipo_negocio || '?'} | ${(dados.dor || '').slice(0, 60)}`);
+  } catch (err) {
+    console.error(`[${mascararTelefone(phone)}] Erro no resumo parcial:`, err.message);
+  }
+}
+
 // Melhoria 14 — brief de preparação para o especialista antes da reunião
 async function enviarBriefEspecialista(phone, ag) {
   try {
@@ -1374,6 +1421,10 @@ setInterval(async () => {
       }).catch(() => {});
 
       registrarAtividade(nomeParaScore || 'Lead', 'Encerrado por inatividade — score gerado').catch(() => {});
+
+      // Limpa Segmento/Dor pra o lead encerrado não ficar com texto cru no CRM
+      // (roda uma vez; se já limpou na proposta, sai cedo). Antes de apagar agendamentos.
+      await gerarResumoParcial(phone);
 
       // Agenda reativação — guardamos o timestamp de encerramento no followUpStatus
       followUpStatus[phone] = {
@@ -2424,6 +2475,9 @@ REGRA ABSOLUTA: NUNCA coloque duas perguntas na mesma mensagem, nem antes nem de
 3. QUALIFICAR O CONTEXTO
 De forma natural, entenda se o lead já tentou resolver o problema antes: "Você já tentou resolver isso de alguma forma?" — só faça essa pergunta se fluir naturalmente, sem transformar em interrogatório. Se o lead já respondeu espontaneamente, pule essa etapa.
 
+3a. FERRAMENTA ATUAL (opcional, contextual — NÃO é pergunta fixa)
+Quando o perfil do lead sugerir alguma estrutura (ele fala em "leads", "vendedores", "funil", "equipe comercial", tem um negócio mais organizado, ou é da área de tecnologia/software), você PODE fazer UMA pergunta leve sobre a ferramenta que ele usa hoje, sempre amarrada à dor: "Você usa alguma ferramenta pra organizar/acompanhar esses leads hoje, ou é tudo no WhatsApp mesmo?" Evite o jargão "CRM" com quem não é técnico; "ferramenta pra organizar os leads" funciona pra todos. Isso ajuda o especialista a preparar a conversa. Para negócios simples (pet shop, barbearia, etc.) ou quando a conversa já está fluindo pro agendamento, PULE essa pergunta — não vale a fricção. Uma pergunta só, nunca vire interrogatório.
+
 3b. URGÊNCIA
 Depois, entenda o tempo da dor: "Isso está te gerando problema agora ou é algo que você quer resolver nos próximos meses?" Se o lead indicar urgência, você pode, em uma única pergunta natural, entender o gatilho: "O que fez você buscar isso agora?" Não force se a conversa já estiver fluindo para o agendamento.
 
@@ -2938,11 +2992,13 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     // se uma extração anterior tiver sido ruim (ex: roteiro vazado antes da v1.9.6),
     // e continua sem regravar o mesmo valor a toda mensagem. Flags antigas persistidas
     // como boolean true também são substituídas naturalmente (true !== string).
-    if (tipoNegocio && agInc.tipoNegocioGravado !== tipoNegocio) {
+    // camposLimpos: depois que a IA gerou Segmento/Dor limpos (gerarResumoParcial),
+    // a heurística crua PARA de sobrescrever, senão o texto bruto voltaria no turno seguinte.
+    if (tipoNegocio && !agInc.camposLimpos && agInc.tipoNegocioGravado !== tipoNegocio) {
       atualizacoesIncrementais['Tipo de Negócio'] = tipoNegocio;
       agInc.tipoNegocioGravado = tipoNegocio;
     }
-    if (dorLead && agInc.dorGravada !== dorLead) {
+    if (dorLead && !agInc.camposLimpos && agInc.dorGravada !== dorLead) {
       atualizacoesIncrementais['Dor'] = dorLead;
       agInc.dorGravada = dorLead;
     }
@@ -2985,6 +3041,10 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       if (statusIntermediario === 'Pronto para agendar') {
         registrarEtapaFunil(userPhone, FUNIL.PRONTO_AGENDAR).catch(() => {});
         registrarAtividade(nomeAtual || 'Lead', 'Propôs reunião').catch(() => {});
+        // Lead qualificado o suficiente pra proposta: gera Segmento/Dor limpos (uma vez).
+        // Assim, se ele travar aqui sem agendar, o card do CRM já fica apresentável em
+        // vez de mostrar o texto cru da heurística (ex: transcrição de áudio cortada).
+        gerarResumoParcial(userPhone).catch(() => {});
       }
     }
 
