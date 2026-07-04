@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.4';
+const BOT_VERSION = '1.10.5';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -241,6 +241,21 @@ async function initDb() {
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ai_insights JSONB`);
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS summary_bullets JSONB`);
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS snooze_until TIMESTAMPTZ`);
+
+  // Log de anotações do vendedor — cada nota é uma entrada com data e autor
+  // (em vez de um campo único que sobrescreve). O campo leads.notes segue existindo
+  // para compatibilidade, mas o painel usa este log.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS lead_notes (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      lead_id UUID NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      texto TEXT NOT NULL,
+      autor TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_notes_lead ON lead_notes(lead_id, created_at DESC)`);
 
   // Tabela de atividade da IA — feed de ações do bot para a visão geral do painel
   await pool.query(`
@@ -1691,6 +1706,42 @@ app.patch('/api/leads/:id', verificarToken, async (req, res) => {
   } catch (err) {
     console.error('Erro em PATCH /api/leads/:id:', err.message);
     res.status(500).json({ error: 'Erro ao editar lead' });
+  }
+});
+
+// GET /api/leads/:id/notes-log — histórico de anotações do vendedor (log com data/autor)
+app.get('/api/leads/:id/notes-log', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT n.id, n.texto, n.autor, n.created_at
+       FROM lead_notes n JOIN leads l ON l.id = n.lead_id
+       WHERE n.lead_id = $1 AND l.client_id = $2
+       ORDER BY n.created_at DESC`,
+      [req.params.id, process.env.CLIENT_ID]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Erro em GET /api/leads/:id/notes-log:', err.message);
+    res.status(500).json({ error: 'Erro ao listar notas' });
+  }
+});
+
+// POST /api/leads/:id/notes-log — adiciona uma anotação ao log
+app.post('/api/leads/:id/notes-log', verificarToken, async (req, res) => {
+  try {
+    const texto = (req.body?.texto || '').trim();
+    if (!texto) return res.status(400).json({ error: 'Nota vazia' });
+    const lead = await pool.query('SELECT id FROM leads WHERE id = $1 AND client_id = $2', [req.params.id, process.env.CLIENT_ID]);
+    if (!lead.rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
+    const { rows } = await pool.query(
+      `INSERT INTO lead_notes (lead_id, client_id, texto, autor)
+       VALUES ($1, $2, $3, $4) RETURNING id, texto, autor, created_at`,
+      [req.params.id, process.env.CLIENT_ID, texto.slice(0, 2000), req.user?.email || null]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('Erro em POST /api/leads/:id/notes-log:', err.message);
+    res.status(500).json({ error: 'Erro ao salvar nota' });
   }
 });
 
