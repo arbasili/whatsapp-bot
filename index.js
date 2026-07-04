@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.6';
+const BOT_VERSION = '1.10.7';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -241,6 +241,10 @@ async function initDb() {
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ai_insights JSONB`);
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS summary_bullets JSONB`);
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS snooze_until TIMESTAMPTZ`);
+  // Horário real da reunião como timestamp consultável. A coluna scheduled_at guarda o
+  // label em português ("segunda-feira, 22 de junho às 9h..."), ótimo pra exibir mas
+  // impossível de filtrar por data — por isso métricas como "reuniões de hoje" davam 0.
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS scheduled_at_ts TIMESTAMPTZ`);
 
   // Log de anotações do vendedor — cada nota é uma entrada com data e autor
   // (em vez de um campo único que sobrescreve). O campo leads.notes segue existindo
@@ -628,6 +632,7 @@ async function atualizarLead(phone, dados) {
     'Urgência':       'urgency',
     'Status':         'status',
     'Horário':        'scheduled_at',
+    'HorárioTS':      'scheduled_at_ts',
     'Link Meet':      'meet_link',
     'Resumo':         'summary',
     'Origem':         'origin',
@@ -1826,10 +1831,13 @@ app.get('/api/stream', verificarToken, (req, res) => {
     try { res.end(); } catch { /* já encerrado */ }
   };
 
-  // Heartbeat: mantém a conexão viva através de proxies/timeouts de ociosidade
+  // Heartbeat: mantém a conexão viva através de proxies/timeouts de ociosidade.
+  // 15s dá margem contra proxies que fecham conexões ociosas em ~30s (o do Railway
+  // é um deles em alguns momentos) — o cliente tem tolerância a quedas curtas, mas
+  // evitar a queda de saída é melhor que reconectar.
   heartbeat = setInterval(() => {
     try { res.write(': ping\n\n'); } catch { encerrar(); }
-  }, 25000);
+  }, 15000);
 
   req.on('close', encerrar);
   req.on('error', encerrar);
@@ -1891,7 +1899,7 @@ app.get('/api/metrics', verificarToken, async (req, res) => {
           COUNT(*) FILTER (WHERE created_at >= date_trunc('week', NOW() AT TIME ZONE 'America/Campo_Grande') AT TIME ZONE 'America/Campo_Grande') AS leads_semana_atual,
           COUNT(*) FILTER (WHERE created_at >= date_trunc('week', NOW() AT TIME ZONE 'America/Campo_Grande') AT TIME ZONE 'America/Campo_Grande' - INTERVAL '7 days'
                            AND created_at < date_trunc('week', NOW() AT TIME ZONE 'America/Campo_Grande') AT TIME ZONE 'America/Campo_Grande') AS leads_semana_anterior,
-          COUNT(*) FILTER (WHERE funnel_stages LIKE '%[RA]%' AND scheduled_at IS NOT NULL AND scheduled_at::TEXT LIKE '%' || TO_CHAR(NOW() AT TIME ZONE 'America/Campo_Grande', 'YYYY-MM-DD') || '%') AS reunioes_hoje
+          COUNT(*) FILTER (WHERE scheduled_at_ts IS NOT NULL AND (scheduled_at_ts AT TIME ZONE 'America/Campo_Grande')::date = (NOW() AT TIME ZONE 'America/Campo_Grande')::date) AS reunioes_hoje
         FROM leads WHERE client_id = $1
       `, [process.env.CLIENT_ID]),
     ]);
@@ -2240,6 +2248,7 @@ async function tratarPosAgendamento(userPhone, userText) {
         const tempAtual = agendamentos[userPhone]?.temperatura;
         await atualizarLead(userPhone, {
           'Horário': escolhido.labelCG || escolhido.label,
+          'HorárioTS': escolhido.inicio,
           'Status': 'Reunião agendada',
           'Temperatura': tempAtual || calcularTemperatura(agendamentos[userPhone]?.urgencia, agendamentos[userPhone]?.dor)
         });
@@ -2983,6 +2992,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       'Dor': dorPrincipal,
       'Urgência': urgenciaLead,
       'Horário': slotEscolhido.labelCG || slotEscolhido.label,
+      'HorárioTS': slotEscolhido.inicio,
       'Link Meet': meetLink || 'Não gerado',
       'Status': 'Reunião agendada',
       'Resumo': resumoConversa,
