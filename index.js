@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.11';
+const BOT_VERSION = '1.9.12';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -1948,14 +1948,19 @@ function _naoEhSlotAtual(ag) {
   return s => !ag.slotInicio || s.inicio !== ag.slotInicio;
 }
 
-// Interpreta um pedido de data do lead durante a remarcação ("dia 11", "quinta",
-// "de manhã") e devolve slots CONCRETOS. Retorna [] quando o texto não indica um
-// dia/horário específico (aí o chamador pede pro lead nomear um dia).
-async function slotsPorPedidoRemarcacao(ag, texto) {
+// Interpreta um pedido de data do lead durante a remarcação e devolve
+// { tipo, slots }:
+//   'concreto' → achou horário(s) para o dia/período pedido
+//   'ocupado'  → o lead nomeou um dia, mas é fim de semana ou está sem vaga
+//                (atendimento é seg–sex; interpretarPedidoData recusa sáb/dom)
+//   'nada'     → o texto não indica um dia/horário (aí pede pro lead nomear um)
+async function interpretarRemarcacao(ag, texto) {
   let r;
-  try { r = await interpretarPedidoData(texto); } catch { return []; }
+  try { r = await interpretarPedidoData(texto); } catch { return { tipo: 'nada', slots: [] }; }
   const ok = _naoEhSlotAtual(ag);
-  if (r.tipo === 'completo') return ok(r.slot) ? [r.slot] : [];
+  if (r.tipo === 'completo') {
+    return ok(r.slot) ? { tipo: 'concreto', slots: [r.slot] } : { tipo: 'ocupado', slots: [] };
+  }
   if (r.tipo === 'sohdia') {
     const dia = new Date(r.dia);
     const manha = [9, 10, 11], tarde = [14, 15, 16, 17];
@@ -1964,9 +1969,16 @@ async function slotsPorPedidoRemarcacao(ag, texto) {
     if (r.periodo === 'manhã') { const s = await buscar(manha); if (s) achados.push(s); }
     else if (r.periodo === 'tarde') { const s = await buscar(tarde); if (s) achados.push(s); }
     else { const sm = await buscar(manha); const st = await buscar(tarde); if (sm) achados.push(sm); if (st) achados.push(st); }
-    return achados.filter(ok);
+    const filtrados = achados.filter(ok);
+    return filtrados.length ? { tipo: 'concreto', slots: filtrados } : { tipo: 'ocupado', slots: [] };
   }
-  return [];
+  if (r.tipo === 'ocupado') return { tipo: 'ocupado', slots: [] };
+  return { tipo: 'nada', slots: [] };
+}
+
+// Detecta uma saudação para responder com saudação antes de perguntar algo.
+function _ehSaudacao(texto) {
+  return /^\s*(bom dia|boa tarde|boa noite|oi+|ol[áa]|opa|e a[íi]|eae|salve)\b/i.test(texto || '');
 }
 
 // Próximos horários disponíveis para remarcar, sempre excluindo o horário atual.
@@ -2038,16 +2050,31 @@ async function tratarPosAgendamento(userPhone, userText) {
         return true;
       }
 
-      // (2) Pediu um dia/horário diferente ("dia 11", "quinta", "de manhã") — atende
-      const alternativos = await slotsPorPedidoRemarcacao(ag, userText);
-      if (alternativos.length > 0) {
-        ag.novosSlots = alternativos;
+      const saud = _ehSaudacao(userText) ? `${saudacaoAtualCG()}! ` : '';
+      const pedido = await interpretarRemarcacao(ag, userText);
+
+      // (2) Pediu um dia/horário e achamos vaga ("dia 11" útil, "quinta", "de manhã")
+      if (pedido.tipo === 'concreto') {
+        ag.novosSlots = pedido.slots;
         ag.remarcacaoTentativas = 0;
-        await enviarERegistrar(userPhone, _msgOfertaRemarcacao(alternativos));
+        await enviarERegistrar(userPhone, `${saud}${_msgOfertaRemarcacao(pedido.slots)}`);
         return true;
       }
 
-      // (3) Não entendeu e não achou data — pede o dia, mas com teto pra não travar
+      // (3) Nomeou um dia sem vaga (fim de semana ou cheio) — explica e oferece o próximo
+      if (pedido.tipo === 'ocupado') {
+        ag.remarcacaoTentativas = 0;
+        const prox = await proximosSlotsRemarcacao(ag);
+        if (prox.length > 0) {
+          ag.novosSlots = prox;
+          await enviarERegistrar(userPhone, `${saud}Nesse dia eu não tenho agenda (atendo de segunda a sexta). ${_msgOfertaRemarcacao(prox)}`);
+        } else {
+          await enviarERegistrar(userPhone, `${saud}Nesse dia eu não tenho agenda (atendo de segunda a sexta). Me diz outro dia que eu vejo os horários.`);
+        }
+        return true;
+      }
+
+      // (4) Não entendeu nenhuma data — pede o dia, com teto pra não travar
       ag.remarcacaoTentativas = (ag.remarcacaoTentativas || 0) + 1;
       if (ag.remarcacaoTentativas >= 2) {
         ag.remarcando = false;
@@ -2058,7 +2085,7 @@ async function tratarPosAgendamento(userPhone, userText) {
         await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
         return true;
       }
-      await enviarERegistrar(userPhone, 'Me diz qual dia fica melhor pra você que eu vejo os horários. Pode ser o dia da semana ou a data, tipo "quinta" ou "dia 11".');
+      await enviarERegistrar(userPhone, `${saud}Me diz qual dia fica melhor pra você que eu vejo os horários. Pode ser o dia da semana ou a data, tipo "quinta" ou "dia 11".`);
       return true;
     }
   }
@@ -2132,11 +2159,11 @@ async function tratarPosAgendamento(userPhone, userText) {
       return true;
     }
 
-    // Se o lead já disse um dia na própria mensagem ("vou viajar e volto na quinta",
-    // "só consigo dia 11"), honra isso; senão oferece os próximos disponíveis. Em
-    // ambos os casos, nunca oferece o horário atual (era um bug: sugeria o mesmo slot).
-    let novosSlots = await slotsPorPedidoRemarcacao(ag, userText);
-    if (novosSlots.length === 0) novosSlots = await proximosSlotsRemarcacao(ag);
+    // Se o lead já disse um dia útil na própria mensagem ("volto na quinta"), honra
+    // isso; senão (ou se pediu fim de semana/dia cheio) oferece os próximos
+    // disponíveis. Em ambos os casos, nunca oferece o horário atual (era um bug).
+    const pedidoInicial = await interpretarRemarcacao(ag, userText);
+    let novosSlots = pedidoInicial.tipo === 'concreto' ? pedidoInicial.slots : await proximosSlotsRemarcacao(ag);
 
     if (novosSlots.length === 0) {
       await enviarERegistrar(userPhone, 'Sem problema! No momento não consegui localizar novos horários automaticamente, mas nossa equipe vai entrar em contato para remarcar com você.');
