@@ -11,6 +11,7 @@ const {
   extrairDorLead,
   interpretarRespostaEmail,
   mesclarTurnosConsecutivos,
+  querPararRemarcacao,
 } = require('./heuristicas');
 
 // Monta uma conversa mínima: roteiro + ack + turnos reais
@@ -341,6 +342,25 @@ test('não muta as mensagens originais ao mesclar', () => {
   mesclarTurnosConsecutivos(original);
   assert.strictEqual(original[0].content, 'a');
 });
+
+// ─── querPararRemarcacao ─────────────────────────────────────────────────────
+// Bug real: no modo remarcação o bot repetia as opções em loop; "ok parar" e afins
+// não paravam nada.
+
+test('querPararRemarcacao detecta desistência', () => {
+  assert.ok(querPararRemarcacao('ok parar'))
+  assert.ok(querPararRemarcacao('cancela'))
+  assert.ok(querPararRemarcacao('esquece'))
+  assert.ok(querPararRemarcacao('deixa pra lá'))
+  assert.ok(querPararRemarcacao('não quero mais'))
+})
+
+test('querPararRemarcacao NÃO dispara em pedido de horário ou "nenhum"', () => {
+  assert.ok(!querPararRemarcacao('dia 11'))
+  assert.ok(!querPararRemarcacao('quinta de manhã'))
+  assert.ok(!querPararRemarcacao('pode ser as 15h'))
+  assert.ok(!querPararRemarcacao('nenhum')) // "nenhum" leva a pedir outro dia, não a cancelar
+})
 
 // ─── textoDoConteudo ─────────────────────────────────────────────────────────
 

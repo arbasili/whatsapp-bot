@@ -17,13 +17,14 @@ const {
   extrairNomeLead,
   interpretarRespostaEmail,
   mesclarTurnosConsecutivos,
+  querPararRemarcacao,
 } = require('./heuristicas');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.10';
-const BOT_VERSION_DATA = '2026-07-03'; // data desta versão
+const BOT_VERSION = '1.9.11';
+const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
 const { rateLimit: criarRateLimiter } = require('express-rate-limit');
@@ -1942,6 +1943,45 @@ function processarComLock(userPhone, textoAcumulado, imagemPendente, nomePerfilW
   });
   return proximo;
 }
+// Nunca oferecer, numa remarcação, o mesmo horário que o lead está tentando largar.
+function _naoEhSlotAtual(ag) {
+  return s => !ag.slotInicio || s.inicio !== ag.slotInicio;
+}
+
+// Interpreta um pedido de data do lead durante a remarcação ("dia 11", "quinta",
+// "de manhã") e devolve slots CONCRETOS. Retorna [] quando o texto não indica um
+// dia/horário específico (aí o chamador pede pro lead nomear um dia).
+async function slotsPorPedidoRemarcacao(ag, texto) {
+  let r;
+  try { r = await interpretarPedidoData(texto); } catch { return []; }
+  const ok = _naoEhSlotAtual(ag);
+  if (r.tipo === 'completo') return ok(r.slot) ? [r.slot] : [];
+  if (r.tipo === 'sohdia') {
+    const dia = new Date(r.dia);
+    const manha = [9, 10, 11], tarde = [14, 15, 16, 17];
+    const buscar = async ps => { try { return await buscarSlotDisponivel(dia, ps); } catch { return null; } };
+    const achados = [];
+    if (r.periodo === 'manhã') { const s = await buscar(manha); if (s) achados.push(s); }
+    else if (r.periodo === 'tarde') { const s = await buscar(tarde); if (s) achados.push(s); }
+    else { const sm = await buscar(manha); const st = await buscar(tarde); if (sm) achados.push(sm); if (st) achados.push(st); }
+    return achados.filter(ok);
+  }
+  return [];
+}
+
+// Próximos horários disponíveis para remarcar, sempre excluindo o horário atual.
+async function proximosSlotsRemarcacao(ag) {
+  let proximos = [];
+  try { proximos = await buscarHorariosDisponiveis(); } catch { proximos = []; }
+  return proximos.filter(_naoEhSlotAtual(ag)).slice(0, 2);
+}
+
+// Mensagem de oferta de horários numa remarcação (1 ou 2 opções).
+function _msgOfertaRemarcacao(slots) {
+  if (slots.length >= 2) return `Tenho estes horários: ${slots[0].label} ou ${slots[1].label}. Qual funciona melhor para você?`;
+  return `Consigo ${slots[0].label}. Posso reservar esse?`;
+}
+
 async function tratarPosAgendamento(userPhone, userText) {
   const ag = agendamentosConfirmados[userPhone];
   if (!ag) return false;
@@ -1985,9 +2025,40 @@ async function tratarPosAgendamento(userPhone, userText) {
       }
       return true;
     } else {
-      // Não entendeu o horário — repete as opções
-      const opcoes = ag.novosSlots.map(s => s.label).join(' ou ');
-      await enviarERegistrar(userPhone, `Só para confirmar, qual desses fica melhor: ${opcoes}?`);
+      // Lead não escolheu um dos horários oferecidos. Antes só repetia as opções em
+      // loop — agora: (1) se quer parar, para; (2) se pediu outro dia, atende; (3)
+      // senão pede o dia, com teto de tentativas pra escalar em vez de travar.
+
+      // (1) Quer parar/desistir — mantém a reunião atual
+      if (querPararRemarcacao(userText)) {
+        ag.remarcando = false;
+        ag.novosSlots = null;
+        ag.remarcacaoTentativas = 0;
+        await enviarERegistrar(userPhone, `Tranquilo! Sua conversa segue marcada para ${ag.label}. Se quiser remarcar depois, é só me chamar.`);
+        return true;
+      }
+
+      // (2) Pediu um dia/horário diferente ("dia 11", "quinta", "de manhã") — atende
+      const alternativos = await slotsPorPedidoRemarcacao(ag, userText);
+      if (alternativos.length > 0) {
+        ag.novosSlots = alternativos;
+        ag.remarcacaoTentativas = 0;
+        await enviarERegistrar(userPhone, _msgOfertaRemarcacao(alternativos));
+        return true;
+      }
+
+      // (3) Não entendeu e não achou data — pede o dia, mas com teto pra não travar
+      ag.remarcacaoTentativas = (ag.remarcacaoTentativas || 0) + 1;
+      if (ag.remarcacaoTentativas >= 2) {
+        ag.remarcando = false;
+        ag.novosSlots = null;
+        ag.remarcacaoTentativas = 0;
+        await enviarERegistrar(userPhone, 'Pra não te enrolar, vou pedir pra nossa equipe falar com você direto e achar o melhor horário. Sua conversa atual segue marcada até lá, tá?');
+        await enviarMensagem(MEU_NUMERO, `*Remarcação travada*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário atual: ${ag.labelCG || ag.label}\n\nO lead quer remarcar mas não escolheu um horário. Tratar manualmente.`).catch(() => {});
+        await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
+        return true;
+      }
+      await enviarERegistrar(userPhone, 'Me diz qual dia fica melhor pra você que eu vejo os horários. Pode ser o dia da semana ou a data, tipo "quinta" ou "dia 11".');
       return true;
     }
   }
@@ -2061,13 +2132,12 @@ async function tratarPosAgendamento(userPhone, userText) {
       return true;
     }
 
-    // Buscar novos horários disponíveis
-    let novosSlots = [];
-    try {
-      novosSlots = await buscarHorariosDisponiveis();
-    } catch (err) {
-      console.error('Erro ao buscar horários para remarcação:', err.message);
-    }
+    // Se o lead já disse um dia na própria mensagem ("vou viajar e volto na quinta",
+    // "só consigo dia 11"), honra isso; senão oferece os próximos disponíveis. Em
+    // ambos os casos, nunca oferece o horário atual (era um bug: sugeria o mesmo slot).
+    let novosSlots = await slotsPorPedidoRemarcacao(ag, userText);
+    if (novosSlots.length === 0) novosSlots = await proximosSlotsRemarcacao(ag);
+
     if (novosSlots.length === 0) {
       await enviarERegistrar(userPhone, 'Sem problema! No momento não consegui localizar novos horários automaticamente, mas nossa equipe vai entrar em contato para remarcar com você.');
       await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
@@ -2076,17 +2146,15 @@ async function tratarPosAgendamento(userPhone, userText) {
     }
     ag.remarcando = true;
     ag.novosSlots = novosSlots;
+    ag.remarcacaoTentativas = 0;
     // totalRemarcacoes só é incrementado quando a remarcação é de fato confirmada
     // (ver bloco acima), para uma falha da API não custar uma das 2 chances do lead.
     await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
     registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando:', e.message));
-    const opcoes = novosSlots.length >= 2
-      ? `${novosSlots[0].label} ou ${novosSlots[1].label}`
-      : novosSlots[0].label;
     const refAtual = ag.label ? `Sua conversa está marcada para ${ag.label}.` : 'Sem problema!';
     await enviarERegistrar(userPhone, `${refAtual} Vamos remarcar então.`);
     await new Promise(r => setTimeout(r, 1500));
-    await enviarERegistrar(userPhone, `Tenho estes horários disponíveis: ${opcoes}. Qual funciona melhor para você?`);
+    await enviarERegistrar(userPhone, _msgOfertaRemarcacao(novosSlots));
     return true;
   }
 

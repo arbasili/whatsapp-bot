@@ -286,6 +286,18 @@ function mesclarTurnosConsecutivos(mensagens) {
   return mescladas;
 }
 
+// Detecta que o lead quer PARAR/desistir da remarcação (não escolher horário agora).
+// Usado para não prendê-lo num loop de "escolha um dos horários". "nenhum" de
+// propósito NÃO conta aqui: significa "esses não servem", e deve levar a pedir
+// outro dia, não a cancelar.
+function querPararRemarcacao(texto) {
+  const t = (texto || '').trim().toLowerCase();
+  if (!t) return false;
+  // Sem \b no fim: em JS \b não casa após letra acentuada ("lá"), o que fazia
+  // "deixa pra lá" escapar. O \b inicial já evita casar no meio de outra palavra.
+  return /\b(parar|para de|cancela(r)?|esque[çc]e|deixa (pra l[áa]|quieto|assim|isso)|desisto|desisti|n[ãa]o quero (mais|remarcar)|nunca mais)/.test(t);
+}
+
 module.exports = {
   textoDoConteudo,
   escolherSlot,
@@ -295,4 +307,5 @@ module.exports = {
   extrairNomeLead,
   interpretarRespostaEmail,
   mesclarTurnosConsecutivos,
+  querPararRemarcacao,
 };
