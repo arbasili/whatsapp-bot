@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.3';
+const BOT_VERSION = '1.10.4';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -240,6 +240,7 @@ async function initDb() {
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_action_at TIMESTAMPTZ`);
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ai_insights JSONB`);
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS summary_bullets JSONB`);
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS snooze_until TIMESTAMPTZ`);
 
   // Tabela de atividade da IA — feed de ações do bot para a visão geral do painel
   await pool.query(`
@@ -1690,6 +1691,27 @@ app.patch('/api/leads/:id', verificarToken, async (req, res) => {
   } catch (err) {
     console.error('Erro em PATCH /api/leads/:id:', err.message);
     res.status(500).json({ error: 'Erro ao editar lead' });
+  }
+});
+
+// PATCH /api/leads/:id/snooze — adia o lead nas filas de urgência do painel.
+// { horas: N } silencia por N horas; { horas: 0 } (ou null) cancela o adiamento.
+app.patch('/api/leads/:id/snooze', verificarToken, async (req, res) => {
+  try {
+    const horas = Number(req.body?.horas);
+    const ate = (!isNaN(horas) && horas > 0)
+      ? new Date(Date.now() + horas * 3600000).toISOString()
+      : null;
+    const { rows } = await pool.query(
+      `UPDATE leads SET snooze_until = $1, updated_at = updated_at WHERE id = $2 AND client_id = $3 RETURNING *`,
+      [ate, req.params.id, process.env.CLIENT_ID]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
+    emitirMudancaLeads();
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Erro em PATCH /api/leads/:id/snooze:', err.message);
+    res.status(500).json({ error: 'Erro ao adiar lead' });
   }
 });
 
