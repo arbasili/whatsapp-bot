@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.2';
+const BOT_VERSION = '1.10.3';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -1651,6 +1651,45 @@ app.patch('/api/leads/:id/notes', verificarToken, async (req, res) => {
   } catch (err) {
     console.error('Erro em PATCH /api/leads/:id/notes:', err.message);
     res.status(500).json({ error: 'Erro ao salvar nota' });
+  }
+});
+
+// PATCH /api/leads/:id — edição manual dos campos descritivos pelo vendedor.
+// Corrige o que a IA/heurística tiver errado (nome, email, segmento, dor) e TRAVA
+// a auto-atualização desses campos, pra o bot não sobrescrever a correção depois.
+app.patch('/api/leads/:id', verificarToken, async (req, res) => {
+  try {
+    const MAPA = { name: 'name', email: 'email', business_type: 'business_type', pain: 'pain' };
+    const sets = [];
+    const valores = [];
+    let idx = 1;
+    for (const [chave, coluna] of Object.entries(MAPA)) {
+      if (Object.prototype.hasOwnProperty.call(req.body, chave)) {
+        sets.push(`${coluna} = $${idx}`);
+        valores.push(typeof req.body[chave] === 'string' ? req.body[chave].trim() : req.body[chave]);
+        idx++;
+      }
+    }
+    if (sets.length === 0) return res.status(400).json({ error: 'Nenhum campo editável informado' });
+
+    sets.push('updated_at = NOW()');
+    valores.push(req.params.id, process.env.CLIENT_ID);
+    const { rows } = await pool.query(
+      `UPDATE leads SET ${sets.join(', ')} WHERE id = $${idx} AND client_id = $${idx + 1} RETURNING *`,
+      valores
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
+
+    // Trava a auto-atualização desses campos na sessão em memória (se o lead estiver ativo),
+    // pra heurística e gerarResumoParcial não desfazerem a edição manual no próximo turno.
+    const phone = rows[0].phone;
+    if (phone && agendamentos[phone]) agendamentos[phone].camposLimpos = true;
+
+    emitirMudancaLeads(); // outros painéis refletem a edição na hora
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Erro em PATCH /api/leads/:id:', err.message);
+    res.status(500).json({ error: 'Erro ao editar lead' });
   }
 });
 
