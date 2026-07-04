@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.1';
+const BOT_VERSION = '1.10.2';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -1702,15 +1702,26 @@ app.get('/api/stream', verificarToken, (req, res) => {
   streamClients.add(res);
   console.log(`[stream] Painel conectado (conexões ativas: ${streamClients.size})`);
 
+  // Limpeza única e idempotente — cobre close, error de socket e falha de escrita,
+  // pra nenhuma conexão morta ficar presa no Set com o heartbeat rodando à toa.
+  let fechado = false;
+  let heartbeat = null;
+  const encerrar = () => {
+    if (fechado) return;
+    fechado = true;
+    if (heartbeat) clearInterval(heartbeat);
+    streamClients.delete(res);
+    try { res.end(); } catch { /* já encerrado */ }
+  };
+
   // Heartbeat: mantém a conexão viva através de proxies/timeouts de ociosidade
-  const heartbeat = setInterval(() => {
-    try { res.write(': ping\n\n'); } catch { /* será limpo no close */ }
+  heartbeat = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch { encerrar(); }
   }, 25000);
 
-  req.on('close', () => {
-    clearInterval(heartbeat);
-    streamClients.delete(res);
-  });
+  req.on('close', encerrar);
+  req.on('error', encerrar);
+  res.on('error', encerrar);
 });
 
 // GET /api/health — heartbeat do bot com última atividade
