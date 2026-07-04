@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.9';
+const BOT_VERSION = '1.10.10';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -801,7 +801,7 @@ Regras:
 - score alto (70+): urgência imediata, dor clara, engajado, agendou
 - score médio (40-69): dor identificada mas sem urgência clara
 - score baixo (<40): pouco engajamento, dor vaga, não agendou
-- next_action deve ser específico como: "Realizar consultoria", "Enviar proposta", "Fazer follow-up em ${horasFollowup}"
+- next_action é SEMPRE uma ação HUMANA do vendedor, específica: "Preparar a demonstração para o segmento do lead", "Revisar o caso antes da reunião", "Enviar proposta", "Fazer follow-up em ${horasFollowup}". O sistema JÁ envia sozinho a confirmação da reunião, os lembretes e o link do Google Meet ao lead, então NUNCA sugira enviar confirmação, lembrete ou link como próxima ação (isso é automático, não é trabalho do vendedor).
 - A empresa está começando e AINDA NÃO TEM cases, clientes ou números de resultado: NUNCA recomende apresentar cases, depoimentos ou métricas de clientes. Recomendações devem se apoiar em demonstração ao vivo, diagnóstico do caso específico do lead e proposta personalizada.`;
 
     const inicioIA = Date.now();
