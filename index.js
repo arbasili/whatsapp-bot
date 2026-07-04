@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.9.12';
+const BOT_VERSION = '1.10.0';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -53,6 +53,20 @@ const apiLimiter = criarRateLimiter({
   message: { error: 'Muitas requisições. Tente novamente em instantes.' }
 });
 app.use('/api', apiLimiter);
+
+// ─── SSE: stream de mudanças de leads para o painel (tempo real) ──────────────
+// O painel abre uma conexão persistente (GET /api/stream) e recebe um "ping" toda
+// vez que um lead muda; aí ele re-busca na hora, em vez de re-baixar tudo a cada X
+// segundos (polling). É o padrão push dos CRMs de ponta, feito no próprio bot
+// porque a tabela leads vive no Postgres do Railway (Supabase aqui é só auth).
+const streamClients = new Set(); // Set<res> de painéis conectados
+function emitirMudancaLeads() {
+  if (streamClients.size === 0) return;
+  const payload = `data: ${JSON.stringify({ tipo: 'leads', ts: Date.now() })}\n\n`;
+  for (const res of streamClients) {
+    try { res.write(payload); } catch { /* conexão morta — será limpa no evento close */ }
+  }
+}
 
 // CORS — aceita requisições do painel CRM
 app.use(cors({
@@ -578,6 +592,7 @@ async function registrarLeadInicial(phone, origem = '') {
        ON CONFLICT (client_id, phone) DO NOTHING`,
       [CLIENT_ID, phone, FUNIL.EM_CONVERSA, origem]
     );
+    emitirMudancaLeads(); // novo lead → painel atualiza na hora
   } catch (err) {
     console.error(`[${mascararTelefone(phone)}] Erro ao registrar lead inicial:`, err.message);
     leadsRegistradosPg.delete(phone); // libera lock para permitir nova tentativa
@@ -636,6 +651,7 @@ async function atualizarLead(phone, dados) {
         valores
       );
     }
+    emitirMudancaLeads(); // mudança de campo/etapa → painel atualiza na hora
   } catch (err) {
     console.error(`[${mascararTelefone(phone)}] Erro ao atualizar lead:`, err.message);
   }
@@ -820,6 +836,7 @@ Regras:
     );
 
     registrarAtividade(nome || 'Lead', agendou ? 'Gerou score pós-agendamento' : 'Gerou score parcial').catch(() => {});
+    emitirMudancaLeads(); // score/insights atualizados → painel atualiza na hora
     console.log(`[IA] Score calculado para ${mascararTelefone(phone)}: score=${dados.score}, close=${dados.close_probability}%`);
     return dados;
   } catch (err) {
@@ -1561,6 +1578,7 @@ app.patch('/api/leads/:id/status', verificarToken, async (req, res) => {
       [status, sigla, req.params.id, process.env.CLIENT_ID, `%${sigla}%`]
     );
     if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
+    emitirMudancaLeads(); // move manual do painel → outros painéis atualizam na hora
     res.json(rows[0]);
   } catch (err) {
     console.error('Erro em PATCH /api/leads/:id/status:', err.message);
@@ -1615,6 +1633,33 @@ app.get('/api/activity', verificarToken, async (req, res) => {
     console.error('Erro em GET /api/activity:', err.message);
     res.status(500).json({ error: 'Erro ao buscar atividade' });
   }
+});
+
+// GET /api/stream — Server-Sent Events: empurra um ping ao painel a cada mudança
+// de lead, para ele atualizar em tempo real (o padrão push dos CRMs de ponta).
+// Autenticado como as demais rotas (o painel abre com fetch-stream + Bearer).
+app.get('/api/stream', verificarToken, (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no', // impede o proxy de bufferizar o stream
+  });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  res.write(': conectado\n\n'); // comentário inicial abre o stream no cliente
+
+  streamClients.add(res);
+  console.log(`[stream] Painel conectado (conexões ativas: ${streamClients.size})`);
+
+  // Heartbeat: mantém a conexão viva através de proxies/timeouts de ociosidade
+  const heartbeat = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch { /* será limpo no close */ }
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    streamClients.delete(res);
+  });
 });
 
 // GET /api/health — heartbeat do bot com última atividade
