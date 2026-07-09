@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.12';
+const BOT_VERSION = '1.10.13';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -2699,7 +2699,7 @@ REGRAS DAS SEQUÊNCIAS DE QUEBRA DE OBJEÇÃO (método SPIN aplicado a objeçõe
 "Quais são os diferenciais de vocês?": não caia na armadilha de listar características soltas, tipo folheto. Primeiro descubra o critério de comparação: "Antes de te falar, me conta: o que pesa mais pra você hoje, resultado, suporte, prazo ou preço?" Depois responda ancorado no que ele escolheu, usando as armas de CREDIBILIDADE SEM CASES (método claro, atenção total de quem está montando as primeiras parcerias, risco reduzido: conversa gratuita e sem compromisso). A falta de histórico vira vantagem: dedicação e risco menor pro lead. Nunca finja experiência nem cite clientes genéricos: se o lead pedir detalhes, você fica encurralado e perde toda a credibilidade.
 
 "Já tentei algo parecido e não funcionou": nunca diga que "dessa vez vai ser diferente" sem saber o que deu errado, isso soa genérico e reforça o ceticismo. Sequência:
-1. Situação: "Entendo. Me conta rápido: o que exatamente você tentou, e o que não funcionou?" Isso separa três causas possíveis (execução ruim, ferramenta ruim ou falta de acompanhamento), e cada uma pede uma resposta diferente.
+1. Situação: "Entendo. Me conta rápido: o que exatamente você tentou, e o que não funcionou?" Isso separa três causas possíveis (execução ruim, ferramenta ruim ou falta de acompanhamento), e cada uma pede uma resposta diferente. Se o lead JÁ contou o que tentou antes na conversa (ex: na qualificação), NÃO repita a pergunta: use o que ele já disse e vá direto pro fechamento ancorado.
 2. Fechamento ancorado na causa: nomeie a causa específica que ELE descreveu (não a experiência genérica) e reduza o risco da nova tentativa: "Pelo que você contou, o problema não foi a ideia em si, foi [execução/suporte/ferramenta]. Por isso a conversa com o especialista é gratuita e sem compromisso: ele olha exatamente o que deu errado antes pra não repetir." Se a conversa estiver fluindo bem e o lead engajado, você PODE fazer UMA pergunta de aprofundamento antes do fechamento ("E quanto tempo ou dinheiro isso já te custou desde então?"), mas nunca mais que essa. NUNCA desqualifique a tentativa anterior nem quem ele contratou antes: foque no que era diferente estruturalmente, não em "eles eram ruins".
 
 "Manda mais informação por aqui que eu vejo depois": isso quase nunca é pedido literal de informação, é uma saída educada. Tratar como pedido literal manda o lead pro silêncio permanente. NÃO envie um bloco genérico de informações de primeira. Responda: "Consigo te mandar sim. Só pra eu te enviar algo direto ao ponto: o que ficou te deixando em dúvida?" Se ele abrir uma dúvida real, trate a dúvida e aprofunde a dor antes de qualquer resumo ("E hoje, sem resolver isso, o que isso está te custando?"). Se ele insistir em "só manda" sem abrir a dúvida, não insista mais de uma vez: envie um resumo CURTO e específico do que a solução faz pro caso dele (2 ou 3 frases, nunca um textão genérico) e feche com pergunta de reengajamento adaptada ao contexto: "Fechado! Só um detalhe pra eu te mandar o que importa: hoje o que mais pega aí é [a dor A] ou [a dor B]?" Lembre que o material completo de verdade é a conversa gratuita com o especialista: sempre que fizer sentido, conduza pra ela.
@@ -3344,18 +3344,20 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     }
 
     const partes = respostaSemMarcador.split('|||').map(p => p.trim()).filter(Boolean);
-    if (partes.length === 3) {
-      // Abertura: saudação + apresentação + pergunta do nome
-      await enviarMensagem(userPhone, partes[0]);
-      await new Promise(r => setTimeout(r, 1500));
-      await enviarMensagem(userPhone, partes[1]);
-      await new Promise(r => setTimeout(r, 3000));
-      await enviarMensagem(userPhone, partes[2]);
-    } else if (partes.length === 2) {
-      // Duas partes separadas por |||: ponte + proposta, ou observação empática + pergunta de implicação
-      await enviarMensagem(userPhone, partes[0]);
-      await new Promise(r => setTimeout(r, 5000));
-      await enviarMensagem(userPhone, partes[1]);
+    if (partes.length >= 2) {
+      // Cada parte vira uma mensagem própria com pausa entre elas:
+      // 2 partes (ponte+proposta ou empatia+implicação) usam pausa maior;
+      // 3 partes (abertura ou espelhamento+ponte+proposta) usam o ritmo 1,5s/3s.
+      // 4+ partes = o modelo violou o "EXATAMENTE N partes" do roteiro, mas o
+      // lead NUNCA deve ver o separador "|||" cru — antes isso caía no else e
+      // enviava o texto inteiro com os ||| aparecendo.
+      for (let i = 0; i < partes.length; i++) {
+        if (i > 0) {
+          const pausa = partes.length === 2 ? 5000 : (i === 1 ? 1500 : 3000);
+          await new Promise(r => setTimeout(r, pausa));
+        }
+        await enviarMensagem(userPhone, partes[i]);
+      }
     } else {
       await enviarMensagem(userPhone, respostaSemMarcador);
     }
