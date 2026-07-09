@@ -24,7 +24,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.18';
+const BOT_VERSION = '1.10.19';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -2482,6 +2482,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     }
     await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
     registrarEtapaFunil(userPhone, FUNIL.REUNIAO_AGENDADA).catch(e => console.error('funil confirmado:', e.message));
+    delete ag.cancelamentoPendente; // mudou de ideia: mantém a reunião
     ag.presencaConfirmada = true;
     ag.presencaConfirmadaEm = Date.now();
     const saud = ag.nome ? `Combinado, ${ag.nome}!` : 'Combinado!';
@@ -2490,14 +2491,32 @@ async function tratarPosAgendamento(userPhone, userText) {
     return true;
   }
 
-  // CANCELAR: o lead quer desmarcar de vez, sem outro horário agora. Antes não
-  // existia este fluxo — "quero cancelar"/"desmarcar" caía em REMARCAR e o bot
-  // empurrava horários em loop pra quem só queria sair (visto em produção).
+  // CANCELAR: o lead quer desmarcar. Antes de cancelar de vez, o bot tenta
+  // entender UMA única vez (bifurcação desmarcar x outro dia) — "quero
+  // cancelar" muitas vezes esconde um conflito de agenda remarcável. Regras:
+  // nunca pergunta duas vezes; se o lead já deu motivo firme, cancela direto;
+  // se a resposta à pergunta for ambígua, cancela (respeita o pedido original).
   if (intencao === 'cancelar') {
+    const t = (userText || '').toLowerCase();
+    const motivoFirme = /n[ãa]o (tenho|quero) mais|sem interesse|desisti|cancela tudo|definitivo|n[ãa]o vou (fechar|contratar|querer)/.test(t);
+    if (!ag.cancelamentoPendente && !motivoFirme) {
+      ag.cancelamentoPendente = true;
+      await enviarERegistrar(userPhone, 'Claro, sem problema! Só me confirma uma coisa: prefere que eu desmarque de vez, ou quer que eu veja um outro dia que encaixe melhor pra você?');
+      return true;
+    }
+    return await cancelarReuniaoLead(userPhone, ag);
+  }
+
+  // Resposta ambígua à pergunta "desmarcar de vez ou outro dia?" — cancela,
+  // respeitando o pedido original. As respostas claras já foram roteadas pelo
+  // classificador (CANCELAR → cancela; REMARCAR → remarcação; CONFIRMAR →
+  // mudou de ideia e mantém).
+  if (intencao === 'duvida' && ag.cancelamentoPendente) {
     return await cancelarReuniaoLead(userPhone, ag);
   }
 
   if (intencao === 'remarcar') {
+    delete ag.cancelamentoPendente; // escolheu "outro dia" em vez de desmarcar
     // Limite de remarcações: máximo 2 vezes
     const totalRemarcacoes = ag.totalRemarcacoes || 0;
     if (totalRemarcacoes >= 2) {
