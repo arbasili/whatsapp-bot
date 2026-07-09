@@ -24,7 +24,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.16';
+const BOT_VERSION = '1.10.17';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -2257,6 +2257,46 @@ function _msgOfertaRemarcacao(slots) {
   return `Consigo ${slots[0].label}. Posso reservar esse?`;
 }
 
+// Cancela a reunião do lead de ponta a ponta: evento no Calendar, estado em
+// memória, horário/link no CRM, notificação ao dono e confirmação ao lead.
+// Chamado tanto pela intenção CANCELAR (classificador) quanto de dentro do
+// modo remarcação, quando o lead pede explicitamente pra desmarcar.
+async function cancelarReuniaoLead(userPhone, ag) {
+  log(userPhone, 'info', 'Lead pediu cancelamento da reunião.');
+  await cancelarEvento(ag.eventId);
+  const labelCancelada = ag.label;
+  const labelInterna = ag.labelCG || ag.label;
+  const nomeCancel = ag.nome || '';
+  delete agendamentosConfirmados[userPhone];
+  leadsAgendados.delete(userPhone);
+  delete followUpStatus[userPhone]; // sem follow-up automático em cima de quem cancelou
+  leadsEncerrados.add(userPhone);   // se ele voltar, o histórico dá o contexto
+
+  // Limpa o horário no CRM (atualizarLead ignora valores vazios, então é UPDATE direto)
+  pool.query(
+    `UPDATE leads SET scheduled_at = NULL, scheduled_at_ts = NULL, meet_link = NULL,
+            status = 'Pronto para agendar', updated_at = NOW()
+     WHERE phone = $1 AND client_id = $2`,
+    [userPhone, CLIENT_ID]
+  ).then(() => emitirMudancaLeads()).catch(e => console.error('cancelamento CRM:', e.message));
+
+  registrarAtividade(nomeCancel || 'Lead', 'Cancelou reunião').catch(() => {});
+  enviarMensagem(MEU_NUMERO, `*Reunião cancelada pelo lead*\n\nNome: ${nomeCancel || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário que estava marcado: ${labelInterna}\n\nO lead pediu para desmarcar. Evento removido do Calendar.`).catch(() => {});
+
+  const trato = nomeCancel ? `Tudo bem, ${nomeCancel}!` : 'Tudo bem!';
+  await enviarERegistrar(userPhone, `${trato} Desmarquei sua conversa de ${labelCancelada}. Quando quiser retomar, é só me chamar por aqui que a gente encontra um novo horário. 😊`);
+  return true;
+}
+
+// Pedido EXPLÍCITO de desmarcar a reunião — usado dentro do modo remarcação,
+// onde querPararRemarcacao trata "cancela" solto como "parar de remarcar"
+// (mantendo a reunião). "desmarcar" e "quero cancelar" não são ambíguos: é a
+// reunião que o lead quer cancelar, não a troca de horário.
+function _querCancelarReuniao(texto) {
+  const t = (texto || '').trim().toLowerCase();
+  return /\bdesmarc|quero cancelar|cancela(r)? (a |o )?(reuni[ãa]o|conversa|consultoria)|cancela tudo/.test(t);
+}
+
 async function tratarPosAgendamento(userPhone, userText) {
   const ag = agendamentosConfirmados[userPhone];
   if (!ag) return false;
@@ -2304,6 +2344,14 @@ async function tratarPosAgendamento(userPhone, userText) {
       // Lead não escolheu um dos horários oferecidos. Antes só repetia as opções em
       // loop — agora: (1) se quer parar, para; (2) se pediu outro dia, atende; (3)
       // senão pede o dia, com teto de tentativas pra escalar em vez de travar.
+
+      // (0) Pedido explícito de DESMARCAR a reunião ("desmarcar", "quero
+      // cancelar") — checado ANTES do querPararRemarcacao, que trata "cancela"
+      // solto como parar de remarcar e responderia "sua conversa segue
+      // marcada" pra quem quer justamente o contrário (visto em produção).
+      if (_querCancelarReuniao(userText)) {
+        return await cancelarReuniaoLead(userPhone, ag);
+      }
 
       // (1) Quer parar/desistir — mantém a reunião atual
       if (querPararRemarcacao(userText)) {
@@ -2439,30 +2487,7 @@ async function tratarPosAgendamento(userPhone, userText) {
   // existia este fluxo — "quero cancelar"/"desmarcar" caía em REMARCAR e o bot
   // empurrava horários em loop pra quem só queria sair (visto em produção).
   if (intencao === 'cancelar') {
-    log(userPhone, 'info', 'Lead pediu cancelamento da reunião.');
-    await cancelarEvento(ag.eventId);
-    const labelCancelada = ag.label;
-    const labelInterna = ag.labelCG || ag.label;
-    const nomeCancel = ag.nome || '';
-    delete agendamentosConfirmados[userPhone];
-    leadsAgendados.delete(userPhone);
-    delete followUpStatus[userPhone]; // sem follow-up automático em cima de quem cancelou
-    leadsEncerrados.add(userPhone);   // se ele voltar, o histórico dá o contexto
-
-    // Limpa o horário no CRM (atualizarLead ignora valores vazios, então é UPDATE direto)
-    pool.query(
-      `UPDATE leads SET scheduled_at = NULL, scheduled_at_ts = NULL, meet_link = NULL,
-              status = 'Pronto para agendar', updated_at = NOW()
-       WHERE phone = $1 AND client_id = $2`,
-      [userPhone, CLIENT_ID]
-    ).then(() => emitirMudancaLeads()).catch(e => console.error('cancelamento CRM:', e.message));
-
-    registrarAtividade(nomeCancel || 'Lead', 'Cancelou reunião').catch(() => {});
-    enviarMensagem(MEU_NUMERO, `*Reunião cancelada pelo lead*\n\nNome: ${nomeCancel || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário que estava marcado: ${labelInterna}\n\nO lead pediu para desmarcar. Evento removido do Calendar.`).catch(() => {});
-
-    const trato = nomeCancel ? `Tudo bem, ${nomeCancel}!` : 'Tudo bem!';
-    await enviarERegistrar(userPhone, `${trato} Desmarquei sua conversa de ${labelCancelada}. Quando quiser retomar, é só me chamar por aqui que a gente encontra um novo horário. 😊`);
-    return true;
+    return await cancelarReuniaoLead(userPhone, ag);
   }
 
   if (intencao === 'remarcar') {
