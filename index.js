@@ -24,7 +24,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.15';
+const BOT_VERSION = '1.10.16';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -1543,15 +1543,26 @@ setInterval(async () => {
       continue;
     }
 
+    // Lead no meio de uma remarcação: segura os lembretes da reunião atual —
+    // "Você consegue comparecer?" atropelava a negociação de novo horário em
+    // andamento (visto em produção: bot pediu o dia às 13:43 e o lembrete de
+    // 24h confirmou o horário antigo às 14:02). Quando a remarcação resolve
+    // (novo slot, desistência, adiamento ou escalada), remarcando volta a
+    // false e os lembretes seguem normalmente. O bloco de no-show acima roda
+    // antes desta checagem de propósito, pra não ficar suprimido junto.
+    if (ag.remarcando) continue;
+
     const saud = ag.nome ? `Oi ${ag.nome}` : 'Oi';
-    const negocio = ag.tipoNegocio ? ` pra ${ag.tipoNegocio}` : '';
+    // Parêntese neutro no lugar de "pra {segmento}": encaixado depois de
+    // "você tem" gerava frase quebrada ("você tem pra Consultoria de crédito")
+    // e "o seu {segmento}" errava o gênero ("o seu Consultoria").
+    const negocioParen = ag.tipoNegocio ? ` (${ag.tipoNegocio})` : '';
 
     // Lembrete 30 min antes (com link) — tem prioridade, ignora horário de silêncio
     if (tempoAteReuniao <= LEMBRETE_30MIN_MS && !ag.lembrete30minEnviado) {
       const nomeLabel = ag.nome ? `${ag.nome}, ` : '';
-      const negocioLabel = ag.tipoNegocio ? ` sobre o seu ${ag.tipoNegocio}` : '';
-      let msg = `${nomeLabel}sua conversa${negocioLabel} com o especialista começa em instantes (${ag.label}). É só entrar por aqui: ${ag.meetLink || ''}`;
-      if (!ag.meetLink) msg = `${nomeLabel}sua conversa${negocioLabel} com o especialista começa em instantes (${ag.label}). O especialista vai te enviar o link agora!`;
+      let msg = `${nomeLabel}sua conversa com o especialista começa em instantes (${ag.label}). É só entrar por aqui: ${ag.meetLink || ''}`;
+      if (!ag.meetLink) msg = `${nomeLabel}sua conversa com o especialista começa em instantes (${ag.label}). O especialista vai te enviar o link agora!`;
       msg += `\n\nTe espero lá!`;
       await enviarERegistrar(phone, msg);
       ag.lembrete30minEnviado = true;
@@ -1562,7 +1573,7 @@ setInterval(async () => {
     // Lembrete 2h antes — respeita horário de silêncio
     else if (tempoAteReuniao <= LEMBRETE_2H_MS && !ag.lembrete2hEnviado && !dentroDoHorarioSilencio()) {
       let msg = `${saud}! Só passando pra lembrar que sua conversa é hoje, ${ag.label}.`;
-      msg += negocio ? ` O especialista já sabe que você tem${negocio} e vai chegar preparado pro seu caso.` : '';
+      msg += ag.tipoNegocio ? ` O especialista já conhece o seu caso${negocioParen} e vai chegar preparado.` : '';
       msg += ` Daqui a pouco te mando o link pra entrar, tá? 😊`;
       await enviarERegistrar(phone, msg);
       ag.lembrete2hEnviado = true;
@@ -1575,7 +1586,7 @@ setInterval(async () => {
     // Lembrete 24h antes — respeita horário de silêncio
     else if (tempoAteReuniao <= LEMBRETE_24H_MS && !ag.lembrete24hEnviado && !dentroDoHorarioSilencio()) {
       let msg = `${saud}! Passando pra confirmar nossa conversa de amanhã, ${ag.label}.`;
-      msg += negocio ? ` O especialista já está ciente que você tem${negocio} e vai chegar preparado.` : '';
+      msg += ag.tipoNegocio ? ` O especialista já conhece o seu caso${negocioParen} e vai chegar preparado.` : '';
       msg += ` Você consegue comparecer?`;
       await enviarERegistrar(phone, msg);
       ag.lembrete24hEnviado = true;
