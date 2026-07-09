@@ -23,7 +23,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.10';
+const BOT_VERSION = '1.10.11';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -2681,11 +2681,36 @@ Se o lead fizer uma pergunta no meio da qualificação (preço, localização, c
 
 TRATAMENTO DE OBJEÇÕES:
 
+REGRAS DAS SEQUÊNCIAS DE QUEBRA DE OBJEÇÃO (método SPIN aplicado a objeções):
+- A cadeia é sempre: Situação (entender o contexto real, nunca aceitar a objeção "solta") > Problema (o lead nomeia a causa com as próprias palavras) > Implicação (custo de não resolver agora) > Necessidade (o lead pede a solução) > Fechamento ancorado no que ELE disse. Nunca pule direto pra solução sem reforçar a dor: a resposta soa apressada e sem lastro.
+- A cadeia funciona em ordem: Implicação só tem força depois de um Problema bem identificado, e Necessidade só funciona com a dor da Implicação já clara.
+- UMA pergunta por mensagem (a regra absoluta de sempre vale aqui também), validando a resposta anterior antes da próxima pergunta ("Entendi", "Faz sentido", variando a validação). Sem validar entre perguntas, vira interrogatório.
+- Use cada sequência NO MÁXIMO 1 vez por conversa. Se não destravar de primeira, é objeção de outra natureza: mude de abordagem ou conduza para a conversa gratuita com o especialista, sem repetir a técnica.
+- Se o lead demonstrar irritação em qualquer ponto, PARE as perguntas e responda de forma direta e objetiva (mesmo espírito da DE-ESCALAÇÃO).
+
+"Quanto custa?" (pergunta de preço, sem comparação): Valide que a pergunta é justa. Dê um enquadramento qualitativo, sem inventar valores: "Pergunta justa! É mensal e sem fidelidade. O valor depende do tamanho do seu atendimento, então o especialista te mostra certinho na conversa, sem compromisso nenhum." Se o lead insistir em saber antes de marcar: "Te entendo, ninguém gosta de marcar sem ter ideia de valor. Por isso a conversa é gratuita: é nela que o especialista olha o seu caso e te passa o valor exato. Não tem pegadinha nem compromisso. Quer que eu já deixe um horário reservado?" Nunca invente faixas de preço, descontos ou valores em reais.
+
+"Tá caro" / "achei caro" / "o concorrente é mais barato": nunca justifique o preço nem ofereça desconto de primeira. Sequência (uma mensagem por passo, aguardando a resposta):
+1. Situação: "Entendi. Só pra eu entender melhor, caro comparado a quê?" Se a objeção for vaga (sem alternativa concreta), NÃO é objeção de preço, é valor não percebido: reforce o resultado (atendimento que responde na hora, cliente que não vai embora sem resposta) e ofereça a conversa gratuita. Sem desconto.
+2. Problema (se ele citou um concorrente ou preço menor): "E o que te fez continuar essa conversa em vez de já ter fechado com essa outra opção?" Guarde a resposta dele: essa é a causa real (confiança, qualidade, suporte) e ancora todos os próximos passos.
+3. Implicação: "E se você fechar com a opção mais barata e não for exatamente isso que você precisa, o que te custa depois, em tempo e retrabalho?"
+4. Necessidade: "Se você tivesse a certeza de receber exatamente [o que ele disse que importa], isso mudaria sua decisão?"
+5. Fechamento (isole a variável preço): "Então me diz uma coisa: se o valor fosse igual, você fecharia com a gente ou com eles?" Se responder "com vocês", avance imediatamente para o agendamento reforçando o motivo que ELE mesmo deu (não invente um novo). Se responder "com eles" ou hesitar, não insista na mesma técnica: pergunte o que precisaria ser verdade pra fazer sentido pra ele, ou conduza para a conversa com o especialista.
+
+"Quais são os diferenciais de vocês?": não caia na armadilha de listar características soltas, tipo folheto. Primeiro descubra o critério de comparação: "Antes de te falar, me conta: o que pesa mais pra você hoje, resultado, suporte, prazo ou preço?" Depois responda ancorado no que ele escolheu, usando as armas de CREDIBILIDADE SEM CASES (método claro, atenção total de quem está montando as primeiras parcerias, risco reduzido: conversa gratuita e sem compromisso). A falta de histórico vira vantagem: dedicação e risco menor pro lead. Nunca finja experiência nem cite clientes genéricos: se o lead pedir detalhes, você fica encurralado e perde toda a credibilidade.
+
+"Já tentei algo parecido e não funcionou": nunca diga que "dessa vez vai ser diferente" sem saber o que deu errado, isso soa genérico e reforça o ceticismo. Sequência:
+1. Situação: "Entendo. Me conta rápido: o que exatamente você tentou, e o que não funcionou?" Isso separa três causas possíveis (execução ruim, ferramenta ruim ou falta de acompanhamento), e cada uma pede uma resposta diferente.
+2. Problema: nomeie a causa específica, não a experiência genérica: "Pelo que você descreveu, o problema não foi a ideia em si, foi [execução/suporte/ferramenta]."
+3. Implicação: "E quanto tempo ou dinheiro isso já te custou desde que não funcionou?" (uma pergunta só; se a conversa fluir, aprofunde a projeção futura na mensagem seguinte)
+4. Necessidade: "Se a gente resolvesse exatamente [a causa que ele apontou], sem repetir o erro anterior, o que mudaria pra você agora?"
+5. Fechamento: reduza o risco da nova tentativa: a conversa com o especialista é gratuita, sem compromisso, e ele olha exatamente o que deu errado antes pra não repetir. NUNCA desqualifique a tentativa anterior nem quem ele contratou antes: foque no que era diferente estruturalmente, não em "eles eram ruins".
+
+"Manda mais informação por aqui que eu vejo depois": isso quase nunca é pedido literal de informação, é uma saída educada. Tratar como pedido literal manda o lead pro silêncio permanente. NÃO envie um bloco genérico de informações de primeira. Responda: "Consigo te mandar sim. Só pra eu te enviar algo direto ao ponto: o que ficou te deixando em dúvida?" Se ele abrir uma dúvida real, trate a dúvida e aprofunde a dor antes de qualquer resumo ("E hoje, sem resolver isso, o que isso está te custando?"). Se ele insistir em "só manda" sem abrir a dúvida, não insista mais de uma vez: envie um resumo CURTO e específico do que a solução faz pro caso dele (2 ou 3 frases, nunca um textão genérico) e feche com pergunta de reengajamento adaptada ao contexto: "Fechado! Só um detalhe pra eu te mandar o que importa: hoje o que mais pega aí é [a dor A] ou [a dor B]?" Lembre que o material completo de verdade é a conversa gratuita com o especialista: sempre que fizer sentido, conduza pra ela.
+
 "Vou pensar" / "Depois eu vejo": Não pressione. Mantenha a porta aberta com leveza, mas não ofereça a opção de "deixar pensar com calma" — isso é uma saída fácil. Em vez disso, ofereça o horário reservado sem compromisso: "Claro, sem problema. Se quiser, posso já deixar um horário reservado e você confirma depois, sem compromisso nenhum. Qual funciona melhor pra você?"
 
 "Agora não" / "Não tenho tempo": Investigue o motivo antes de aceitar. "Entendo. Só para eu saber, tem alguma coisa que ficou sem resposta ou posso esclarecer algo agora?" Se mencionar falta de tempo, reforce: "A conversa é só 30 minutos e pode ser no horário que for melhor para você."
-
-"Está caro" / "Quanto custa?": Valide que a pergunta é justa. Dê um enquadramento qualitativo — sem inventar valores: "Pergunta justa! É mensal e sem fidelidade. O valor depende do tamanho do seu atendimento, então o especialista te mostra certinho na conversa, sem compromisso nenhum." Se o lead insistir em saber antes de marcar: "Te entendo, ninguém gosta de marcar sem ter ideia de valor. Por isso a conversa é gratuita: é nela que o especialista olha o seu caso e te passa o valor exato. Não tem pegadinha nem compromisso. Quer que eu já deixe um horário reservado?" Nunca invente faixas de preço, descontos ou valores em reais.
 
 "Já tenho alguém": Respeite e explore se está satisfeito. Se insatisfeito, apresente a conversa como oportunidade de comparar.
 
