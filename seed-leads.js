@@ -173,7 +173,9 @@ async function seed() {
 
     const closeProb = Math.min(98, score + rand(-10, 10));
 
-    const nextActions = ['Realizar consultoria', 'Enviar proposta', 'Fazer follow-up', 'Agendar reunião', 'Enviar lembrete', 'Ligar para o lead'];
+    // Só ações HUMANAS do vendedor — 'Enviar lembrete' saiu porque o bot já
+    // envia lembretes sozinho (mesma regra do prompt real, bot v1.10.10)
+    const nextActions = ['Realizar consultoria', 'Enviar proposta', 'Fazer follow-up', 'Agendar reunião', 'Preparar demonstração', 'Ligar para o lead'];
     const nextAction = pick(nextActions);
 
     const created = randomDate(30);
