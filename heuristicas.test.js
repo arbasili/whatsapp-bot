@@ -12,6 +12,7 @@ const {
   interpretarRespostaEmail,
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
+  querAdiarRemarcacao,
 } = require('./heuristicas');
 
 // Monta uma conversa mínima: roteiro + ack + turnos reais
@@ -360,6 +361,26 @@ test('querPararRemarcacao NÃO dispara em pedido de horário ou "nenhum"', () =>
   assert.ok(!querPararRemarcacao('quinta de manhã'))
   assert.ok(!querPararRemarcacao('pode ser as 15h'))
   assert.ok(!querPararRemarcacao('nenhum')) // "nenhum" leva a pedir outro dia, não a cancelar
+})
+
+// ─── querAdiarRemarcacao ─────────────────────────────────────────────────────
+// Bug real: "vou ver" contava como tentativa falha, o bot repetia a pergunta e
+// estourava o teto escalando pra equipe, pra quem só pediu um tempo.
+
+test('querAdiarRemarcacao detecta adiamento educado', () => {
+  assert.ok(querAdiarRemarcacao('vou ver'))
+  assert.ok(querAdiarRemarcacao('vou ver e te falo'))
+  assert.ok(querAdiarRemarcacao('depois te aviso'))
+  assert.ok(querAdiarRemarcacao('deixa eu ver aqui e te falo'))
+  assert.ok(querAdiarRemarcacao('preciso ver com minha esposa'))
+  assert.ok(querAdiarRemarcacao('qualquer coisa te chamo'))
+})
+
+test('querAdiarRemarcacao NÃO dispara em escolha nem desistência', () => {
+  assert.ok(!querAdiarRemarcacao('quinta às 15h'))
+  assert.ok(!querAdiarRemarcacao('pode ser o primeiro'))
+  assert.ok(!querAdiarRemarcacao('deixa pra lá'))
+  assert.ok(!querAdiarRemarcacao('dia 11'))
 })
 
 // ─── textoDoConteudo ─────────────────────────────────────────────────────────

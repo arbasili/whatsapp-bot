@@ -298,6 +298,16 @@ function querPararRemarcacao(texto) {
   return /\b(parar|para de|cancela(r)?|esque[çc]e|deixa (pra l[áa]|quieto|assim|isso)|desisto|desisti|n[ãa]o quero (mais|remarcar)|nunca mais)/.test(t);
 }
 
+// Detecta que o lead quer ADIAR a escolha do novo horário ("vou ver", "depois
+// te falo") — diferente de parar (desistir) e de não ter entendido. Sem isso,
+// "vou ver" contava como tentativa falha, o bot repetia a pergunta e estourava
+// o teto escalando pra equipe, pra quem só pediu um tempo (visto em produção).
+function querAdiarRemarcacao(texto) {
+  const t = (texto || '').trim().toLowerCase();
+  if (!t) return false;
+  return /\b(vou ver|vou olhar|vou verificar|vou conferir|deixa eu ver|preciso ver|vejo (e te falo|quando)|depois (eu )?(te )?(falo|aviso|vejo|confirmo)|te (falo|aviso|confirmo) (depois|mais tarde|amanh[ãa])|qualquer coisa (eu )?(te )?chamo|assim que (eu )?souber)\b/.test(t);
+}
+
 module.exports = {
   textoDoConteudo,
   escolherSlot,
@@ -308,4 +318,5 @@ module.exports = {
   interpretarRespostaEmail,
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
+  querAdiarRemarcacao,
 };

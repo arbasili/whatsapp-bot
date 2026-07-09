@@ -18,12 +18,13 @@ const {
   interpretarRespostaEmail,
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
+  querAdiarRemarcacao,
 } = require('./heuristicas');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.13';
+const BOT_VERSION = '1.10.14';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -1109,15 +1110,24 @@ async function interpretarPedidoData(texto) {
   // 1. Descobrir o DIA pedido (hoje/amanhã, dia da semana ou "dia N")
   let diaAlvo = null;
 
-  // a) hoje / amanhã / depois de amanhã
+  // a) hoje / amanhã / depois de amanhã / semana que vem
+  // Sem \b no fim de amanh[ãa]: em JS \b não casa após letra acentuada, então
+  // /\bamanh[ãa]\b/ NUNCA casava com "amanhã" (só "amanha" sem acento) — visto
+  // em produção: lead disse "a minha é pra amanhã" e o bot não entendeu o dia.
+  // Mesma classe de bug do "deixa pra lá" em querPararRemarcacao.
   if (/\bhoje\b/.test(t)) {
     diaAlvo = new Date(horaCG);
-  } else if (/\bdepois\s+de\s+amanh[ãa]\b/.test(t)) {
+  } else if (/\bdepois\s+de\s+amanh[ãa]/.test(t)) {
     diaAlvo = new Date(horaCG);
     diaAlvo.setDate(diaAlvo.getDate() + 2);
-  } else if (/\bamanh[ãa]\b/.test(t)) {
+  } else if (/\bamanh[ãa]/.test(t)) {
     diaAlvo = new Date(horaCG);
     diaAlvo.setDate(diaAlvo.getDate() + 1);
+  } else if (/\bsemana\s+que\s+vem\b|\bpr[óo]xima\s+semana\b/.test(t)) {
+    // "semana que vem" sem dia específico: assume a próxima segunda-feira
+    diaAlvo = new Date(horaCG);
+    const ateSegunda = ((8 - diaAlvo.getDay()) % 7) || 7;
+    diaAlvo.setDate(diaAlvo.getDate() + ateSegunda);
   }
 
   // b) dia da semana
@@ -1165,8 +1175,10 @@ async function interpretarPedidoData(texto) {
     horaAlvo = horaBrasilia - 1; // converte Brasília -> Campo Grande
   }
 
-  // Período mencionado
-  const pediuManha = /manh[ãa]/.test(t);
+  // Período mencionado. (?:^|\s) no lugar de casar solto: "amanhã" CONTÉM
+  // "manhã", então /manh[ãa]/ marcava período da manhã pra quem só disse
+  // "pode ser amanhã" — restringindo os horários oferecidos sem motivo.
+  const pediuManha = /(?:^|\s)manh[ãa]/.test(t);
   const pediuTarde = /tarde/.test(t);
 
   // 3. Decidir o retorno
@@ -1254,6 +1266,19 @@ async function remarcarEvento(eventId, novoInicio, novoFim) {
     return true;
   } catch (err) {
     console.error('Erro ao remarcar evento:', err.message);
+    return false;
+  }
+}
+
+// Cancela (apaga) um evento existente no Calendar — usado quando o lead pede
+// pra desmarcar de vez, sem remarcar.
+async function cancelarEvento(eventId) {
+  if (!eventId) return false;
+  try {
+    await calendar.events.delete({ calendarId: CALENDAR_ID, eventId, sendUpdates: 'none' });
+    return true;
+  } catch (err) {
+    console.error('Erro ao cancelar evento:', err.message);
     return false;
   }
 }
@@ -2278,6 +2303,18 @@ async function tratarPosAgendamento(userPhone, userText) {
         return true;
       }
 
+      // (1b) Quer ADIAR a escolha ("vou ver", "depois te falo") — não é falha de
+      // entendimento nem desistência: sai do modo remarcação em paz, mantém a
+      // reunião atual e deixa a porta aberta. Antes isso contava como tentativa
+      // falha e estourava o teto escalando pra equipe (visto em produção).
+      if (querAdiarRemarcacao(userText)) {
+        ag.remarcando = false;
+        ag.novosSlots = null;
+        ag.remarcacaoTentativas = 0;
+        await enviarERegistrar(userPhone, `Claro, sem pressa! Sua conversa segue marcada para ${ag.label}. Quando souber o dia que fica melhor, é só me falar por aqui.`);
+        return true;
+      }
+
       const saud = _ehSaudacao(userText) ? `${saudacaoAtualCG()}! ` : '';
       const pedido = await interpretarRemarcacao(ag, userText);
 
@@ -2343,13 +2380,14 @@ async function tratarPosAgendamento(userPhone, userText) {
         max_tokens: 10,
         messages: [{
           role: 'user',
-          content: `Um cliente tem uma reunião agendada e enviou esta mensagem: "${userText}".\n\nClassifique a intenção dele em UMA palavra, escolhendo entre:\n- CONFIRMAR (ele confirma que vai comparecer)\n- REMARCAR (ele não pode ir, quer cancelar, remarcar ou mudar o horário)\n- DUVIDA (qualquer outra coisa, pergunta ou comentário)\n\nResponda apenas a palavra.`
+          content: `Um cliente tem uma reunião agendada e enviou esta mensagem: "${userText}".\n\nClassifique a intenção dele em UMA palavra, escolhendo entre:\n- CONFIRMAR (ele confirma que vai comparecer)\n- CANCELAR (ele quer desmarcar/cancelar a reunião, sem marcar outro horário agora: "quero cancelar", "desmarcar", "não quero mais")\n- REMARCAR (ele não pode nesse horário mas quer mudar para outro dia/horário)\n- DUVIDA (qualquer outra coisa, pergunta ou comentário)\n\nResponda apenas a palavra.`
         }]
       },
       { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 15000 }
     );
     const r = resp.data.content[0].text.trim().toUpperCase();
     if (r.includes('CONFIRMAR')) intencao = 'confirmar';
+    else if (r.includes('CANCELAR')) intencao = 'cancelar';
     else if (r.includes('REMARCAR')) intencao = 'remarcar';
     else intencao = 'duvida';
   } catch (err) {
@@ -2372,6 +2410,36 @@ async function tratarPosAgendamento(userPhone, userText) {
     const saud = ag.nome ? `Combinado, ${ag.nome}!` : 'Combinado!';
     const refHorario = ag.label ? ` Nossa conversa está confirmada para ${ag.label}.` : ' Sua reunião está confirmada.';
     await enviarERegistrar(userPhone, `${saud}${refHorario} Te espero lá!`);
+    return true;
+  }
+
+  // CANCELAR: o lead quer desmarcar de vez, sem outro horário agora. Antes não
+  // existia este fluxo — "quero cancelar"/"desmarcar" caía em REMARCAR e o bot
+  // empurrava horários em loop pra quem só queria sair (visto em produção).
+  if (intencao === 'cancelar') {
+    log(userPhone, 'info', 'Lead pediu cancelamento da reunião.');
+    await cancelarEvento(ag.eventId);
+    const labelCancelada = ag.label;
+    const labelInterna = ag.labelCG || ag.label;
+    const nomeCancel = ag.nome || '';
+    delete agendamentosConfirmados[userPhone];
+    leadsAgendados.delete(userPhone);
+    delete followUpStatus[userPhone]; // sem follow-up automático em cima de quem cancelou
+    leadsEncerrados.add(userPhone);   // se ele voltar, o histórico dá o contexto
+
+    // Limpa o horário no CRM (atualizarLead ignora valores vazios, então é UPDATE direto)
+    pool.query(
+      `UPDATE leads SET scheduled_at = NULL, scheduled_at_ts = NULL, meet_link = NULL,
+              status = 'Pronto para agendar', updated_at = NOW()
+       WHERE phone = $1 AND client_id = $2`,
+      [userPhone, CLIENT_ID]
+    ).then(() => emitirMudancaLeads()).catch(e => console.error('cancelamento CRM:', e.message));
+
+    registrarAtividade(nomeCancel || 'Lead', 'Cancelou reunião').catch(() => {});
+    enviarMensagem(MEU_NUMERO, `*Reunião cancelada pelo lead*\n\nNome: ${nomeCancel || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário que estava marcado: ${labelInterna}\n\nO lead pediu para desmarcar. Evento removido do Calendar.`).catch(() => {});
+
+    const trato = nomeCancel ? `Tudo bem, ${nomeCancel}!` : 'Tudo bem!';
+    await enviarERegistrar(userPhone, `${trato} Desmarquei sua conversa de ${labelCancelada}. Quando quiser retomar, é só me chamar por aqui que a gente encontra um novo horário. 😊`);
     return true;
   }
 
