@@ -24,7 +24,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.14';
+const BOT_VERSION = '1.10.15';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -2339,8 +2339,13 @@ async function tratarPosAgendamento(userPhone, userText) {
         return true;
       }
 
-      // (4) Não entendeu nenhuma data — pede o dia, com teto pra não travar
-      ag.remarcacaoTentativas = (ag.remarcacaoTentativas || 0) + 1;
+      // (4) Não entendeu nenhuma data — pede o dia, com teto pra não travar.
+      // Saudação pura ("boa tarde") não conta como tentativa falha: o lead só
+      // está retomando a conversa, não errou a escolha do dia.
+      const soSaudacao = Boolean(saud) && (userText || '').trim().length <= 15;
+      if (!soSaudacao) {
+        ag.remarcacaoTentativas = (ag.remarcacaoTentativas || 0) + 1;
+      }
       if (ag.remarcacaoTentativas >= 2) {
         ag.remarcando = false;
         ag.novosSlots = null;
@@ -2350,7 +2355,13 @@ async function tratarPosAgendamento(userPhone, userText) {
         await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
         return true;
       }
-      await enviarERegistrar(userPhone, `${saud}Me diz qual dia fica melhor pra você que eu vejo os horários. Pode ser o dia da semana ou a data, tipo "quinta" ou "dia 11".`);
+      // Exemplo de data DINÂMICO: o exemplo era fixo ("dia 11") e envelheceu —
+      // em produção o bot sugeriu como exemplo um sábado, dia que ele mesmo
+      // recusa ("atendo de segunda a sexta"). Usa um dia útil real à frente.
+      const hojeCGExemplo = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
+      const diaExemplo = proximoDiaUtil(hojeCGExemplo, 3);
+      const nomeSemanaExemplo = diaExemplo.toLocaleDateString('pt-BR', { weekday: 'long' }).replace('-feira', '');
+      await enviarERegistrar(userPhone, `${saud}Me diz qual dia fica melhor pra você que eu vejo os horários. Pode ser o dia da semana ou a data, tipo "${nomeSemanaExemplo}" ou "dia ${diaExemplo.getDate()}".`);
       return true;
     }
   }
