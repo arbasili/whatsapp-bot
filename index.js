@@ -24,7 +24,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.17';
+const BOT_VERSION = '1.10.18';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -2374,14 +2374,21 @@ async function tratarPosAgendamento(userPhone, userText) {
         return true;
       }
 
-      const saud = _ehSaudacao(userText) ? `${saudacaoAtualCG()}! ` : '';
+      // Saudação em balão PRÓPRIO, como uma pessoa real responderia — antes o
+      // "Boa tarde!" vinha colado na resposta seguinte, num blocão só e frio.
+      const saudou = _ehSaudacao(userText);
+      if (saudou) {
+        const nomeSaud = ag.nome ? `, ${ag.nome}` : '';
+        await enviarERegistrar(userPhone, `${saudacaoAtualCG()}${nomeSaud}! Tudo bem? 😊`);
+        await new Promise(r => setTimeout(r, 1500));
+      }
       const pedido = await interpretarRemarcacao(ag, userText);
 
       // (2) Pediu um dia/horário e achamos vaga ("dia 11" útil, "quinta", "de manhã")
       if (pedido.tipo === 'concreto') {
         ag.novosSlots = pedido.slots;
         ag.remarcacaoTentativas = 0;
-        await enviarERegistrar(userPhone, `${saud}${_msgOfertaRemarcacao(pedido.slots)}`);
+        await enviarERegistrar(userPhone, _msgOfertaRemarcacao(pedido.slots));
         return true;
       }
 
@@ -2391,9 +2398,9 @@ async function tratarPosAgendamento(userPhone, userText) {
         const prox = await proximosSlotsRemarcacao(ag);
         if (prox.length > 0) {
           ag.novosSlots = prox;
-          await enviarERegistrar(userPhone, `${saud}Nesse dia eu não tenho agenda (atendo de segunda a sexta). ${_msgOfertaRemarcacao(prox)}`);
+          await enviarERegistrar(userPhone, `Nesse dia eu não tenho agenda (atendo de segunda a sexta). ${_msgOfertaRemarcacao(prox)}`);
         } else {
-          await enviarERegistrar(userPhone, `${saud}Nesse dia eu não tenho agenda (atendo de segunda a sexta). Me diz outro dia que eu vejo os horários.`);
+          await enviarERegistrar(userPhone, `Nesse dia eu não tenho agenda (atendo de segunda a sexta). Me diz outro dia que eu vejo os horários.`);
         }
         return true;
       }
@@ -2401,7 +2408,7 @@ async function tratarPosAgendamento(userPhone, userText) {
       // (4) Não entendeu nenhuma data — pede o dia, com teto pra não travar.
       // Saudação pura ("boa tarde") não conta como tentativa falha: o lead só
       // está retomando a conversa, não errou a escolha do dia.
-      const soSaudacao = Boolean(saud) && (userText || '').trim().length <= 15;
+      const soSaudacao = saudou && (userText || '').trim().length <= 15;
       if (!soSaudacao) {
         ag.remarcacaoTentativas = (ag.remarcacaoTentativas || 0) + 1;
       }
@@ -2420,7 +2427,7 @@ async function tratarPosAgendamento(userPhone, userText) {
       const hojeCGExemplo = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
       const diaExemplo = proximoDiaUtil(hojeCGExemplo, 3);
       const nomeSemanaExemplo = diaExemplo.toLocaleDateString('pt-BR', { weekday: 'long' }).replace('-feira', '');
-      await enviarERegistrar(userPhone, `${saud}Me diz qual dia fica melhor pra você que eu vejo os horários. Pode ser o dia da semana ou a data, tipo "${nomeSemanaExemplo}" ou "dia ${diaExemplo.getDate()}".`);
+      await enviarERegistrar(userPhone, `Me diz qual dia encaixa melhor pra você que eu dou uma olhada nos horários. Pode ser o dia da semana ou uma data, tipo "${nomeSemanaExemplo}" ou "dia ${diaExemplo.getDate()}".`);
       return true;
     }
   }
@@ -3228,7 +3235,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
     const agConfirmado = agendamentosConfirmados[userPhone];
     let contextoDinamico;
     if (agConfirmado) {
-      contextoDinamico = `CONTEXTO ATUAL (gerado agora, prevalece sobre qualquer valor anterior do roteiro ou da conversa): a saudação correta neste momento é "${saudacaoAtualCG()}". ESTE LEAD JÁ TEM REUNIÃO CONFIRMADA para ${agConfirmado.label}${agConfirmado.meetLink ? ` (link do Meet: ${agConfirmado.meetLink})` : ''}. O agendamento está fechado: NÃO reinicie a qualificação, NÃO ofereça horários, NÃO peça nem confirme email. Responda como quem conversa com um cliente aguardando a reunião: acolha a mensagem, tire dúvidas e, se fizer sentido, reforce com leveza o compromisso marcado. Se o lead pedir para remarcar ou cancelar, apenas acolha o pedido com naturalidade, sem oferecer horários você mesmo (o sistema cuida da remarcação).`;
+      contextoDinamico = `CONTEXTO ATUAL (gerado agora, prevalece sobre qualquer valor anterior do roteiro ou da conversa): a saudação correta neste momento é "${saudacaoAtualCG()}". ESTE LEAD JÁ TEM REUNIÃO CONFIRMADA para ${agConfirmado.label}${agConfirmado.meetLink ? ` (link do Meet: ${agConfirmado.meetLink})` : ''}. O agendamento está fechado: NÃO reinicie a qualificação, NÃO ofereça horários, NÃO peça nem confirme email. Responda como quem conversa com um cliente aguardando a reunião: acolha a mensagem, tire dúvidas e, se fizer sentido, reforce com leveza o compromisso marcado. Se a mensagem do lead for só uma saudação ou papo leve, NÃO despeje saudação + confirmação + pergunta num bloco só: responda em EXATAMENTE 2 partes separadas pelo marcador "|||" — a primeira é apenas a resposta calorosa e curta à saudação, como uma pessoa real responderia (ex: "Bom dia, ${agConfirmado.nome || 'tudo bem'}! Tudo certo por aqui 😊"), e a segunda menciona com leveza a reunião marcada e se ele precisa de algo (ex: "Sua conversa com o especialista tá confirmada pra ${agConfirmado.label}. Precisa de alguma coisa antes?"). Se o lead pedir para remarcar ou cancelar, apenas acolha o pedido com naturalidade, sem oferecer horários você mesmo (o sistema cuida da remarcação).`;
     } else {
       const slotsAtuais = agLead?.slots || [];
       const opcoesAtuais = slotsAtuais.length >= 2
