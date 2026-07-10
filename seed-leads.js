@@ -90,6 +90,9 @@ function randomDate(daysBack) {
   const d = new Date();
   d.setDate(d.getDate() - rand(0, daysBack));
   d.setHours(rand(7, 22), rand(0, 59), 0, 0);
+  // "0 dias atrás" com hora sorteada à frente do relógio caía no FUTURO e o
+  // painel mostrava "-393min" no card
+  if (d > new Date()) d.setDate(d.getDate() - 1);
   return d.toISOString();
 }
 
