@@ -60,6 +60,7 @@ async function main() {
     ai_activity: await contar('ai_activity'),
     bot_state: await contar('bot_state'),
     meeting_analyses: await contar('meeting_analyses'),
+    tasks: await contar('tasks'),
   };
   if (limparTudo) {
     antes.user_clients = await contar('user_clients');
@@ -92,6 +93,11 @@ async function main() {
     // conversations cai em cascata com leads, mas apagar explícito não custa
     if (antes.conversations !== null) {
       await client.query('DELETE FROM conversations WHERE client_id = $1', [CLIENT_ID]);
+    }
+    // tasks antes de leads: lead_id é SET NULL no delete do lead, então
+    // limpar depois deixaria tarefas órfãs (sem lead) sobrando no banco
+    if (antes.tasks !== null) {
+      await client.query('DELETE FROM tasks WHERE client_id = $1', [CLIENT_ID]);
     }
     await client.query('DELETE FROM leads WHERE client_id = $1', [CLIENT_ID]);
     await client.query('DELETE FROM ai_activity WHERE client_id = $1', [CLIENT_ID]);
