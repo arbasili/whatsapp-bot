@@ -25,7 +25,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.11.2';
+const BOT_VERSION = '1.11.3';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -1973,11 +1973,14 @@ app.post('/api/tasks', verificarToken, async (req, res) => {
       if (!lead.rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
     }
     const jaConcluida = req.body?.status === 'concluida';
+    // 'sistema' = registro automático do painel (ex: motivo da perda no Kanban);
+    // 'bot' é reservado ao marcador [TAREFA] da conversa e não entra por aqui
+    const origem = req.body?.origem === 'sistema' ? 'sistema' : 'manual';
     const { rows } = await pool.query(
-      `INSERT INTO tasks (client_id, lead_id, titulo, due_at, criado_por, status, done_at, aviso_enviado)
-       VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $6 = 'concluida' THEN NOW() END, $7) RETURNING *`,
+      `INSERT INTO tasks (client_id, lead_id, titulo, due_at, criado_por, status, done_at, aviso_enviado, origem)
+       VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $6 = 'concluida' THEN NOW() END, $7, $8) RETURNING *`,
       [process.env.CLIENT_ID, leadId, titulo.slice(0, 300), dueAt.toISOString(), req.user?.email || null,
-       jaConcluida ? 'concluida' : 'pendente', jaConcluida]
+       jaConcluida ? 'concluida' : 'pendente', jaConcluida, origem]
     );
     emitirMudancaLeads();
     res.status(201).json(rows[0]);
