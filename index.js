@@ -25,7 +25,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.11.0';
+const BOT_VERSION = '1.11.1';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -551,6 +551,10 @@ setInterval(async () => {
 }, 24 * 60 * 60 * 1000);
 
 const MEU_NUMERO = process.env.MEU_NUMERO || '';
+// WhatsApp do COMERCIAL (vendedor que recebe a bola do bot) — na prática é um
+// número diferente do dono do bot. Lembretes de tarefa e tarefas criadas pelo
+// bot vão pra ele; enquanto a env não existir, caem no MEU_NUMERO.
+const NUMERO_VENDEDOR = process.env.NUMERO_VENDEDOR || MEU_NUMERO;
 const CALENDAR_ID = 'comercial@cliqueefecha.com.br';
 
 // Horário de silêncio: não envia mensagens entre 20h e 8h (Campo Grande)
@@ -1108,7 +1112,7 @@ async function criarTarefaDoMarcador(userPhone, dataTexto, resumo) {
   aviso += `\nAgendada para: ${quandoLabel}`;
   aviso += `\nO lead pediu: "${dataTexto.trim()}"`;
   if (!dataEntendida) aviso += `\n\n⚠️ Não consegui converter o pedido em data exata — agendei pra daqui a 3 dias úteis. Ajuste no painel se precisar.`;
-  await enviarMensagem(MEU_NUMERO, aviso);
+  await enviarMensagem(NUMERO_VENDEDOR, aviso);
   log(userPhone, 'info', `Tarefa criada pelo marcador [TAREFA]: "${titulo}" para ${dueISO}`);
 }
 
@@ -1711,7 +1715,7 @@ setInterval(async () => {
       }
       msg += `\nCombinado para: ${quando}`;
       if (t.origem === 'bot') msg += `\n\n_Tarefa criada automaticamente: o lead pediu esse contato na conversa._`;
-      await enviarMensagem(MEU_NUMERO, msg);
+      await enviarMensagem(NUMERO_VENDEDOR, msg);
       await pool.query('UPDATE tasks SET aviso_enviado = TRUE WHERE id = $1', [t.id]);
     }
     if (rows.length) emitirMudancaLeads();
