@@ -25,7 +25,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.13.0';
+const BOT_VERSION = '1.13.1';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -1968,28 +1968,37 @@ app.get('/api/settings', verificarToken, async (req, res) => {
   }
 });
 
-// PATCH /api/settings — mescla as chaves enviadas nas configurações existentes.
-// Whitelist de chaves + validação numérica: o JSONB é livre demais pra aceitar
-// qualquer coisa vinda do navegador.
-const SETTINGS_PERMITIDAS = new Set(['meta_vendas_valor', 'meta_vendas_qtd', 'meta_agendamentos']);
+// PATCH /api/settings — grava as METAS de uma competência (mês, "AAAA-MM").
+// Estrutura: settings.metas = { "2026-07": { meta_vendas_valor, ... }, ... } —
+// histórico completo por mês ("naquele mês a meta era X"); o Dashboard resolve
+// qual competência vale hoje (a do mês, ou a mais recente anterior). Whitelist
+// + validação numérica: JSONB é livre demais pra aceitar qualquer coisa do navegador.
+const METAS_PERMITIDAS = ['meta_vendas_valor', 'meta_vendas_qtd', 'meta_agendamentos'];
 app.patch('/api/settings', verificarToken, async (req, res) => {
   try {
-    const entrada = req.body || {};
+    const competencia = req.body?.competencia;
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(competencia || '')) {
+      return res.status(400).json({ error: 'Competência inválida (use AAAA-MM)' });
+    }
     const limpo = {};
-    for (const [k, v] of Object.entries(entrada)) {
-      if (!SETTINGS_PERMITIDAS.has(k)) continue;
+    for (const k of METAS_PERMITIDAS) {
+      const v = req.body[k];
       if (v === null || v === '' || v === undefined) { limpo[k] = null; continue; }
       const n = Number(v);
       if (isNaN(n) || n < 0 || n > 1e9) return res.status(400).json({ error: `Valor inválido em ${k}` });
       limpo[k] = n;
     }
-    if (!Object.keys(limpo).length) return res.status(400).json({ error: 'Nenhuma configuração válida informada' });
     const { rows } = await pool.query(
       `INSERT INTO client_settings (client_id, settings, updated_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (client_id) DO UPDATE SET settings = client_settings.settings || $2, updated_at = NOW()
+       VALUES ($1, jsonb_build_object('metas', jsonb_build_object($2::text, $3::jsonb)), NOW())
+       ON CONFLICT (client_id) DO UPDATE SET
+         settings = jsonb_set(
+           CASE WHEN client_settings.settings ? 'metas' THEN client_settings.settings
+                ELSE client_settings.settings || '{"metas":{}}'::jsonb END,
+           ARRAY['metas', $2::text], $3::jsonb, true),
+         updated_at = NOW()
        RETURNING settings`,
-      [process.env.CLIENT_ID, JSON.stringify(limpo)]
+      [process.env.CLIENT_ID, competencia, JSON.stringify(limpo)]
     );
     res.json(rows[0].settings);
   } catch (err) {
