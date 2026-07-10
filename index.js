@@ -25,7 +25,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.12.0';
+const BOT_VERSION = '1.13.0';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -288,6 +288,16 @@ async function initDb() {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_pendentes ON tasks(client_id, status, due_at)`);
+
+  // Configurações do cliente no painel (metas do mês etc.) — JSONB único por
+  // client_id; o PATCH mescla chaves, então novas configurações não pedem migração.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS client_settings (
+      client_id UUID PRIMARY KEY REFERENCES clients(id) ON DELETE CASCADE,
+      settings JSONB NOT NULL DEFAULT '{}',
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
 
   // Tabela de atividade da IA — feed de ações do bot para a visão geral do painel
   await pool.query(`
@@ -1940,6 +1950,51 @@ app.patch('/api/leads/:id/snooze', verificarToken, async (req, res) => {
   } catch (err) {
     console.error('Erro em PATCH /api/leads/:id/snooze:', err.message);
     res.status(500).json({ error: 'Erro ao adiar lead' });
+  }
+});
+
+// ── Configurações do cliente ────────────────────────────────────────────
+// GET /api/settings — configurações do painel (metas etc.)
+app.get('/api/settings', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT settings FROM client_settings WHERE client_id = $1',
+      [process.env.CLIENT_ID]
+    );
+    res.json(rows[0]?.settings || {});
+  } catch (err) {
+    console.error('Erro em GET /api/settings:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar configurações' });
+  }
+});
+
+// PATCH /api/settings — mescla as chaves enviadas nas configurações existentes.
+// Whitelist de chaves + validação numérica: o JSONB é livre demais pra aceitar
+// qualquer coisa vinda do navegador.
+const SETTINGS_PERMITIDAS = new Set(['meta_vendas_valor', 'meta_vendas_qtd', 'meta_agendamentos']);
+app.patch('/api/settings', verificarToken, async (req, res) => {
+  try {
+    const entrada = req.body || {};
+    const limpo = {};
+    for (const [k, v] of Object.entries(entrada)) {
+      if (!SETTINGS_PERMITIDAS.has(k)) continue;
+      if (v === null || v === '' || v === undefined) { limpo[k] = null; continue; }
+      const n = Number(v);
+      if (isNaN(n) || n < 0 || n > 1e9) return res.status(400).json({ error: `Valor inválido em ${k}` });
+      limpo[k] = n;
+    }
+    if (!Object.keys(limpo).length) return res.status(400).json({ error: 'Nenhuma configuração válida informada' });
+    const { rows } = await pool.query(
+      `INSERT INTO client_settings (client_id, settings, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (client_id) DO UPDATE SET settings = client_settings.settings || $2, updated_at = NOW()
+       RETURNING settings`,
+      [process.env.CLIENT_ID, JSON.stringify(limpo)]
+    );
+    res.json(rows[0].settings);
+  } catch (err) {
+    console.error('Erro em PATCH /api/settings:', err.message);
+    res.status(500).json({ error: 'Erro ao salvar configurações' });
   }
 });
 
