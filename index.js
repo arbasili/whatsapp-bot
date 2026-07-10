@@ -25,7 +25,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.11.3';
+const BOT_VERSION = '1.12.0';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -247,6 +247,9 @@ async function initDb() {
   // label em português ("segunda-feira, 22 de junho às 9h..."), ótimo pra exibir mas
   // impossível de filtrar por data — por isso métricas como "reuniões de hoje" davam 0.
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS scheduled_at_ts TIMESTAMPTZ`);
+  // Valor estimado da oportunidade em R$ — preenchido pelo vendedor no painel.
+  // Alimenta os indicadores financeiros do Dashboard (R$ no funil, R$ fechado).
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS deal_value NUMERIC(12,2)`);
 
   // Log de anotações do vendedor — cada nota é uma entrada com data e autor
   // (em vez de um campo único que sobrescreve). O campo leads.notes segue existindo
@@ -1839,14 +1842,24 @@ app.patch('/api/leads/:id/notes', verificarToken, async (req, res) => {
 // a auto-atualização desses campos, pra o bot não sobrescrever a correção depois.
 app.patch('/api/leads/:id', verificarToken, async (req, res) => {
   try {
-    const MAPA = { name: 'name', email: 'email', business_type: 'business_type', pain: 'pain' };
+    const MAPA = { name: 'name', email: 'email', business_type: 'business_type', pain: 'pain', deal_value: 'deal_value' };
     const sets = [];
     const valores = [];
     let idx = 1;
     for (const [chave, coluna] of Object.entries(MAPA)) {
       if (Object.prototype.hasOwnProperty.call(req.body, chave)) {
+        let v = req.body[chave];
+        if (chave === 'deal_value') {
+          // número em reais ou null (campo apagado); rejeita lixo e negativos
+          v = (v === null || v === undefined || v === '') ? null : Number(v);
+          if (v !== null && (isNaN(v) || v < 0 || v > 1e9)) {
+            return res.status(400).json({ error: 'Valor da oportunidade inválido' });
+          }
+        } else if (typeof v === 'string') {
+          v = v.trim();
+        }
         sets.push(`${coluna} = $${idx}`);
-        valores.push(typeof req.body[chave] === 'string' ? req.body[chave].trim() : req.body[chave]);
+        valores.push(v);
         idx++;
       }
     }

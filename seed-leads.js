@@ -199,6 +199,11 @@ async function seed() {
     const email = `${nome.toLowerCase().replace(/ /g, '.').normalize('NFD').replace(/[\u0300-\u036f]/g, '')}@gmail.com`;
     const phone = randomPhone();
 
+    // Valor estimado da oportunidade (mensalidade t\u00edpica de automa\u00e7\u00e3o de
+    // atendimento). ~20% ficam sem valor: nem todo lead foi qualificado a ponto
+    // de ter estimativa, e o painel precisa lidar bem com o campo vazio.
+    const dealValue = rand(0, 4) === 0 ? null : pick([297, 397, 497, 597, 797, 997, 1297, 1497]);
+
     try {
       await pool.query(
         `INSERT INTO leads (
@@ -206,20 +211,20 @@ async function seed() {
           score, close_probability, next_action, next_action_at,
           ai_insights, summary, summary_bullets,
           origin, meet_link, scheduled_at, funnel_stages,
-          created_at, updated_at, client_id
+          created_at, updated_at, client_id, deal_value
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8,
           $9, $10, $11, $12,
           $13, $14, $15,
           $16, $17, $18, $19,
-          $20, $21, $22
+          $20, $21, $22, $23
         )`,
         [
           nome, phone, email, segmento, dor, urgencia, statusItem.status, temp,
           score, closeProb, nextAction, scheduledAt,
           JSON.stringify(insights), summary, JSON.stringify(bullets),
           origem, meetLink, scheduledAt, statusItem.siglas,
-          created, updated, CLIENT_ID,
+          created, updated, CLIENT_ID, dealValue,
         ]
       );
       inseridos++;
