@@ -214,13 +214,13 @@ async function seed() {
           score, close_probability, next_action, next_action_at,
           ai_insights, summary, summary_bullets,
           origin, meet_link, scheduled_at, funnel_stages,
-          created_at, updated_at, client_id, deal_value
+          created_at, updated_at, client_id, deal_value, scheduled_set_at
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8,
           $9, $10, $11, $12,
           $13, $14, $15,
           $16, $17, $18, $19,
-          $20, $21, $22, $23
+          $20, $21, $22, $23, $24
         )`,
         [
           nome, phone, email, segmento, dor, urgencia, statusItem.status, temp,
@@ -228,6 +228,8 @@ async function seed() {
           JSON.stringify(insights), summary, JSON.stringify(bullets),
           origem, meetLink, scheduledAt, statusItem.siglas,
           created, updated, CLIENT_ID, dealValue,
+          // data em que a reunião foi MARCADA — alimenta a meta de agendamentos do mês
+          temAgendamento ? randomDate(10) : null,
         ]
       );
       inseridos++;
