@@ -308,6 +308,100 @@ function querAdiarRemarcacao(texto) {
   return /\b(vou ver|vou olhar|vou verificar|vou conferir|deixa eu ver|preciso ver|vejo (e te falo|quando)|depois (eu )?(te )?(falo|aviso|vejo|confirmo)|te (falo|aviso|confirmo) (depois|mais tarde|amanh[ãa])|qualquer coisa (eu )?(te )?chamo|assim que (eu )?souber)\b/.test(t);
 }
 
+// Interpreta a data de um pedido de contato futuro do lead ("dia 15", "depois
+// do dia 20", "semana que vem", "em agosto") para o marcador [TAREFA].
+// Recebe "hoje" como Date no relógio de Campo Grande e devolve um Date no mesmo
+// relógio (a conversão pra timestamptz é do chamador), ou null se não entender
+// — o chamador aplica o fallback. Regras: hora padrão 9h (ou a hora citada),
+// datas que caírem em fim de semana rolam pra segunda, e datas já passadas
+// avançam pro próximo ciclo (mês/ano seguinte).
+function interpretarDataTarefa(texto, hojeCG) {
+  const t = (texto || '').trim().toLowerCase();
+  if (!t) return null;
+  const hoje = new Date(hojeCG);
+  hoje.setHours(0, 0, 0, 0);
+
+  // Hora citada ("às 15h", "as 15", "15 horas", "15h") — senão 9h.
+  // "às/as" precisa ser palavra inteira: sem isso o "a" final de "dia 15"
+  // casava e a hora virava 15.
+  const mHora = t.match(/(?:^|\s)[àa]s?\s+(\d{1,2})(?:\s*(?:h|horas?|:\d{2}))?(?:\s|$|[,.!?])/) ||
+    t.match(/(\d{1,2})\s*h(?:oras?)?\b/);
+  let hora = 9;
+  if (mHora) {
+    const h = parseInt(mHora[1], 10);
+    if (h >= 6 && h <= 21) hora = h;
+  }
+
+  const resultado = (d) => {
+    const r = new Date(d);
+    // fim de semana → segunda
+    while (r.getDay() === 0 || r.getDay() === 6) r.setDate(r.getDate() + 1);
+    r.setHours(hora, 0, 0, 0);
+    return r;
+  };
+
+  // Sem \b no fim depois de acento (não casa em JS) — mesmo bug do "amanhã"
+  if (/depois\s+de\s+amanh[ãa]/.test(t)) {
+    const d = new Date(hoje); d.setDate(d.getDate() + 2); return resultado(d);
+  }
+  if (/\bamanh[ãa]/.test(t)) {
+    const d = new Date(hoje); d.setDate(d.getDate() + 1); return resultado(d);
+  }
+  if (/semana\s+que\s+vem|pr[óo]xima\s+semana/.test(t)) {
+    const d = new Date(hoje);
+    const ateSegunda = ((8 - d.getDay()) % 7) || 7;
+    d.setDate(d.getDate() + ateSegunda);
+    return resultado(d);
+  }
+  if (/m[êe]s\s+que\s+vem|pr[óo]ximo\s+m[êe]s/.test(t)) {
+    const d = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 1);
+    return resultado(d);
+  }
+
+  const MESES = { janeiro: 0, fevereiro: 1, 'março': 2, marco: 2, abril: 3, maio: 4, junho: 5,
+    julho: 6, agosto: 7, setembro: 8, outubro: 9, novembro: 10, dezembro: 11 };
+
+  // "dia 15/07", "15/07", "dia 15 de julho", "depois do dia 20"
+  const depoisDo = /depois\s+d[oe]\s+dia/.test(t) || /a\s+partir\s+d[oe]\s+dia/.test(t);
+  let dia = null, mes = null;
+  const mBarra = t.match(/(?:dia\s+)?(\d{1,2})\s*\/\s*(\d{1,2})/);
+  const mExtenso = t.match(/dia\s+(\d{1,2})\s+de\s+([a-zç]+)/);
+  const mDia = t.match(/dia\s+(\d{1,2})/);
+  if (mBarra) {
+    dia = parseInt(mBarra[1], 10);
+    mes = parseInt(mBarra[2], 10) - 1;
+  } else if (mExtenso && MESES[mExtenso[2]] !== undefined) {
+    dia = parseInt(mExtenso[1], 10);
+    mes = MESES[mExtenso[2]];
+  } else if (mDia) {
+    dia = parseInt(mDia[1], 10);
+  }
+
+  if (dia !== null && dia >= 1 && dia <= 31) {
+    if (depoisDo) dia += 1;
+    let d;
+    if (mes !== null && mes >= 0 && mes <= 11) {
+      d = new Date(hoje.getFullYear(), mes, dia);
+      if (d < hoje) d = new Date(hoje.getFullYear() + 1, mes, dia);
+    } else {
+      d = new Date(hoje.getFullYear(), hoje.getMonth(), dia);
+      if (d < hoje) d = new Date(hoje.getFullYear(), hoje.getMonth() + 1, dia);
+    }
+    return resultado(d);
+  }
+
+  // "em agosto", "só em setembro" (mês sem dia → dia 1º)
+  for (const [nome, num] of Object.entries(MESES)) {
+    if (new RegExp(`\\bem\\s+${nome}|\\bs[óo]\\s+em\\s+${nome}`).test(t)) {
+      let d = new Date(hoje.getFullYear(), num, 1);
+      if (d < hoje) d = new Date(hoje.getFullYear() + 1, num, 1);
+      return resultado(d);
+    }
+  }
+
+  return null;
+}
+
 module.exports = {
   textoDoConteudo,
   escolherSlot,
@@ -319,4 +413,5 @@ module.exports = {
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
   querAdiarRemarcacao,
+  interpretarDataTarefa,
 };

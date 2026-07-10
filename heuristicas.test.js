@@ -13,6 +13,7 @@ const {
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
   querAdiarRemarcacao,
+  interpretarDataTarefa,
 } = require('./heuristicas');
 
 // Monta uma conversa mínima: roteiro + ack + turnos reais
@@ -396,4 +397,81 @@ test('extrai texto de conteúdo multimodal', () => {
 test('devolve string intacta e vazio para conteúdo inválido', () => {
   assert.strictEqual(textoDoConteudo('oi'), 'oi');
   assert.strictEqual(textoDoConteudo(null), '');
+});
+
+// ─── interpretarDataTarefa: pedido de contato futuro ([TAREFA]) ──────────────
+
+// Hoje fixo: sexta-feira, 10 de julho de 2026, 14h (relógio de Campo Grande)
+const hojeTarefa = new Date(2026, 6, 10, 14, 0, 0);
+
+test('entende "dia 15" no mês corrente', () => {
+  const d = interpretarDataTarefa('dia 15', hojeTarefa);
+  assert.strictEqual(d.getDate(), 15);
+  assert.strictEqual(d.getMonth(), 6);
+  assert.strictEqual(d.getHours(), 9);
+});
+
+test('entende "dia 15/07" com barra', () => {
+  const d = interpretarDataTarefa('dia 15/07', hojeTarefa);
+  assert.strictEqual(d.getDate(), 15);
+  assert.strictEqual(d.getMonth(), 6);
+});
+
+test('dia já passado no mês rola para o mês seguinte', () => {
+  const d = interpretarDataTarefa('dia 5', hojeTarefa);
+  assert.strictEqual(d.getDate(), 5);
+  assert.strictEqual(d.getMonth(), 7); // agosto
+});
+
+test('"depois do dia 15" vira dia 16', () => {
+  const d = interpretarDataTarefa('depois do dia 15', hojeTarefa);
+  assert.strictEqual(d.getDate(), 16);
+});
+
+test('data em fim de semana rola para segunda', () => {
+  // 11/07/2026 é sábado → segunda 13/07
+  const d = interpretarDataTarefa('dia 11', hojeTarefa);
+  assert.strictEqual(d.getDate(), 13);
+  assert.strictEqual(d.getDay(), 1);
+});
+
+test('entende "amanhã" (com acento, bug clássico do \b)', () => {
+  // sexta 10 → amanhã é sábado 11 → rola pra segunda 13
+  const d = interpretarDataTarefa('amanhã', hojeTarefa);
+  assert.strictEqual(d.getDate(), 13);
+});
+
+test('entende "semana que vem" como próxima segunda', () => {
+  const d = interpretarDataTarefa('semana que vem', hojeTarefa);
+  assert.strictEqual(d.getDate(), 13);
+  assert.strictEqual(d.getDay(), 1);
+});
+
+test('entende "mês que vem" como dia 1º do mês seguinte (útil)', () => {
+  const d = interpretarDataTarefa('mês que vem', hojeTarefa);
+  assert.strictEqual(d.getMonth(), 7); // 1º de agosto de 2026 é sábado → segunda 3
+  assert.strictEqual(d.getDate(), 3);
+});
+
+test('entende "em setembro" como início do mês', () => {
+  const d = interpretarDataTarefa('só em setembro', hojeTarefa);
+  assert.strictEqual(d.getMonth(), 8);
+  assert.strictEqual(d.getDate(), 1);
+});
+
+test('mês já passado rola para o ano seguinte', () => {
+  const d = interpretarDataTarefa('em março', hojeTarefa);
+  assert.strictEqual(d.getFullYear(), 2027);
+  assert.strictEqual(d.getMonth(), 2);
+});
+
+test('respeita hora citada ("dia 15 às 15h")', () => {
+  const d = interpretarDataTarefa('dia 15 às 15h', hojeTarefa);
+  assert.strictEqual(d.getDate(), 15);
+  assert.strictEqual(d.getHours(), 15);
+});
+
+test('devolve null para pedido vago (caller usa fallback)', () => {
+  assert.strictEqual(interpretarDataTarefa('depois eu te falo', hojeTarefa), null);
+  assert.strictEqual(interpretarDataTarefa('', hojeTarefa), null);
 });

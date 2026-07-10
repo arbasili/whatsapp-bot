@@ -19,12 +19,13 @@ const {
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
   querAdiarRemarcacao,
+  interpretarDataTarefa,
 } = require('./heuristicas');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.10.20';
+const BOT_VERSION = '1.11.0';
 const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
 
 const helmet = require('helmet');
@@ -261,6 +262,29 @@ async function initDb() {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_notes_lead ON lead_notes(lead_id, created_at DESC)`);
+
+  // Tarefas e compromissos do vendedor — "ligar pro lead dia 15/07 às 9h".
+  // origem 'manual' = criada pelo vendedor no painel; 'bot' = o próprio bot
+  // detectou o pedido do lead na conversa ("me chama dia 15") e agendou.
+  // aviso_enviado controla o lembrete por WhatsApp (enviado uma única vez
+  // no vencimento). lead_id é SET NULL, não CASCADE: apagar um lead não
+  // deve sumir silenciosamente com o compromisso do vendedor.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+      titulo TEXT NOT NULL,
+      due_at TIMESTAMPTZ NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pendente',
+      origem TEXT NOT NULL DEFAULT 'manual',
+      criado_por TEXT,
+      aviso_enviado BOOLEAN DEFAULT FALSE,
+      done_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_pendentes ON tasks(client_id, status, due_at)`);
 
   // Tabela de atividade da IA — feed de ações do bot para a visão geral do painel
   await pool.query(`
@@ -1047,6 +1071,47 @@ function proximoDiaUtil(data, offset = 1) {
   return d;
 }
 
+// Materializa o marcador [TAREFA: data | resumo] emitido pelo modelo quando o
+// lead pede contato futuro ("me chama dia 15"): cria a tarefa no banco vinculada
+// ao lead e avisa o vendedor na hora. Se a data não for interpretável, cai em
+// +3 dias úteis às 9h e o aviso deixa claro o que o lead pediu, pra ajuste no painel.
+async function criarTarefaDoMarcador(userPhone, dataTexto, resumo) {
+  const agoraCG = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
+  let alvoCG = interpretarDataTarefa(dataTexto, agoraCG);
+  const dataEntendida = !!alvoCG;
+  if (!alvoCG) {
+    alvoCG = proximoDiaUtil(agoraCG, 3);
+    alvoCG.setHours(9, 0, 0, 0);
+  }
+  // alvoCG é relógio de parede de Campo Grande (UTC-4 fixo, sem horário de verão)
+  const pad = (n) => String(n).padStart(2, '0');
+  const dueISO = `${alvoCG.getFullYear()}-${pad(alvoCG.getMonth() + 1)}-${pad(alvoCG.getDate())}T${pad(alvoCG.getHours())}:00:00-04:00`;
+
+  const leadRes = await pool.query(
+    'SELECT id, name, business_type FROM leads WHERE phone = $1 AND client_id = $2',
+    [userPhone, CLIENT_ID]
+  );
+  const lead = leadRes.rows[0] || null;
+  const titulo = (resumo || 'Retomar contato com o lead').trim().slice(0, 300);
+
+  await pool.query(
+    `INSERT INTO tasks (client_id, lead_id, titulo, due_at, origem, criado_por)
+     VALUES ($1, $2, $3, $4, 'bot', 'bot')`,
+    [CLIENT_ID, lead?.id || null, titulo, dueISO]
+  );
+  emitirMudancaLeads();
+
+  const quandoLabel = alvoCG.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit' }) + ` às ${alvoCG.getHours()}h`;
+  let aviso = `📋 *Nova tarefa agendada pelo bot*\n\n${titulo}`;
+  if (lead?.name) aviso += `\nLead: ${lead.name}${lead.business_type ? ` (${lead.business_type})` : ''}`;
+  aviso += `\nWhatsApp: ${userPhone}`;
+  aviso += `\nAgendada para: ${quandoLabel}`;
+  aviso += `\nO lead pediu: "${dataTexto.trim()}"`;
+  if (!dataEntendida) aviso += `\n\n⚠️ Não consegui converter o pedido em data exata — agendei pra daqui a 3 dias úteis. Ajuste no painel se precisar.`;
+  await enviarMensagem(MEU_NUMERO, aviso);
+  log(userPhone, 'info', `Tarefa criada pelo marcador [TAREFA]: "${titulo}" para ${dueISO}`);
+}
+
 async function buscarHorariosDisponiveis() {
   const agora = new Date();
   const horaCG = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
@@ -1618,6 +1683,45 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
+// Aviso de tarefas — verifica a cada minuto se alguma tarefa pendente venceu
+// e manda o lembrete pro WhatsApp do vendedor (MEU_NUMERO), uma única vez.
+// É onde o CRM "avisa de verdade": e-mail de CRM tradicional ninguém abre.
+let avisoTarefasRodando = false;
+setInterval(async () => {
+  if (avisoTarefasRodando) return;
+  avisoTarefasRodando = true;
+  try {
+    const { rows } = await pool.query(
+      `SELECT t.id, t.titulo, t.due_at, t.origem,
+              l.name AS lead_name, l.business_type, l.phone AS lead_phone
+       FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
+       WHERE t.client_id = $1 AND t.status = 'pendente' AND t.aviso_enviado = FALSE
+         AND t.due_at <= NOW()
+       ORDER BY t.due_at ASC LIMIT 20`,
+      [CLIENT_ID]
+    );
+    for (const t of rows) {
+      const quando = new Date(t.due_at).toLocaleString('pt-BR', {
+        timeZone: 'America/Campo_Grande', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+      });
+      let msg = `📋 *Lembrete de tarefa*\n\n${t.titulo}`;
+      if (t.lead_name) {
+        msg += `\n\nLead: ${t.lead_name}${t.business_type ? ` (${t.business_type})` : ''}`;
+        if (t.lead_phone) msg += `\nWhatsApp: ${t.lead_phone}`;
+      }
+      msg += `\nCombinado para: ${quando}`;
+      if (t.origem === 'bot') msg += `\n\n_Tarefa criada automaticamente: o lead pediu esse contato na conversa._`;
+      await enviarMensagem(MEU_NUMERO, msg);
+      await pool.query('UPDATE tasks SET aviso_enviado = TRUE WHERE id = $1', [t.id]);
+    }
+    if (rows.length) emitirMudancaLeads();
+  } catch (err) {
+    console.error('Erro no job de aviso de tarefas:', err.message);
+  } finally {
+    avisoTarefasRodando = false;
+  }
+}, 60 * 1000);
+
 const BOT_START_TIME = Date.now();
 let ultimaMensagemProcessada = null; // timestamp da última mensagem processada com sucesso
 
@@ -1819,6 +1923,112 @@ app.patch('/api/leads/:id/snooze', verificarToken, async (req, res) => {
   } catch (err) {
     console.error('Erro em PATCH /api/leads/:id/snooze:', err.message);
     res.status(500).json({ error: 'Erro ao adiar lead' });
+  }
+});
+
+// ── Tarefas e compromissos ──────────────────────────────────────────────
+// GET /api/tasks — lista tarefas com dados do lead. ?status=pendente (padrão),
+// concluida ou todas. Pendentes vêm ordenadas por vencimento (atrasadas primeiro).
+app.get('/api/tasks', verificarToken, async (req, res) => {
+  try {
+    const status = req.query.status || 'pendente';
+    let filtro = status === 'todas' ? '' : `AND t.status = $2`;
+    const params = status === 'todas' ? [process.env.CLIENT_ID] : [process.env.CLIENT_ID, status];
+    if (req.query.lead_id) {
+      params.push(req.query.lead_id);
+      filtro += ` AND t.lead_id = $${params.length}`;
+    }
+    const { rows } = await pool.query(
+      `SELECT t.id, t.lead_id, t.titulo, t.due_at, t.status, t.origem, t.criado_por, t.done_at, t.created_at,
+              l.name AS lead_name, l.business_type AS lead_business_type, l.phone AS lead_phone
+       FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
+       WHERE t.client_id = $1 ${filtro}
+       ORDER BY CASE WHEN t.status = 'pendente' THEN 0 ELSE 1 END, t.due_at ASC
+       LIMIT 500`,
+      params
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Erro em GET /api/tasks:', err.message);
+    res.status(500).json({ error: 'Erro ao listar tarefas' });
+  }
+});
+
+// POST /api/tasks — cria tarefa { titulo, due_at, lead_id? }
+app.post('/api/tasks', verificarToken, async (req, res) => {
+  try {
+    const titulo = (req.body?.titulo || '').trim();
+    const dueAt = new Date(req.body?.due_at);
+    if (!titulo) return res.status(400).json({ error: 'Título obrigatório' });
+    if (isNaN(dueAt.getTime())) return res.status(400).json({ error: 'Data de vencimento inválida' });
+    const leadId = req.body?.lead_id || null;
+    if (leadId) {
+      const lead = await pool.query('SELECT id FROM leads WHERE id = $1 AND client_id = $2', [leadId, process.env.CLIENT_ID]);
+      if (!lead.rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO tasks (client_id, lead_id, titulo, due_at, criado_por)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [process.env.CLIENT_ID, leadId, titulo.slice(0, 300), dueAt.toISOString(), req.user?.email || null]
+    );
+    emitirMudancaLeads();
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('Erro em POST /api/tasks:', err.message);
+    res.status(500).json({ error: 'Erro ao criar tarefa' });
+  }
+});
+
+// PATCH /api/tasks/:id — conclui/reabre ({ status }) ou edita ({ titulo, due_at }).
+// Mudar o vencimento re-arma o aviso de WhatsApp (aviso_enviado volta a false).
+app.patch('/api/tasks/:id', verificarToken, async (req, res) => {
+  try {
+    const sets = [];
+    const params = [];
+    let i = 1;
+    if (req.body?.status === 'concluida' || req.body?.status === 'pendente') {
+      sets.push(`status = $${i++}`);
+      params.push(req.body.status);
+      sets.push(`done_at = ${req.body.status === 'concluida' ? 'NOW()' : 'NULL'}`);
+    }
+    if (typeof req.body?.titulo === 'string' && req.body.titulo.trim()) {
+      sets.push(`titulo = $${i++}`);
+      params.push(req.body.titulo.trim().slice(0, 300));
+    }
+    if (req.body?.due_at) {
+      const d = new Date(req.body.due_at);
+      if (isNaN(d.getTime())) return res.status(400).json({ error: 'Data inválida' });
+      sets.push(`due_at = $${i++}`, 'aviso_enviado = FALSE');
+      params.push(d.toISOString());
+    }
+    if (!sets.length) return res.status(400).json({ error: 'Nada para atualizar' });
+    params.push(req.params.id, process.env.CLIENT_ID);
+    const { rows } = await pool.query(
+      `UPDATE tasks SET ${sets.join(', ')} WHERE id = $${i++} AND client_id = $${i} RETURNING *`,
+      params
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Tarefa não encontrada' });
+    emitirMudancaLeads();
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Erro em PATCH /api/tasks/:id:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar tarefa' });
+  }
+});
+
+// DELETE /api/tasks/:id
+app.delete('/api/tasks/:id', verificarToken, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      'DELETE FROM tasks WHERE id = $1 AND client_id = $2',
+      [req.params.id, process.env.CLIENT_ID]
+    );
+    if (!rowCount) return res.status(404).json({ error: 'Tarefa não encontrada' });
+    emitirMudancaLeads();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Erro em DELETE /api/tasks/:id:', err.message);
+    res.status(500).json({ error: 'Erro ao excluir tarefa' });
   }
 });
 
@@ -2842,6 +3052,13 @@ Em ambos os casos, responda com UMA mensagem curta e natural de despedida e incl
 Exemplo: "Combinado! Até lá. [ENCERRAR]"
 Exemplo: "Até mais, Adriano! Qualquer dúvida é só chamar. [ENCERRAR]"
 
+PEDIDO DE CONTATO FUTURO — MARCADOR [TAREFA]:
+Se o lead pedir para ser contatado em uma DATA ou PERÍODO FUTURO específico (ex: "me chama dia 15", "me liga semana que vem", "só consigo ver isso depois do dia 20", "me procura em agosto", "volta a falar comigo mês que vem"), confirme naturalmente que vai fazer isso e inclua na resposta o marcador exato: [TAREFA: data pedida | resumo curto do que fazer]
+- Na parte da data, repita o que o lead pediu do jeito que ele falou (ex: "dia 15/07", "semana que vem", "depois do dia 20", "em agosto").
+- No resumo, diga a ação em uma frase curta (ex: "Retomar contato — lead pediu pra falar depois das férias").
+Exemplo: lead diz "gostei, mas me chama só depois do dia 15 que agora tô viajando" → "Claro! Te procuro depois do dia 15 então. Boa viagem! [TAREFA: depois do dia 15 | Retomar contato — lead pediu após viagem]"
+O sistema remove o marcador antes de enviar e agenda o compromisso pro vendedor. Use APENAS quando o lead pedir contato futuro explicitamente — não use para remarcação de reunião já agendada (isso tem fluxo próprio) nem para "te falo depois" vago sem data.
+
 CREDIBILIDADE SEM CASES: a empresa está começando e não tem histórico de clientes ainda. Para gerar confiança, use: (1) a qualidade do próprio atendimento como demonstração — "Esse atendimento que você tá recebendo agora é mais ou menos o que a gente monta pro seu negócio, com a diferença que ele fica trabalhando pra você 24 horas"; (2) a figura do especialista humano que vai conduzir a reunião; (3) o fato de serem as primeiras parcerias — "A gente tá montando as primeiras parcerias agora, então você tem atenção total desde o início"; (4) o baixo risco — gratuito, 30 minutos, sem compromisso. NUNCA invente clientes, cases, depoimentos, números de resultado ou percentuais. Se o lead perguntar "vocês já fizeram isso pra alguém?" ou "têm clientes?", seja honesto: "A gente tá começando agora com as primeiras parcerias, e por isso consigo te dar atenção total no seu caso. O melhor jeito de ver se faz sentido é na conversa com o especialista, sem compromisso." Nunca negue que está começando — isso passa confiança.
 
 PERGUNTAS FORA DO ROTEIRO:
@@ -3489,12 +3706,21 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
       return;
     }
 
+    // Marcador [TAREFA: data | resumo] — lead pediu contato futuro; cria a
+    // tarefa pro vendedor em paralelo (falha não pode derrubar a resposta ao lead)
+    const mTarefa = resposta.match(/\[TAREFA:\s*([^\]|]+)\|([^\]]+)\]/i);
+    if (mTarefa) {
+      criarTarefaDoMarcador(userPhone, mTarefa[1], mTarefa[2].trim())
+        .catch(e => console.error('Erro ao criar tarefa do marcador [TAREFA]:', e.message));
+    }
+
     // Encerramento pode vir em qualquer formato — detectar antes de tudo
     const deveEncerrar = resposta.includes('[ENCERRAR]');
     const respostaSemMarcador = resposta
       .replace('[ENCERRAR]', '')
       .replace(/\[NOME:\s*[^\]]+\]/gi, '')
       .replace(/\[SLOT:\s*[^\]]+\]/gi, '')
+      .replace(/\[TAREFA:\s*[^\]]+\]/gi, '')
       .replace(/\s{2,}/g, ' ')
       .trim();
 
