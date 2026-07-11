@@ -14,6 +14,8 @@ const {
   querPararRemarcacao,
   querAdiarRemarcacao,
   interpretarDataTarefa,
+  temIntencaoDeCompra,
+  pediuOptOut,
 } = require('./heuristicas');
 
 // Monta uma conversa mínima: roteiro + ack + turnos reais
@@ -475,3 +477,36 @@ test('devolve null para pedido vago (caller usa fallback)', () => {
   assert.strictEqual(interpretarDataTarefa('depois eu te falo', hojeTarefa), null);
   assert.strictEqual(interpretarDataTarefa('', hojeTarefa), null);
 });
+
+// ─── temIntencaoDeCompra (alerta de lead quente) ─────────────────────────────
+
+test('detecta intenção explícita de compra', () => {
+  assert.ok(temIntencaoDeCompra('quero contratar'));
+  assert.ok(temIntencaoDeCompra('pode fechar, vamos'));
+  assert.ok(temIntencaoDeCompra('me manda a proposta'));
+  assert.ok(temIntencaoDeCompra('como faço pra começar?'));
+  assert.ok(temIntencaoDeCompra('tô dentro'));
+})
+
+test('NÃO trata dúvida de preço como intenção de compra', () => {
+  assert.ok(!temIntencaoDeCompra('quanto custa?'))
+  assert.ok(!temIntencaoDeCompra('qual o preço?'))
+  assert.ok(!temIntencaoDeCompra('quero saber mais'))
+  assert.ok(!temIntencaoDeCompra('vou pensar'))
+})
+
+// ─── pediuOptOut (parar de receber mensagens) ────────────────────────────────
+
+test('detecta pedido de opt-out', () => {
+  assert.ok(pediuOptOut('para de me mandar mensagem'))
+  assert.ok(pediuOptOut('não quero mais receber'))
+  assert.ok(pediuOptOut('me remove da lista'))
+  assert.ok(pediuOptOut('me deixa em paz'))
+  assert.ok(pediuOptOut('descadastrar'))
+})
+
+test('NÃO confunde opt-out com recusa de horário ou preposição', () => {
+  assert.ok(!pediuOptOut('pode ser para amanhã'))
+  assert.ok(!pediuOptOut('não quero esse horário'))
+  assert.ok(!pediuOptOut('manda o link por favor'))
+})

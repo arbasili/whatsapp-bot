@@ -402,8 +402,29 @@ function interpretarDataTarefa(texto, hojeCG) {
   return null;
 }
 
+// Intenção EXPLÍCITA de compra/contratação (Melhoria 8): sinais fortes de que o
+// lead quer avançar agora — dispara alerta imediato pro vendedor. Conservador de
+// propósito: só pega frases inequívocas, pra não gerar alarme falso a cada "quero
+// saber mais". "quanto custa/preço" NÃO entra aqui (é dúvida, não intenção de fechar).
+function temIntencaoDeCompra(texto) {
+  const t = (texto || '').toLowerCase();
+  if (!t) return false;
+  return /\bquero (contratar|fechar|assinar|comprar|come[çc]ar)\b|\bvamos fechar\b|\bpode (fechar|contratar)\b|(manda|me manda|envia|me envia|quero) (a |uma )?proposta\b|como (eu )?(fa[çz]o pra |fa[çz]o para )?(contrat|começ|assin|comprar)|como (que )?(funciona pra|fa[çz]o pra) (contratar|assinar|come[çc]ar)|\bfechar (neg[óo]cio|contrato)\b|onde (eu )?assino|bora fechar|t[ôo] dentro|fechado, vamos/.test(t);
+}
+
+// Pedido pra PARAR de receber mensagens (opt-out, Melhoria 6). Persistido: o
+// lead não recebe mais follow-ups/lembretes proativos até pedir pra voltar.
+// Cuidado pra não pegar "para amanhã" (preposição) nem "não quero esse horário".
+function pediuOptOut(texto) {
+  const t = (texto || '').toLowerCase().trim();
+  if (!t) return false;
+  return /\bn[ãa]o (me )?(mande|manda|envie|envia|chame|chama|perturbe|perturba|encha)\b|\bpar(e|a) de (me )?(mandar|enviar|chamar|perturbar|encher)\b|me (tir[ae]|remov[ae]|descadastr[ae])|\b(descadastr|desinscrev)|sair da lista|n[ãa]o quero (mais )?(receber|mensagen|ser chamad|que me mand)|me deixa? em paz|n[ãa]o me procur|perde(u)? meu (n[úu]mero|contato)|bloquea/.test(t);
+}
+
 module.exports = {
   textoDoConteudo,
+  temIntencaoDeCompra,
+  pediuOptOut,
   escolherSlot,
   extrairTipoNegocio,
   extrairDorLead,

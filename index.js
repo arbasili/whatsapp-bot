@@ -20,13 +20,20 @@ const {
   querPararRemarcacao,
   querAdiarRemarcacao,
   interpretarDataTarefa,
+  temIntencaoDeCompra,
+  pediuOptOut,
 } = require('./heuristicas');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.14.1';
-const BOT_VERSION_DATA = '2026-07-04'; // data desta versão
+const BOT_VERSION = '1.15.0';
+const BOT_VERSION_DATA = '2026-07-11'; // data desta versão
+
+// Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
+// numa versão morta faz a Meta redirecionar silenciosamente pra outra, sem
+// teste. Configurável por env pra atualizar sem mexer no código.
+const META_GRAPH_API = process.env.META_GRAPH_API_VERSION || 'v21.0';
 
 const helmet = require('helmet');
 const { rateLimit: criarRateLimiter } = require('express-rate-limit');
@@ -124,18 +131,15 @@ async function verificarToken(req, res, next) {
     }
 
     if (!cacheAutorizados.ids.has(user.id)) {
+      // Sem autoaprovação (BOT-004): mesmo com user_clients vazio, um usuário não
+      // vinculado NÃO vira dono automaticamente. O bootstrap anterior deixava
+      // qualquer conta válida do projeto Supabase assumir o cliente após um
+      // "limpar --tudo". O vínculo é feito manualmente (INSERT em user_clients),
+      // por seed/admin. O log abaixo mostra o id exato pra facilitar esse INSERT.
       if (cacheAutorizados.ids.size === 0) {
-        // Bootstrap: ninguém ainda está vinculado a este CLIENT_ID — o primeiro
-        // usuário autenticado com sucesso vira o dono, sem precisar de INSERT manual.
-        await pool.query(
-          'INSERT INTO user_clients (user_id, client_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-          [user.id, CLIENT_ID]
-        );
-        cacheAutorizados.ids.add(user.id);
-        console.log(`Usuário ${user.id} vinculado automaticamente ao client_id ${CLIENT_ID} (primeiro acesso).`);
-      } else {
-        return res.status(403).json({ error: 'Usuário sem permissão para este cliente' });
+        console.warn(`[auth] user_clients VAZIO para client_id ${CLIENT_ID}. Nenhum acesso liberado. Para autorizar: INSERT INTO user_clients (user_id, client_id) VALUES ('${user.id}', '${CLIENT_ID}');`);
       }
+      return res.status(403).json({ error: 'Usuário sem permissão para este cliente' });
     }
 
     req.user = user;
@@ -299,6 +303,18 @@ async function initDb() {
     )
   `);
 
+  // Opt-out (Melhoria 6): leads que pediram pra não receber mais mensagens.
+  // Persistente — sobrevive a restart, ao contrário de um Set em memória. O bot
+  // não envia follow-up/lembrete/reativação a quem está aqui.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS opt_outs (
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      phone TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      PRIMARY KEY (client_id, phone)
+    )
+  `);
+
   // Tabela de atividade da IA — feed de ações do bot para a visão geral do painel
   await pool.query(`
     CREATE TABLE IF NOT EXISTS ai_activity (
@@ -451,6 +467,29 @@ async function carregarLeads() {
   } catch (err) {
     console.error('Erro ao carregar leads do banco:', err.message);
   }
+  // Carrega os opt-outs persistidos (Melhoria 6) pra memória
+  try {
+    const r = await pool.query('SELECT phone FROM opt_outs WHERE client_id = $1', [CLIENT_ID]);
+    for (const row of r.rows) leadsOptOut.add(row.phone);
+    if (r.rows.length) console.log(`Carregados ${r.rows.length} opt-outs.`);
+  } catch (err) {
+    console.error('Erro ao carregar opt-outs:', err.message);
+  }
+}
+
+// Registra opt-out do lead: persiste, marca em memória e para as automações.
+async function registrarOptOut(userPhone) {
+  leadsOptOut.add(userPhone);
+  delete followUpStatus[userPhone];
+  leadsEncerrados.add(userPhone);
+  try {
+    await pool.query(
+      `INSERT INTO opt_outs (client_id, phone) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [CLIENT_ID, userPhone]
+    );
+  } catch (err) {
+    console.error('Erro ao registrar opt-out:', err.message);
+  }
 }
 
 function validarAssinatura(req) {
@@ -475,6 +514,8 @@ const followUpStatus = {};
 const agendamentos = {};
 const leadsAgendados = new Set();
 const leadsEncerrados = new Set();
+const leadsOptOut = new Set(); // telefones que pediram pra não receber mais mensagens
+const leadsAlertadosQuente = new Set(); // já dispararam alerta de intenção de compra (1x)
 const mensagensPendentes = {};
 const debounceTimers = {};
 const processandoAgendamento = new Set();
@@ -1076,8 +1117,12 @@ async function slotAindaDisponivel(inicioISO, fimISO) {
     });
     return res.data.calendars[CALENDAR_ID].busy.length === 0;
   } catch (err) {
+    // Fail closed (BOT-012): erro no Calendar NÃO é sinal de "livre". Antes,
+    // retornar true aqui confirmava reserva em cima de horário possivelmente
+    // ocupado, colocando dois leads no mesmo slot. Retornando false, o chamador
+    // busca horários frescos (ou escala pra equipe se o Calendar estiver fora).
     console.error('Erro ao revalidar disponibilidade do slot:', err.message);
-    return true; // checagem falhou — segue com o agendamento em vez de travar o lead
+    return false;
   }
 }
 
@@ -1324,8 +1369,13 @@ async function criarEvento(nome, email, telefone, slotInicio, slotFim, resumo = 
     console.log(`Evento criado para ${nome}. Meet: ${meetLink}`);
     return { meetLink, eventId: res.data.id };
   } catch (err) {
+    // Falha total na criação do evento: LANÇA em vez de devolver eventId null.
+    // Sem isso o chamador confirmava a reunião pro lead ("tá marcado") mesmo
+    // sem evento no Calendar (BOT-002). O catch externo do agendamento já trata
+    // esse erro como "pendente manual": avisa o lead com honestidade e alerta a
+    // equipe. Evento criado SEM link do Meet não cai aqui — ali eventId existe.
     console.error('Erro ao criar evento:', err.message);
-    return { meetLink: null, eventId: null };
+    throw new Error(`Falha ao criar evento no Calendar: ${err.message}`);
   }
 }
 
@@ -1355,11 +1405,16 @@ async function remarcarEvento(eventId, novoInicio, novoFim) {
 // Cancela (apaga) um evento existente no Calendar — usado quando o lead pede
 // pra desmarcar de vez, sem remarcar.
 async function cancelarEvento(eventId) {
-  if (!eventId) return false;
+  if (!eventId) return true; // nada pra cancelar = já está no estado desejado
   try {
     await calendar.events.delete({ calendarId: CALENDAR_ID, eventId, sendUpdates: 'none' });
     return true;
   } catch (err) {
+    // 404/410 = evento já não existe no Calendar: o objetivo (não ter evento)
+    // está cumprido, então conta como sucesso. Qualquer outro erro é falha real
+    // e NÃO pode ser confirmada ao lead (BOT-003).
+    const status = err?.code || err?.response?.status;
+    if (status === 404 || status === 410) return true;
     console.error('Erro ao cancelar evento:', err.message);
     return false;
   }
@@ -1433,6 +1488,7 @@ setInterval(async () => {
     for (const phone of Object.keys(followUpStatus)) {
       const status = followUpStatus[phone];
       if (status.tentativas !== 99) continue; // só processa leads em modo reativação
+      if (leadsOptOut.has(phone)) continue;   // opt-out: nunca reativa (Melhoria 6)
       if (dentroDoHorarioSilencio()) continue;
 
       const tempoEncerrado = agora - status.reativacaoAgendada;
@@ -1492,6 +1548,7 @@ setInterval(async () => {
   for (const phone of Object.keys(ultimaMensagem)) {
    try {
     if (leadsAgendados.has(phone) || leadsEncerrados.has(phone)) continue;
+    if (leadsOptOut.has(phone)) continue; // opt-out: sem follow-up (Melhoria 6)
     if (!ultimaMensagem[phone]) continue;
     const status = followUpStatus[phone] || { tentativas: 0, ultimoFollowUp: 0 };
     // Garante que o status está salvo (corrige leads carregados do banco sem followUpStatus)
@@ -1596,6 +1653,7 @@ setInterval(async () => {
    try {
     const ag = agendamentosConfirmados[phone];
     if (!ag) continue;
+    if (leadsOptOut.has(phone)) continue; // opt-out: sem lembrete proativo (Melhoria 6)
     if (ag.lembrete24hEnviado && ag.lembrete2hEnviado && ag.lembrete30minEnviado) continue;
 
     const inicioMs = new Date(ag.slotInicio).getTime();
@@ -2709,7 +2767,19 @@ function _msgOfertaRemarcacao(slots) {
 // modo remarcação, quando o lead pede explicitamente pra desmarcar.
 async function cancelarReuniaoLead(userPhone, ag) {
   log(userPhone, 'info', 'Lead pediu cancelamento da reunião.');
-  await cancelarEvento(ag.eventId);
+
+  // Fail closed (BOT-003): só confirma o cancelamento ao lead e limpa o CRM se
+  // o Calendar realmente removeu o evento. Se a API falhou, o evento continua
+  // na agenda do especialista — mentir "desmarquei" faria ele entrar numa
+  // reunião que o lead acha cancelada. Mantém o estado e escala pra equipe.
+  const removeu = await cancelarEvento(ag.eventId);
+  if (!removeu) {
+    log(userPhone, 'warn', 'Cancelamento no Calendar falhou — mantendo estado e escalando.');
+    await enviarMensagem(MEU_NUMERO, `*Cancelamento pendente — ação manual*\n\nNome: ${ag.nome || 'Não informado'}\nWhatsApp: ${userPhone}\nHorário: ${ag.labelCG || ag.label}\n\nO lead pediu pra desmarcar mas não consegui remover o evento no Calendar. Remova manualmente.`).catch(() => {});
+    await enviarERegistrar(userPhone, 'Recebi seu pedido pra desmarcar! Tive uma instabilidade aqui pra confirmar na hora, mas já avisei nossa equipe e vamos resolver. Qualquer coisa te retorno por aqui.');
+    return true;
+  }
+
   const labelCancelada = ag.label;
   const labelInterna = ag.labelCG || ag.label;
   const nomeCancel = ag.nome || '';
@@ -3090,6 +3160,39 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
       enviarMensagem(MEU_NUMERO, `*Possível abuso detectado*\n\nWhatsApp: ${userPhone}\nMensagem: "${t.slice(0, 100)}"\n\nLead bloqueado por 24h.`).catch(() => {});
       return;
     }
+  }
+
+  // Opt-out (Melhoria 6): o lead pediu pra não receber mais mensagens. Confirma
+  // uma vez, registra (persistente) e para. As automações proativas checam
+  // leadsOptOut e não mandam nada. Vale mesmo se já estava em opt-out (idempotente).
+  if (userText && pediuOptOut(userText)) {
+    await registrarOptOut(userPhone);
+    await enviarMensagem(userPhone, 'Sem problema, não te envio mais mensagens por aqui. Se um dia quiser retomar, é só me chamar. Abraço!').catch(() => {});
+    log(userPhone, 'info', 'Lead pediu opt-out — automações silenciadas.');
+    return;
+  }
+  // Lead que estava em opt-out e voltou a escrever por conta própria (conteúdo
+  // que não é outro opt-out): reengajou, então libera as automações de novo.
+  if (leadsOptOut.has(userPhone)) {
+    leadsOptOut.delete(userPhone);
+    pool.query('DELETE FROM opt_outs WHERE client_id = $1 AND phone = $2', [CLIENT_ID, userPhone]).catch(() => {});
+    log(userPhone, 'info', 'Lead reengajou após opt-out — automações reativadas.');
+  }
+
+  // Alerta de lead quente (Melhoria 8): intenção EXPLÍCITA de contratar dispara
+  // um aviso imediato pro comercial, uma vez por lead. Não interrompe o fluxo —
+  // o bot segue conduzindo; o alerta só acelera a intervenção humana.
+  if (userText && temIntencaoDeCompra(userText) && !leadsAlertadosQuente.has(userPhone)) {
+    leadsAlertadosQuente.add(userPhone);
+    const nomeQuente = extrairNomeLead(conversas[userPhone] || []) || nomeDoWebhook || '';
+    const negocioQuente = extrairTipoNegocio(conversas[userPhone] || []);
+    let alerta = `🔥 *Lead quente — intenção de compra*\n\n`;
+    if (nomeQuente) alerta += `Nome: ${nomeQuente}\n`;
+    alerta += `WhatsApp: ${userPhone}\n`;
+    if (negocioQuente) alerta += `Segmento: ${negocioQuente}\n`;
+    alerta += `Disse: "${userText.slice(0, 120)}"\n\nEntre agora enquanto está quente.`;
+    enviarMensagem(NUMERO_VENDEDOR, alerta).catch(() => {});
+    log(userPhone, 'info', 'Alerta de lead quente enviado ao comercial.');
   }
 
   // Se o lead estava encerrado e mandou mensagem nova, reativa MANTENDO o histórico
@@ -4091,7 +4194,7 @@ async function chamarClaude(historico, contextoDinamico = '') {
 async function baixarMidia(mediaId, fallbackMimeType = 'application/octet-stream') {
   try {
     // 1. Obter a URL temporária da mídia
-    const metaRes = await axios.get(`https://graph.facebook.com/v19.0/${mediaId}`, {
+    const metaRes = await axios.get(`https://graph.facebook.com/${META_GRAPH_API}/${mediaId}`, {
       headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
       timeout: 15000
     });
@@ -4155,8 +4258,14 @@ async function transcreverAudio(buffer, mimeType) {
   }
 }
 
-// Códigos de erro da Meta que indicam número inválido/inacessível permanentemente
-const ERROS_NUMERO_INVALIDO = new Set([131026, 131047, 131051, 131052]);
+// Códigos da Meta que indicam número inválido/inacessível PERMANENTEMENTE.
+// 131047 saiu daqui (BOT-005): é "re-engagement required" — o lead só não
+// mandou mensagem nas últimas 24h. Marcar como inválido matava um lead válido
+// e escondia a causa real (janela fechada, precisa de template).
+const ERROS_NUMERO_INVALIDO = new Set([131026, 131051, 131052]);
+// Fora da janela de 24h: a mensagem livre não pode ser entregue, mas o lead
+// continua válido e ativo pra quando ele mesmo voltar a escrever.
+const ERRO_FORA_DA_JANELA = 131047;
 
 // Envia uma mensagem ao lead E registra no histórico da conversa como assistant.
 // Usado quando o CÓDIGO (não o Claude) gera a mensagem — garante que o Claude
@@ -4210,7 +4319,7 @@ async function enviarMensagem(para, texto, tentativa = 1) {
   const MAX_TENTATIVAS_ENVIO = 2;
   try {
     await axios.post(
-      `https://graph.facebook.com/v19.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      `https://graph.facebook.com/${META_GRAPH_API}/${process.env.PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: 'whatsapp',
         to: para,
@@ -4228,6 +4337,13 @@ async function enviarMensagem(para, texto, tentativa = 1) {
     return true; // enviada com sucesso
   } catch (err) {
     const codigoErro = err.response?.data?.error?.code;
+    // Fora da janela de 24h (131047): não entrega, mas NÃO invalida o lead.
+    // Só registra — o envio proativo fora da janela exige template aprovado
+    // (BOT-001), pendência conhecida. O lead segue ativo pro próximo contato.
+    if (codigoErro === ERRO_FORA_DA_JANELA) {
+      console.warn(`[${mascararTelefone(para)}] Fora da janela de 24h (131047) — mensagem livre não entregue. Lead mantido ativo.`);
+      return false;
+    }
     if (codigoErro && ERROS_NUMERO_INVALIDO.has(codigoErro)) {
       console.warn(`[${mascararTelefone(para)}] Número inválido ou inacessível (código ${codigoErro}) — marcando como inativo.`);
       // Limpa o lead da memória para não continuar tentando
