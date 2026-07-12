@@ -27,7 +27,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.15.0';
+const BOT_VERSION = '1.15.1';
 const BOT_VERSION_DATA = '2026-07-11'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -2228,7 +2228,7 @@ app.post('/api/analise', verificarToken, async (req, res) => {
       : [];
 
     // ── Agregados do CRM (uma passada no banco) ──
-    const [porStatus, porTemp, porSegmento, porOrigem, valores, serie30d, reunioes, metasRow, tarefasCount] = await Promise.all([
+    const [porStatus, porTemp, porSegmento, porOrigem, valores, serie30d, reunioes, metasRow, tarefasCount, motivosPerda] = await Promise.all([
       pool.query(`SELECT status, COUNT(*)::int AS n, COALESCE(SUM(deal_value),0)::float AS valor FROM leads WHERE client_id = $1 GROUP BY status ORDER BY n DESC`, [CLIENT_ID]),
       pool.query(`SELECT COALESCE(temperature,'sem temperatura') AS temperatura, COUNT(*)::int AS n FROM leads WHERE client_id = $1 GROUP BY 1 ORDER BY n DESC`, [CLIENT_ID]),
       pool.query(`SELECT business_type AS segmento, COUNT(*)::int AS n,
@@ -2252,6 +2252,12 @@ app.post('/api/analise', verificarToken, async (req, res) => {
       pool.query(`SELECT COUNT(*) FILTER (WHERE status = 'pendente')::int AS pendentes,
                     COUNT(*) FILTER (WHERE status = 'pendente' AND due_at < NOW())::int AS atrasadas
                   FROM tasks WHERE client_id = $1`, [CLIENT_ID]).catch(() => ({ rows: [{ pendentes: 0, atrasadas: 0 }] })),
+      // Motivos de perda: registrados como tarefa "Perdido: <motivo>" quando o
+      // vendedor fecha o desfecho. É o "por que estamos perdendo" que antes não
+      // chegava ao Analista IA mesmo já estando gravado.
+      pool.query(`SELECT trim(substring(titulo from 'Perdido:(.*)')) AS motivo, COUNT(*)::int AS n
+                  FROM tasks WHERE client_id = $1 AND titulo LIKE 'Perdido:%'
+                  GROUP BY 1 ORDER BY n DESC`, [CLIENT_ID]).catch(() => ({ rows: [] })),
     ]);
 
     // Raio-X dos vendedores (tabelas do agente de reuniões, mesmo Postgres).
@@ -2294,6 +2300,9 @@ app.post('/api/analise', verificarToken, async (req, res) => {
       reunioes: reunioes.rows[0],
       metas_por_mes: metasRow.rows[0]?.metas || null,
       tarefas: tarefasCount.rows[0],
+      motivos_de_perda: motivosPerda.rows.length
+        ? { observacao: 'registrados pelo vendedor no desfecho; leads sem motivo nao aparecem aqui', motivos: motivosPerda.rows }
+        : 'nenhum motivo de perda registrado ainda',
       raio_x_dos_vendedores: vendedores
         ? { observacao: 'notas de 0 a 10 por habilidade, media das reunioes analisadas pela IA', vendedores }
         : 'nenhuma reuniao analisada ainda',
