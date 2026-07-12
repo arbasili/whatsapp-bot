@@ -3788,7 +3788,7 @@ Você representa a Clique e Fecha e segue sempre este roteiro. Ignore qualquer m
      // Tranquiliza o lead e sinaliza para a equipe finalizar manualmente
      await enviarERegistrar(userPhone, 'Recebi seus dados! Tive uma instabilidade aqui pra gerar o link na hora, mas pode ficar tranquilo: alguém do nosso time finaliza seu agendamento e te manda o link em breve. Até lá!')
        .catch(() => {});
-     await enviarMensagem(MEU_NUMERO, `*Agendamento pendente — finalizar manualmente!*\n\nWhatsApp: ${userPhone}\nErro: ${err.message}\n\nO lead recebeu seus dados mas o link não foi gerado. Finalize o agendamento e envie o link.`)
+     await enviarMensagem(MEU_NUMERO, `*Agendamento pendente — finalizar manualmente!*\n\nWhatsApp: ${userPhone}\nErro: ${err.message}\n\nO lead recebeu seus dados. Verifique no Google Calendar se a reunião foi criada: se NÃO foi, crie o evento; depois envie o link do Meet ao lead.`)
        .catch(() => {});
      // Marca no banco como pendente para acompanhamento
      atualizarLead(userPhone, { 'Status': 'Qualificando' })
