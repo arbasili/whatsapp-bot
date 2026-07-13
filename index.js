@@ -81,13 +81,13 @@ function emitirMudancaLeads() {
   }
 }
 
-// CORS — aceita requisições do painel CRM
-app.use(cors({
-  origin: [
-    'https://painel-clique-fecha-production.up.railway.app',
-    'https://app.cliqueefecha.com.br'
-  ]
-}));
+// CORS — aceita requisições do painel CRM. Origens configuráveis por env
+// (CORS_ORIGINS, separadas por vírgula): sem isso, um cliente novo com painel
+// em outra URL teria TODAS as chamadas do painel bloqueadas por CORS.
+const ORIGENS_PAINEL = (process.env.CORS_ORIGINS ||
+  'https://painel-clique-fecha-production.up.railway.app,https://app.cliqueefecha.com.br')
+  .split(',').map(o => o.trim()).filter(Boolean);
+app.use(cors({ origin: ORIGENS_PAINEL }));
 
 app.use(express.json({
   verify: (req, res, buf) => { req.rawBody = buf; }
@@ -678,7 +678,7 @@ const auth = new google.auth.JWT({
   scopes: [
     'https://www.googleapis.com/auth/calendar',
   ],
-  subject: 'comercial@cliqueefecha.com.br',
+  subject: cfg.agenda.googleSubject, // email personificado pela conta de serviço (por cliente)
 });
 const calendar = google.calendar({ version: 'v3', auth });
 
@@ -3513,7 +3513,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
   const podeAgendar = agEmail?.slots?.length > 0 && !leadsAgendados.has(userPhone) && !processandoAgendamento.has(userPhone);
   const matchesEmail = (userText || '').match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
   const emailDaMensagem = matchesEmail
-    ? (matchesEmail.find(e => !e.toLowerCase().includes('cliqueefecha')) || matchesEmail[0]).toLowerCase()
+    ? (matchesEmail.find(e => !e.toLowerCase().includes(cfg.empresa.dominio)) || matchesEmail[0]).toLowerCase()
     : null;
 
   if (emailDaMensagem && podeAgendar && !agEmail.emailConfirmado) {
@@ -3604,7 +3604,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       for (let i = msgsUsuarioParaEmail.length - 1; i >= 0; i--) {
         const matches = msgsUsuarioParaEmail[i].match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
         if (matches) {
-          emailLead = matches.find(e => !e.includes('cliqueefecha')) || matches[0];
+          emailLead = matches.find(e => !e.toLowerCase().includes(cfg.empresa.dominio)) || matches[0];
           break;
         }
       }

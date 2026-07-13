@@ -41,6 +41,18 @@ module.exports = {
   agenda: {
     // Antes estava hardcoded no index.js — agora é por cliente.
     calendarId: process.env.CALENDAR_ID || 'comercial@cliqueefecha.com.br',
+    // Email do Google Workspace que a conta de serviço PERSONIFICA pra acessar a
+    // agenda (normalmente o mesmo do calendarId). Sem isto certo, o agendamento
+    // no Google Calendar quebra num cliente novo — a conta de serviço tentaria
+    // personificar o email da outra empresa e a autenticação falharia.
+    googleSubject: process.env.GOOGLE_SUBJECT || 'comercial@cliqueefecha.com.br',
+  },
+
+  // ── Domínio próprio da empresa ────────────────────────────────────────────
+  // Parte identificável do email/domínio da empresa. Usado pra NÃO confundir o
+  // email da própria empresa com o do lead ao extrair endereços da conversa.
+  empresa: {
+    dominio: 'cliqueefecha',
   },
 
   // ── Plano contratado — quais módulos este cliente tem ─────────────────────
