@@ -895,7 +895,7 @@ Regras:
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
         max_tokens: 600,
         messages: [{ role: 'user', content: prompt }]
       },
@@ -973,7 +973,7 @@ async function gerarResumoParcial(phone) {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
         max_tokens: 200,
         messages: mesclarTurnosConsecutivos([
           ...hist,
@@ -1459,7 +1459,7 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
         max_tokens: 120,
         messages: mesclarTurnosConsecutivos([...historicoReal, { role: 'user', content: instrucao }])
       },
@@ -2315,7 +2315,7 @@ app.post('/api/analise', verificarToken, async (req, res) => {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
         max_tokens: 1600,
         messages: [{
           role: 'user',
@@ -2982,7 +2982,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
         max_tokens: 10,
         messages: [{
           role: 'user',
@@ -3638,7 +3638,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       const resumoResp = await axios.post(
         'https://api.anthropic.com/v1/messages',
         {
-          model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+          model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
           max_tokens: 400,
           messages: mesclarTurnosConsecutivos([
             ...historicoParaResumo,
@@ -4175,7 +4175,7 @@ async function chamarClaude(historico, contextoDinamico = '') {
     try {
       const response = await axios.post(
         'https://api.anthropic.com/v1/messages',
-        { model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6', max_tokens: 500, system, messages: mensagens },
+        { model: process.env.CLAUDE_MODEL || 'claude-sonnet-5', max_tokens: 500, system, messages: mensagens },
         {
           headers: {
             'x-api-key': process.env.ANTHROPIC_API_KEY,
