@@ -39,6 +39,16 @@ const BOT_VERSION_DATA = '2026-07-11'; // data desta versão
 // teste. Configurável por env pra atualizar sem mexer no código.
 const META_GRAPH_API = process.env.META_GRAPH_API_VERSION || 'v21.0';
 
+// Extrai o TEXTO de uma resposta da API da Anthropic somando só os blocos de
+// texto. `content[0].text` quebrava com modelos que devolvem um bloco de
+// raciocínio antes do texto (ex: Sonnet 5): content[0].text vinha undefined e
+// o bot silenciava com "Cannot read properties of undefined (reading 'slice')".
+function textoDaResposta(respApi) {
+  const blocos = respApi?.data?.content;
+  if (!Array.isArray(blocos)) return '';
+  return blocos.filter(b => b && b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('');
+}
+
 const helmet = require('helmet');
 const { rateLimit: criarRateLimiter } = require('express-rate-limit');
 
@@ -908,7 +918,7 @@ Regras:
     const usoIA = resp.data.usage || {};
     console.log(`[Claude/score] ${duracaoIA}ms | input: ${usoIA.input_tokens || '?'} | output: ${usoIA.output_tokens || '?'} tokens`);
 
-    const texto = resp.data.content[0].text.replace(/```json|```/g, '').trim();
+    const texto = textoDaResposta(resp).replace(/```json|```/g, '').trim();
     const dados = JSON.parse(texto);
 
     // Com reunião marcada, a próxima ação É a reunião: usa o horário real do slot em
@@ -982,7 +992,7 @@ async function gerarResumoParcial(phone) {
       },
       { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 15000 }
     );
-    const texto = resp.data.content[0].text.trim();
+    const texto = textoDaResposta(resp).trim();
     const m = texto.match(/\{[\s\S]*\}/);
     if (!m) return;
     const dados = JSON.parse(m[0]);
@@ -1471,7 +1481,7 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
     const duracaoFollowUp = Date.now() - inicioFollowUp;
     const usoFollowUp = resp.data.usage || {};
     console.log(`[Claude/followup] ${duracaoFollowUp}ms | input: ${usoFollowUp.input_tokens || '?'} | output: ${usoFollowUp.output_tokens || '?'} tokens`);
-    return resp.data.content[0].text.trim();
+    return textoDaResposta(resp).trim();
   } catch (err) {
     console.error(`Erro ao gerar follow-up contextual (tentativa ${tentativa}):`, err.message);
     return tentativa === 1
@@ -2339,7 +2349,7 @@ Responda APENAS com um JSON válido (sem markdown, sem cercas de código) neste 
       { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 45000 }
     );
 
-    let bruto = resp.data.content[0].text.trim();
+    let bruto = textoDaResposta(resp).trim();
     // resiliência: modelo às vezes embrulha em cerca de código mesmo instruído a não fazer
     bruto = bruto.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
     let saida;
@@ -2991,7 +3001,7 @@ async function tratarPosAgendamento(userPhone, userText) {
       },
       { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 15000 }
     );
-    const r = resp.data.content[0].text.trim().toUpperCase();
+    const r = textoDaResposta(resp).trim().toUpperCase();
     if (r.includes('CONFIRMAR')) intencao = 'confirmar';
     else if (r.includes('CANCELAR')) intencao = 'cancelar';
     else if (r.includes('REMARCAR')) intencao = 'remarcar';
@@ -3650,7 +3660,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       const duracaoResumo = Date.now() - inicioResumo;
       const usoResumo = resumoResp.data.usage || {};
       console.log(`[Claude/resumo] ${duracaoResumo}ms | input: ${usoResumo.input_tokens || '?'} | output: ${usoResumo.output_tokens || '?'} tokens`);
-      const textoResp = resumoResp.data.content[0].text.trim();
+      const textoResp = textoDaResposta(resumoResp).trim();
       const jsonMatch = textoResp.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         try {
@@ -4189,7 +4199,11 @@ async function chamarClaude(historico, contextoDinamico = '') {
       const uso = response.data.usage || {};
       const cacheInfo = uso.cache_read_input_tokens ? ` | cache lido: ${uso.cache_read_input_tokens}` : (uso.cache_creation_input_tokens ? ` | cache criado: ${uso.cache_creation_input_tokens}` : '');
       console.log(`[Claude] ${duracao}ms | input: ${uso.input_tokens || '?'} tokens | output: ${uso.output_tokens || '?'} tokens${cacheInfo} | msgs enviadas: ${mensagens.length}`);
-      return response.data.content[0].text;
+      const textoResposta = textoDaResposta(response);
+      // Resposta sem bloco de texto (só raciocínio/estruturado): não devolve
+      // vazio silencioso — lança pra cair no retry como qualquer falha.
+      if (!textoResposta.trim()) throw new Error('Resposta do Claude sem bloco de texto');
+      return textoResposta;
     } catch (err) {
       const duracao = Date.now() - inicio;
       const status = err.response?.status;
