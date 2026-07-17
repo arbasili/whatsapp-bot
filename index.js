@@ -3179,8 +3179,13 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
   // uma vez, registra (persistente) e para. As automações proativas checam
   // leadsOptOut e não mandam nada. Vale mesmo se já estava em opt-out (idempotente).
   if (userText && pediuOptOut(userText)) {
+    // Registra o pedido E a despedida no histórico: se o lead reengajar dias
+    // depois, o Claude precisa ver que houve opt-out + despedida pra retomar
+    // com coerência (antes a despedida ia por fora e sumia da conversa).
+    if (conversas[userPhone]) conversas[userPhone].push({ role: 'user', content: userText });
     await registrarOptOut(userPhone);
-    await enviarMensagem(userPhone, 'Sem problema, não te envio mais mensagens por aqui. Se um dia quiser retomar, é só me chamar. Abraço!').catch(() => {});
+    await enviarERegistrar(userPhone, 'Sem problema, não te envio mais mensagens por aqui. Se um dia quiser retomar, é só me chamar. Abraço!').catch(() => {});
+    await persistirLead(userPhone);
     log(userPhone, 'info', 'Lead pediu opt-out — automações silenciadas.');
     return;
   }
