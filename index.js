@@ -31,8 +31,8 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.15.1';
-const BOT_VERSION_DATA = '2026-07-11'; // data desta versão
+const BOT_VERSION = '1.16.5';
+const BOT_VERSION_DATA = '2026-07-17'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
 // numa versão morta faz a Meta redirecionar silenciosamente pra outra, sem
