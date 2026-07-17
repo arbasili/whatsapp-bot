@@ -151,19 +151,33 @@ function gerarBullets(segmento, dor) {
   };
 }
 
+// Quantidade por argumento: `node seed-leads.js 15`. Sem argumento, 150.
+// Até 40 leads, o modo é DETERMINÍSTICO pra teste unitário: garante pelo menos
+// um lead em CADA uma das 12 fases (inclusive Reunião realizada), e os extras
+// vão pras fases mais exercitadas nos testes.
+const TOTAL = Math.max(1, parseInt(process.argv[2], 10) || 150);
+
+function statusParaIndice(i) {
+  if (TOTAL > 40) return pickWeighted(); // modo demo: distribuição realista
+  if (i < STATUS_DIST.length) return STATUS_DIST[i]; // 1 de cada fase primeiro
+  const EXTRAS = ['Em conversa', 'Reunião agendada', 'Reunião realizada', 'Pronto para agendar'];
+  const alvo = EXTRAS[(i - STATUS_DIST.length) % EXTRAS.length];
+  return STATUS_DIST.find(s => s.status === alvo) || STATUS_DIST[0];
+}
+
 async function seed() {
-  console.log(`🌱 Gerando 150 leads para client_id=${CLIENT_ID}...\n`);
+  console.log(`🌱 Gerando ${TOTAL} leads para client_id=${CLIENT_ID}...${TOTAL <= 40 ? ' (modo unitário: 1 por fase garantido)' : ''}\n`);
 
   const contagem = {};
   let inseridos = 0;
 
-  for (let i = 0; i < 150; i++) {
+  for (let i = 0; i < TOTAL; i++) {
     const nome = NOMES[i % NOMES.length];
     const segmento = pick(SEGMENTOS);
     const dor = pick(DORES);
     const origem = pick(ORIGENS);
     const urgencia = pick(URGENCIAS);
-    const statusItem = pickWeighted();
+    const statusItem = statusParaIndice(i);
 
     const temp = urgencia === 'imediata' ? 'quente'
       : urgencia === 'próximos dias' ? (rand(0,1) ? 'quente' : 'morno')
