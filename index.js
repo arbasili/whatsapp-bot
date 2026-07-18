@@ -31,7 +31,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.17.0';
+const BOT_VERSION = '1.18.0';
 const BOT_VERSION_DATA = '2026-07-18'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -203,6 +203,7 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS user_clients (
       user_id UUID NOT NULL,
       client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      role TEXT NOT NULL DEFAULT 'admin',
       created_at TIMESTAMPTZ DEFAULT NOW(),
       PRIMARY KEY (user_id, client_id)
     )
@@ -370,6 +371,11 @@ async function initDb() {
   // lead some das telas e métricas mas fica restaurável; o purge diário apaga
   // de vez (LGPD) depois de 30 dias na lixeira.
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`);
+
+  // Papel do usuário no cliente — alicerce do sistema de permissões. Hoje todo
+  // mundo é 'admin' e nada é filtrado por role; quando existir o segundo perfil
+  // (ex.: 'vendedor'), o painel passa a decidir o que mostrar por esta coluna.
+  await pool.query(`ALTER TABLE user_clients ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin'`);
 
   console.log('Tabelas do banco prontas (bot_state, clients, leads, conversations).');
 
