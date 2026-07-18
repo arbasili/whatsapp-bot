@@ -31,7 +31,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.18.1';
+const BOT_VERSION = '1.18.2';
 const BOT_VERSION_DATA = '2026-07-18'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -1588,7 +1588,8 @@ setInterval(async () => {
     const status = followUpStatus[phone] || { tentativas: 0, ultimoFollowUp: 0 };
     // Garante que o status está salvo (corrige leads carregados do banco sem followUpStatus)
     if (!followUpStatus[phone]) followUpStatus[phone] = status;
-    const tempoSemResposta = agora - ultimaMensagem[phone];
+    const marcaUltima = ultimaMensagem[phone];
+    const tempoSemResposta = agora - marcaUltima;
 
     let nome = 'você';
     if (conversas[phone]) {
@@ -1596,25 +1597,41 @@ setInterval(async () => {
       if (nomeExtraido) nome = nomeExtraido;
     }
 
-    if (dentroDoHorarioSilencio()) continue; // não envia entre 20h e 8h
-
     // ── Follow-ups dentro da janela de 24h ──────────────────────────────────
     // Após 24h da última mensagem do lead a janela da Meta fecha.
     // Todas as tentativas precisam acontecer antes disso.
     const dentroJanela = tempoSemResposta < JANELA_META_MS;
 
     if (dentroJanela) {
-      if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
-        const msg = await gerarMsgFollowUp(phone, nome, 1);
-        await enviarERegistrar(phone, msg);
-        followUpStatus[phone] = { tentativas: 1, ultimoFollowUp: agora };
-        await persistirLead(phone);
+      // O horário de silêncio (20h–8h) vale só para os ENVIOS de follow-up. A
+      // transição do ramo "janela fechou" (abaixo) NÃO manda mensagem ao lead —
+      // só atualiza o CRM — então não pode ser bloqueada pela madrugada, senão o
+      // lead fica preso como "Em conversa" até as 8h. Por isso o teste fica aqui.
+      if (dentroDoHorarioSilencio()) continue;
 
-      } else if (status.tentativas === 1 && tempoSemResposta > FOLLOWUP_2_MS) {
-        const msg = await gerarMsgFollowUp(phone, nome, 2);
+      // Envia um follow-up REVALIDANDO o estado depois de gerar o texto: a chamada
+      // ao Claude leva alguns segundos e o lead pode responder (ou agendar/encerrar/
+      // pedir opt-out) nesse meio-tempo. Sem esta checagem, o bot dispara o "você
+      // sumiu?" logo depois de o lead responder — e ainda sobrescreve o estado que a
+      // resposta acabou de resetar (corrida encontrada na revisão dos follow-ups).
+      const enviarFollowUp = async (tentativa) => {
+        const msg = await gerarMsgFollowUp(phone, nome, tentativa);
+        if (ultimaMensagem[phone] !== marcaUltima
+            || leadsAgendados.has(phone) || leadsEncerrados.has(phone) || leadsOptOut.has(phone)) {
+          return; // lead reengajou ou mudou de estado durante a geração — aborta o envio
+        }
         await enviarERegistrar(phone, msg);
-        followUpStatus[phone] = { tentativas: 2, ultimoFollowUp: agora };
+        // ultimoFollowUp = marca do último toque automático. Não é lido pelo gating de
+        // follow-up (que usa ultimaMensagem); é mantido de propósito como base pra
+        // frequency-capping futuro e pra depuração.
+        followUpStatus[phone] = { tentativas: tentativa, ultimoFollowUp: agora };
         await persistirLead(phone);
+      };
+
+      if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
+        await enviarFollowUp(1);
+      } else if (status.tentativas === 1 && tempoSemResposta > FOLLOWUP_2_MS) {
+        await enviarFollowUp(2);
       }
 
     } else {
@@ -2807,7 +2824,7 @@ app.post('/webhook', async (req, res) => {
   // a própria retomada como "bug" (visto em produção: lead respondeu "como" a um
   // follow-up e o bot pediu desculpas por um bug que não existiu).
   if ((followUpStatus[userPhone]?.tentativas || 0) >= 1) {
-    retomadaPosFollowUp.add(userPhone);
+    retomadaPosFollowUp.set(userPhone, agora);
   }
   // Sempre inicializa/reseta o followUpStatus ao receber mensagem
   // (antes só resetava se já existia — bug que impedia o primeiro follow-up)
@@ -2976,7 +2993,10 @@ const motivoCancelamentoPendente = new Map();
 
 // Leads cuja mensagem atual é resposta a um follow-up/reativação (setado no webhook,
 // antes do reset do followUpStatus; consumido ao montar o contexto dinâmico).
-const retomadaPosFollowUp = new Set();
+// Map phone->timestamp: o contexto só honra o flag se for recente, pra um flag que
+// escapou do consumo (ex.: resposta que virou opt-out) não vazar pra uma mensagem
+// futura sem relação.
+const retomadaPosFollowUp = new Map();
 
 // O motivo vira tarefa CONCLUÍDA no histórico do lead (origem bot) + aviso ao
 // time. Não entra como "Perdido:" de propósito: cancelar reunião não é negócio
@@ -4062,9 +4082,14 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     // O lead está respondendo a um follow-up enviado horas atrás — sem este aviso o
     // Claude vê a própria retomada como mensagem estranha no histórico e pode "pedir
     // desculpas por um bug" que não existiu (visto em produção).
-    if (retomadaPosFollowUp.has(userPhone)) {
+    const marcaRetomada = retomadaPosFollowUp.get(userPhone);
+    if (marcaRetomada !== undefined) {
       retomadaPosFollowUp.delete(userPhone);
-      contextoDinamico += ` CONTEXTO DA RETOMADA: sua última mensagem foi um follow-up de retomada enviado DE PROPÓSITO horas depois da última resposta do lead — não foi erro, não foi bug, NÃO peça desculpas por ela. A mensagem do lead agora é a resposta a esse follow-up: se demonstra interesse (ex: "como", "quero", "pode ser", "sim"), trate como um SIM à sua oferta e avance para a proposta do diagnóstico; NÃO repita perguntas de qualificação já respondidas.`;
+      // Só honra o flag se recente (< 5 min): blindagem contra flag que escapou do
+      // consumo e ficaria colado numa mensagem futura sem relação.
+      if (Date.now() - marcaRetomada < 5 * 60 * 1000) {
+        contextoDinamico += ` CONTEXTO DA RETOMADA: sua última mensagem foi um follow-up de retomada enviado DE PROPÓSITO horas depois da última resposta do lead — não foi erro, não foi bug, NÃO peça desculpas por ela. A mensagem do lead agora é a resposta a esse follow-up: se demonstra interesse (ex: "como", "quero", "pode ser", "sim"), trate como um SIM à sua oferta e avance para a proposta do diagnóstico; NÃO repita perguntas de qualificação já respondidas.`;
+      }
     }
 
     log(userPhone, 'info', `Chamando Claude — histórico: ${conversas[userPhone].length} msgs`);
