@@ -1,6 +1,9 @@
-// seed-leads.js — Rodar no Railway Console do BOT
-// Uso: node seed-leads.js
-// Requer: DATABASE_URL e CLIENT_ID já configurados como variáveis de ambiente
+// seed-leads.js — Rodar no Railway Console do BOT ou da sua máquina
+// Uso: node seed-leads.js [quantidade]
+// Requer: DATABASE_URL e CLIENT_ID nas variáveis de ambiente OU no .env desta pasta
+
+// Fora do Railway as envs não existem — carrega o .env local (gitignored)
+try { require('dotenv').config(); } catch {}
 
 const { Pool } = require('pg');
 
@@ -237,7 +240,9 @@ async function seed() {
           $20, $21, $22, $23, $24
         )`,
         [
-          nome, phone, email, segmento, dor, urgencia, statusItem.status, temp,
+          // "(teste)" no nome distingue leads de seed de leads REAIS que chegam
+          // pelo link do Instagram — sem isso não dá pra saber quem é quem no Kanban
+          `${nome} (teste)`, phone, email, segmento, dor, urgencia, statusItem.status, temp,
           score, closeProb, nextAction, scheduledAt,
           JSON.stringify(insights), summary, JSON.stringify(bullets),
           origem, meetLink, scheduledAt, statusItem.siglas,

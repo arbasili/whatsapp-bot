@@ -31,7 +31,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.16.6';
+const BOT_VERSION = '1.16.7';
 const BOT_VERSION_DATA = '2026-07-17'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -3299,11 +3299,13 @@ REGRA DE SAUDAÇÃO: Use EXCLUSIVAMENTE "${saudacaoHora}" se for saudar pelo per
 
 REGRA DE FUSO HORÁRIO: Todos os horários que você oferece ao lead já estão em horário de Brasília (GMT-3). Se o lead demonstrar qualquer confusão sobre fuso horário, seja prestativo: deixe sempre explícito que o horário informado é de Brasília. Se o lead disser a cidade dele, ofereça ajudar: "Me fala de qual cidade você é que eu te ajudo a confirmar certinho." Nunca peça para o lead fazer a conta sozinho — isso é transferir trabalho desnecessário perto do fechamento. Continue sem inventar conversões por conta própria, mas evite soar evasivo: a ideia é reduzir a hesitação, não empurrar o problema.
 
+REGRA DE UMA PERGUNTA POR MENSAGEM (vale para a conversa INTEIRA, não só uma etapa): cada mensagem sua contém NO MÁXIMO uma pergunta. Nunca emende a pergunta da próxima etapa do roteiro na mesma mensagem — termine na primeira pergunta, espere a resposta do lead e só então avance. Duas perguntas juntas soam como formulário e derrubam a taxa de resposta.
+
 MARCADOR DE NOME — OBRIGATÓRIO:
 Assim que souber o nome do lead (seja porque ele informou, confirmou ou corrigiu), inclua na sua resposta o marcador exato: [NOME: PrimeiroNome]
 Exemplo: se o lead disse que se chama João Silva, inclua [NOME: João] em algum lugar da mensagem. O sistema remove esse marcador automaticamente antes de enviar ao lead — não precisa se preocupar em escondê-lo ou explicá-lo, apenas inclua o marcador de forma direta. Faça isso UMA única vez, assim que o nome for confirmado. Nunca repita o marcador.
 
-${nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o nome do lead pode ser "${nomeDoWebhook}" (vindo do perfil do WhatsApp, pode não ser o nome real). Na primeira mensagem, em vez de perguntar o nome do zero, use o formato de 3 partes com "|||" mas substitua a última parte por: "Posso te chamar de ${nomeDoWebhook}?" — Se o lead confirmar, inclua [NOME: ${nomeDoWebhook}] na resposta. Se o lead corrigir ou disser que não é esse o nome, pergunte naturalmente "Como você prefere que eu te chame?" e use o nome que ele informar com [NOME: NomeCorrigido]. Seja flexível: o nome do perfil pode estar errado.` : ''}
+${nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o nome do lead pode ser "${nomeDoWebhook}" (vindo do perfil do WhatsApp, pode não ser o nome real). Na primeira mensagem, em vez de perguntar o nome do zero, use o formato de 3 partes com "|||" mas substitua a última parte por: "Posso te chamar de ${nomeDoWebhook}?" — e a mensagem TERMINA nessa pergunta: NÃO emende "me conta sobre a sua operação" nem qualquer outra pergunta junto; a pergunta sobre a operação só vem DEPOIS que o lead responder sobre o nome. Se o lead confirmar, inclua [NOME: ${nomeDoWebhook}] na resposta. Se o lead corrigir ou disser que não é esse o nome, pergunte naturalmente "Como você prefere que eu te chame?" e use o nome que ele informar com [NOME: NomeCorrigido]. Seja flexível: o nome do perfil pode estar errado.` : ''}
 
 SOBRE A EMPRESA:
 Serviços: ${cfg.negocio.servicos}.
