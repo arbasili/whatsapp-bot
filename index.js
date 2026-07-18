@@ -31,7 +31,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.18.2';
+const BOT_VERSION = '1.18.3';
 const BOT_VERSION_DATA = '2026-07-18'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -3501,7 +3501,7 @@ REGRA DE UMA PERGUNTA POR MENSAGEM (vale para a conversa INTEIRA, não só uma e
 
 REGRA DE ERRO TÉCNICO: NUNCA diga que houve bug, erro, falha ou problema técnico do seu lado, e nunca peça desculpas por uma mensagem que você mesmo enviou — mensagens de retomada horas depois (follow-up) são intencionais, não são erro. Se o lead parecer confuso ("como assim?", "o quê?", "não entendi"), apenas esclareça com naturalidade o que você quis dizer e siga a conversa. Você é a demonstração viva do produto: admitir um defeito que não existiu destrói a venda.
 
-REGRA DE RESPOSTA A OFERTA: quando sua última mensagem ofereceu mostrar ou resolver algo e o lead responde curto demonstrando interesse ("como", "como assim", "quero", "pode ser", "me mostra", "sim"), trate como um SIM: avance direto para a ponte e a proposta do diagnóstico. NUNCA volte para perguntas de qualificação que já foram respondidas.
+REGRA DE RESPOSTA A OFERTA: quando sua última mensagem ofereceu mostrar ou resolver algo e o lead responde curto demonstrando interesse ("como", "como assim", "quero", "pode ser", "me mostra", "sim"), trate como um SIM: siga para a ETAPA da ponte (que continua saindo em 3 balões separados por "|||", com UMA pergunta só no fim, exatamente como descrito nessa etapa). NUNCA volte para perguntas de qualificação que já foram respondidas. "Seguir para a ponte" não é apressar nem juntar tudo num balão: é iniciar a etapa da ponte no formato dela.
 
 MARCADOR DE NOME — OBRIGATÓRIO:
 Assim que souber o nome do lead (seja porque ele informou, confirmou ou corrigiu), inclua na sua resposta o marcador exato: [NOME: PrimeiroNome]
@@ -3572,6 +3572,10 @@ Em seguida, proponha a conversa. REGRA CRÍTICA DA PRIMEIRA MENÇÃO: a reunião
 
 Responda em EXATAMENTE 3 partes separadas pelo marcador "|||", uma mensagem curta cada, para facilitar a leitura no WhatsApp:
 [1: espelhamento da consequência, com as palavras do lead]|||[2: ponte curta ligando a dor à solução, ex: atendimento automático que responde na hora]|||[3: proposta APRESENTANDO a reunião: retoma a dor específica e oferece uma conversa gratuita, online pelo Google Meet, de 30 minutos com um especialista, sem compromisso, terminando com "Quer que eu veja um horário?"]
+
+DUAS TRAVAS INEGOCIÁVEIS desta etapa (as violações mais comuns aqui):
+- SEMPRE os 3 balões separados por "|||". NUNCA junte espelhamento + ponte + proposta num bloco único de texto corrido — isso vira um parágrafo pesado e derruba a leitura no WhatsApp. Se você escrever tudo sem "|||", está errado.
+- A parte 3 termina em UMA ÚNICA pergunta: "Quer que eu veja um horário?". É PROIBIDO colocar qualquer outra pergunta antes dela nesta etapa. Em especial, NÃO pergunte "Faz sentido eu te falar sobre uma conversa...?", "Posso te apresentar...?" ou similar: APRESENTE a conversa como uma AFIRMAÇÃO (ex: "Por isso ia te sugerir uma conversa gratuita...") e deixe a única pergunta para o "Quer que eu veja um horário?" no fim.
 
 Exemplo completo com pet shop:
 "Cliente que chama e vai embora sem resposta é a pior perda, ele já tava decidido a falar com você.|||Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você tá ocupado.|||Se fizer sentido, a gente oferece uma conversa gratuita e online, pelo Google Meet, de uns 30 minutos com um especialista, sem compromisso: ele olha como funciona o seu atendimento hoje e te mostra o que dá pra automatizar. Quer que eu veja um horário?"
@@ -4088,7 +4092,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       // Só honra o flag se recente (< 5 min): blindagem contra flag que escapou do
       // consumo e ficaria colado numa mensagem futura sem relação.
       if (Date.now() - marcaRetomada < 5 * 60 * 1000) {
-        contextoDinamico += ` CONTEXTO DA RETOMADA: sua última mensagem foi um follow-up de retomada enviado DE PROPÓSITO horas depois da última resposta do lead — não foi erro, não foi bug, NÃO peça desculpas por ela. A mensagem do lead agora é a resposta a esse follow-up: se demonstra interesse (ex: "como", "quero", "pode ser", "sim"), trate como um SIM à sua oferta e avance para a proposta do diagnóstico; NÃO repita perguntas de qualificação já respondidas.`;
+        contextoDinamico += ` CONTEXTO DA RETOMADA: sua última mensagem foi um follow-up de retomada enviado DE PROPÓSITO horas depois da última resposta do lead — não foi erro, não foi bug, NÃO peça desculpas por ela. A mensagem do lead agora é a resposta a esse follow-up: se demonstra interesse (ex: "como", "quero", "pode ser", "sim"), trate como um SIM à sua oferta e siga para a ETAPA da ponte no formato dela (3 balões separados por "|||", uma pergunta só no fim); NÃO repita perguntas de qualificação já respondidas e NÃO junte tudo num balão só.`;
       }
     }
 
