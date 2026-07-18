@@ -31,7 +31,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.18.0';
+const BOT_VERSION = '1.18.1';
 const BOT_VERSION_DATA = '2026-07-18'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -1903,6 +1903,7 @@ async function esquecerLeadNoBot(phone) {
   leadsAgendados.delete(phone);
   leadsEncerrados.delete(phone);
   leadsRegistradosPg.delete(phone);
+  retomadaPosFollowUp.delete(phone);
   await pool.query('DELETE FROM bot_state WHERE phone = $1 AND client_id = $2', [phone, CLIENT_ID]).catch(e => console.error('esquecerLeadNoBot:', e.message));
 }
 
@@ -2801,6 +2802,13 @@ app.post('/webhook', async (req, res) => {
     delete agendamentosConfirmados[userPhone];
   }
   ultimaMensagem[userPhone] = agora;
+  // O lead está respondendo a um follow-up/reativação? Precisa ser capturado AQUI,
+  // antes do reset logo abaixo — o contexto dinâmico usa isso pra o Claude não tratar
+  // a própria retomada como "bug" (visto em produção: lead respondeu "como" a um
+  // follow-up e o bot pediu desculpas por um bug que não existiu).
+  if ((followUpStatus[userPhone]?.tentativas || 0) >= 1) {
+    retomadaPosFollowUp.add(userPhone);
+  }
   // Sempre inicializa/reseta o followUpStatus ao receber mensagem
   // (antes só resetava se já existia — bug que impedia o primeiro follow-up)
   followUpStatus[userPhone] = { tentativas: 0, ultimoFollowUp: 0 };
@@ -2965,6 +2973,10 @@ async function cancelarReuniaoLead(userPhone, ag) {
 // Leads que acabaram de desmarcar e receberam o pedido de motivo — a próxima
 // mensagem deles (janela de 24h) é tratada como o motivo do cancelamento.
 const motivoCancelamentoPendente = new Map();
+
+// Leads cuja mensagem atual é resposta a um follow-up/reativação (setado no webhook,
+// antes do reset do followUpStatus; consumido ao montar o contexto dinâmico).
+const retomadaPosFollowUp = new Set();
 
 // O motivo vira tarefa CONCLUÍDA no histórico do lead (origem bot) + aviso ao
 // time. Não entra como "Perdido:" de propósito: cancelar reunião não é negócio
@@ -3466,6 +3478,10 @@ REGRA DE SAUDAÇÃO: Use EXCLUSIVAMENTE "${saudacaoHora}" se for saudar pelo per
 REGRA DE FUSO HORÁRIO: Todos os horários que você oferece ao lead já estão em horário de Brasília (GMT-3). Se o lead demonstrar qualquer confusão sobre fuso horário, seja prestativo: deixe sempre explícito que o horário informado é de Brasília. Se o lead disser a cidade dele, ofereça ajudar: "Me fala de qual cidade você é que eu te ajudo a confirmar certinho." Nunca peça para o lead fazer a conta sozinho — isso é transferir trabalho desnecessário perto do fechamento. Continue sem inventar conversões por conta própria, mas evite soar evasivo: a ideia é reduzir a hesitação, não empurrar o problema.
 
 REGRA DE UMA PERGUNTA POR MENSAGEM (vale para a conversa INTEIRA, não só uma etapa): cada mensagem sua contém NO MÁXIMO uma pergunta. Nunca emende a pergunta da próxima etapa do roteiro na mesma mensagem — termine na primeira pergunta, espere a resposta do lead e só então avance. Duas perguntas juntas soam como formulário e derrubam a taxa de resposta.
+
+REGRA DE ERRO TÉCNICO: NUNCA diga que houve bug, erro, falha ou problema técnico do seu lado, e nunca peça desculpas por uma mensagem que você mesmo enviou — mensagens de retomada horas depois (follow-up) são intencionais, não são erro. Se o lead parecer confuso ("como assim?", "o quê?", "não entendi"), apenas esclareça com naturalidade o que você quis dizer e siga a conversa. Você é a demonstração viva do produto: admitir um defeito que não existiu destrói a venda.
+
+REGRA DE RESPOSTA A OFERTA: quando sua última mensagem ofereceu mostrar ou resolver algo e o lead responde curto demonstrando interesse ("como", "como assim", "quero", "pode ser", "me mostra", "sim"), trate como um SIM: avance direto para a ponte e a proposta do diagnóstico. NUNCA volte para perguntas de qualificação que já foram respondidas.
 
 MARCADOR DE NOME — OBRIGATÓRIO:
 Assim que souber o nome do lead (seja porque ele informou, confirmou ou corrigiu), inclua na sua resposta o marcador exato: [NOME: PrimeiroNome]
@@ -4041,6 +4057,14 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       if (agLead?.emailPendente) {
         contextoDinamico += ` ATENÇÃO CRÍTICA: o sistema perguntou ao lead se o email ${agLead.emailPendente} está correto e AINDA AGUARDA a confirmação — o agendamento NÃO FOI CRIADO. Não diga que está agendado, confirmado ou "tudo certo". Se a mensagem do lead parecer confirmar o email, responda APENAS pedindo uma confirmação clara, por exemplo: "Perfeito! Só me confirma com um sim que eu já registro o agendamento aqui." Se o lead corrigir o email, o sistema trata sozinho.`;
       }
+    }
+
+    // O lead está respondendo a um follow-up enviado horas atrás — sem este aviso o
+    // Claude vê a própria retomada como mensagem estranha no histórico e pode "pedir
+    // desculpas por um bug" que não existiu (visto em produção).
+    if (retomadaPosFollowUp.has(userPhone)) {
+      retomadaPosFollowUp.delete(userPhone);
+      contextoDinamico += ` CONTEXTO DA RETOMADA: sua última mensagem foi um follow-up de retomada enviado DE PROPÓSITO horas depois da última resposta do lead — não foi erro, não foi bug, NÃO peça desculpas por ela. A mensagem do lead agora é a resposta a esse follow-up: se demonstra interesse (ex: "como", "quero", "pode ser", "sim"), trate como um SIM à sua oferta e avance para a proposta do diagnóstico; NÃO repita perguntas de qualificação já respondidas.`;
     }
 
     log(userPhone, 'info', `Chamando Claude — histórico: ${conversas[userPhone].length} msgs`);
