@@ -31,8 +31,8 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.16.7';
-const BOT_VERSION_DATA = '2026-07-17'; // data desta versão
+const BOT_VERSION = '1.16.8';
+const BOT_VERSION_DATA = '2026-07-18'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
 // numa versão morta faz a Meta redirecionar silenciosamente pra outra, sem
@@ -2831,7 +2831,34 @@ async function cancelarReuniaoLead(userPhone, ag) {
 
   const trato = nomeCancel ? `Tudo bem, ${nomeCancel}!` : 'Tudo bem!';
   await enviarERegistrar(userPhone, `${trato} Desmarquei sua conversa de ${labelCancelada}. Quando quiser retomar, é só me chamar por aqui que a gente encontra um novo horário. 😊`);
+  // Pede o motivo de leve, em afirmação (não pergunta — zero pressão): se o
+  // lead ignorar, nada acontece; se responder, processarMensagem captura e
+  // registra no CRM. É o único jeito de aprender por que reuniões caem.
+  await new Promise(r => setTimeout(r, 1200));
+  await enviarERegistrar(userPhone, 'Ah, e se puder me contar em uma frase o que pesou pra desmarcar, me ajuda muito a melhorar por aqui 🙏');
+  motivoCancelamentoPendente.set(userPhone, Date.now());
   return true;
+}
+
+// Leads que acabaram de desmarcar e receberam o pedido de motivo — a próxima
+// mensagem deles (janela de 24h) é tratada como o motivo do cancelamento.
+const motivoCancelamentoPendente = new Map();
+
+// O motivo vira tarefa CONCLUÍDA no histórico do lead (origem bot) + aviso ao
+// time. Não entra como "Perdido:" de propósito: cancelar reunião não é negócio
+// perdido — o lead volta pra "Pronto para agendar".
+async function registrarMotivoCancelamento(userPhone, motivo) {
+  const leadRes = await pool.query('SELECT id, name FROM leads WHERE phone = $1 AND client_id = $2', [userPhone, CLIENT_ID]);
+  const lead = leadRes.rows[0] || null;
+  const titulo = `Cancelou reunião: ${motivo}`.slice(0, 300);
+  await pool.query(
+    `INSERT INTO tasks (client_id, lead_id, titulo, due_at, origem, criado_por, status, done_at, aviso_enviado)
+     VALUES ($1, $2, $3, NOW(), 'bot', 'bot', 'concluida', NOW(), true)`,
+    [CLIENT_ID, lead?.id || null, titulo]
+  );
+  emitirMudancaLeads();
+  registrarAtividade(lead?.name || 'Lead', `Motivo do cancelamento: ${motivo.slice(0, 120)}`).catch(() => {});
+  enviarMensagem(MEU_NUMERO, `*Motivo do cancelamento*\n\nNome: ${lead?.name || 'Não informado'}\nWhatsApp: ${userPhone}\nMotivo: "${motivo.slice(0, 300)}"`).catch(() => {});
 }
 
 // Pedido EXPLÍCITO de desmarcar a reunião — usado dentro do modo remarcação,
@@ -3105,10 +3132,10 @@ async function tratarPosAgendamento(userPhone, userText) {
     // (ver bloco acima), para uma falha da API não custar uma das 2 chances do lead.
     await atualizarLead(userPhone, { 'Status': 'Reunião agendada' });
     registrarEtapaFunil(userPhone, FUNIL.REMARCANDO).catch(e => console.error('funil remarcando:', e.message));
-    const refAtual = ag.label ? `Sua conversa está marcada para ${ag.label}.` : 'Sem problema!';
-    await enviarERegistrar(userPhone, `${refAtual} Vamos remarcar então.`);
-    await new Promise(r => setTimeout(r, 1500));
-    await enviarERegistrar(userPhone, _msgOfertaRemarcacao(novosSlots));
+    // Direto ao ponto: repetir o horário atual + "vamos remarcar então" em balão
+    // separado era redundância — o lead acabou de pedir a remarcação, ele sabe
+    // o horário que tem. Um balão só: reconhece o pedido e já oferece as opções.
+    await enviarERegistrar(userPhone, `Sem problema, vamos remarcar! ${_msgOfertaRemarcacao(novosSlots)}`);
     return true;
   }
 
@@ -3205,6 +3232,23 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     await persistirLead(userPhone);
     log(userPhone, 'info', 'Lead pediu opt-out — automações silenciadas.');
     return;
+  }
+
+  // Resposta ao pedido de motivo do cancelamento (janela de 24h): registra no
+  // CRM, agradece e encerra — não passa pro Claude. Dispensas curtas ("não",
+  // "tchau") seguem o fluxo normal, sem forçar registro de não-motivo.
+  const motivoDesde = motivoCancelamentoPendente.get(userPhone);
+  if (motivoDesde && userText) {
+    motivoCancelamentoPendente.delete(userPhone);
+    const textoMotivo = userText.trim();
+    const dispensou = /^(n[ãa]o|nada|ok|blz|beleza|tchau|valeu|obrigad[oa]|depois)[.!\s]*$/i.test(textoMotivo);
+    if (Date.now() - motivoDesde < 24 * 60 * 60 * 1000 && !dispensou && textoMotivo.length >= 3) {
+      registrarMotivoCancelamento(userPhone, textoMotivo).catch(e => log(userPhone, 'error', 'motivo cancelamento:', e.message));
+      if (conversas[userPhone]) conversas[userPhone].push({ role: 'user', content: textoMotivo });
+      await enviarERegistrar(userPhone, 'Entendi, obrigado por compartilhar! 🙏 Se mudar de ideia ou quiser retomar, é só me chamar por aqui.');
+      await persistirLead(userPhone);
+      return;
+    }
   }
   // Lead que estava em opt-out e voltou a escrever por conta própria (conteúdo
   // que não é outro opt-out): reengajou, então libera as automações de novo.
