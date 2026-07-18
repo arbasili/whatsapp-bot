@@ -31,7 +31,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.16.8';
+const BOT_VERSION = '1.17.0';
 const BOT_VERSION_DATA = '2026-07-18'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -366,6 +366,11 @@ async function initDb() {
     }
   }
 
+  // Migração: exclusão de leads (lixeira). deleted_at marca o soft delete — o
+  // lead some das telas e métricas mas fica restaurável; o purge diário apaga
+  // de vez (LGPD) depois de 30 dias na lixeira.
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`);
+
   console.log('Tabelas do banco prontas (bot_state, clients, leads, conversations).');
 
   // Auto-registro do cliente — garante que o CLIENT_ID existe na tabela clients.
@@ -479,7 +484,7 @@ async function carregarLeads() {
     // leads DE VERDADE — não inferido do bot_state. Inferir mentia quando a
     // linha do CRM era apagada por fora (limpar-banco/seed) com o bot_state
     // preservado: o bot achava que o lead existia no CRM e nunca mais o criava.
-    const registrados = await pool.query('SELECT phone FROM leads WHERE client_id = $1', [CLIENT_ID]);
+    const registrados = await pool.query('SELECT phone FROM leads WHERE deleted_at IS NULL AND client_id = $1', [CLIENT_ID]);
     for (const row of registrados.rows) leadsRegistradosPg.add(row.phone);
     console.log(`Carregados ${res.rows.length} leads do banco (client_id: ${CLIENT_ID}).`);
   } catch (err) {
@@ -710,7 +715,10 @@ async function registrarLeadInicial(phone, origem = '') {
     await pool.query(
       `INSERT INTO leads (client_id, phone, status, funnel_stages, origin, created_at, updated_at)
        VALUES ($1, $2, 'Em conversa', $3, $4, NOW(), NOW())
-       ON CONFLICT (client_id, phone) DO NOTHING`,
+       ON CONFLICT (client_id, phone) DO UPDATE SET
+         deleted_at = NULL, status = 'Em conversa', funnel_stages = EXCLUDED.funnel_stages,
+         origin = EXCLUDED.origin, created_at = NOW(), updated_at = NOW()
+       WHERE leads.deleted_at IS NOT NULL`,
       [CLIENT_ID, phone, FUNIL.EM_CONVERSA, origem]
     );
     emitirMudancaLeads(); // novo lead → painel atualiza na hora
@@ -1830,7 +1838,8 @@ app.get('/api/leads', verificarToken, async (req, res) => {
     // Valida e limita os parâmetros numéricos para evitar erro 500 e abuso
     const limit = Math.min(Math.max(parseInt(limitRaw, 10) || 50, 1), 200);
     const offset = Math.max(parseInt(offsetRaw, 10) || 0, 0);
-    let conditions = ['client_id = $1'];
+    // ?excluidos=1 lista a Lixeira; o padrão nunca mostra leads excluídos
+    let conditions = ['client_id = $1', req.query.excluidos === '1' ? 'deleted_at IS NOT NULL' : 'deleted_at IS NULL'];
     let params = [process.env.CLIENT_ID];
     let idx = 2;
 
@@ -1846,7 +1855,8 @@ app.get('/api/leads', verificarToken, async (req, res) => {
     }
 
     params.push(limit, offset);
-    const query = `SELECT * FROM leads WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`;
+    const ordem = req.query.excluidos === '1' ? 'deleted_at DESC' : 'created_at DESC';
+    const query = `SELECT * FROM leads WHERE ${conditions.join(' AND ')} ORDER BY ${ordem} LIMIT $${idx} OFFSET $${idx + 1}`;
     const { rows } = await pool.query(query, params);
     res.json(rows);
   } catch (err) {
@@ -1869,6 +1879,112 @@ app.get('/api/leads/:id', verificarToken, async (req, res) => {
     res.status(500).json({ error: 'Erro ao buscar lead' });
   }
 });
+
+// ─── Exclusão de leads (lixeira) ──────────────────────────────────────────────
+// Padrão dos CRMs de referência: excluir = soft delete restaurável por 30 dias;
+// apagar de verdade é ação separada (LGPD) ou o purge automático da lixeira.
+
+// O bot esquece o lead por completo: memória, follow-ups e bot_state. Se ele
+// escrever de novo, é conversa do zero e o registrarLeadInicial ressuscita a
+// linha como lead novo (ON CONFLICT ... WHERE deleted_at IS NOT NULL).
+async function esquecerLeadNoBot(phone) {
+  if (!phone) return;
+  delete conversas[phone];
+  delete ultimaMensagem[phone];
+  delete followUpStatus[phone];
+  delete agendamentos[phone];
+  delete agendamentosConfirmados[phone];
+  leadsAgendados.delete(phone);
+  leadsEncerrados.delete(phone);
+  leadsRegistradosPg.delete(phone);
+  await pool.query('DELETE FROM bot_state WHERE phone = $1 AND client_id = $2', [phone, CLIENT_ID]).catch(e => console.error('esquecerLeadNoBot:', e.message));
+}
+
+// Apaga TUDO do lead (direito ao esquecimento): tarefas, análises de reunião,
+// conversas (CASCADE) e a própria linha. Usado pelo endpoint definitivo e pelo purge.
+async function excluirLeadDefinitivo(leadId) {
+  await pool.query('DELETE FROM tasks WHERE lead_id = $1 AND client_id = $2', [leadId, CLIENT_ID]).catch(() => {});
+  await pool.query('DELETE FROM meeting_analyses WHERE lead_id = $1', [leadId]).catch(() => {}); // tabela do agente (mesmo banco); pode não existir
+  await pool.query('DELETE FROM leads WHERE id = $1 AND client_id = $2', [leadId, CLIENT_ID]);
+}
+
+// DELETE /api/leads/:id — manda pra lixeira (soft delete)
+app.delete('/api/leads/:id', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE leads SET deleted_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL
+       RETURNING phone, name`,
+      [req.params.id, CLIENT_ID]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
+    await esquecerLeadNoBot(rows[0].phone);
+    registrarAtividade(rows[0].name || 'Lead', `Lead excluído por ${req.user?.email || 'usuário'} (restaurável por 30 dias)`).catch(() => {});
+    emitirMudancaLeads();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Erro em DELETE /api/leads/:id:', err.message);
+    res.status(500).json({ error: 'Erro ao excluir lead' });
+  }
+});
+
+// POST /api/leads/:id/restaurar — tira da lixeira, lead volta intacto ao Kanban
+app.post('/api/leads/:id/restaurar', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE leads SET deleted_at = NULL, updated_at = NOW()
+       WHERE id = $1 AND client_id = $2 AND deleted_at IS NOT NULL
+       RETURNING name`,
+      [req.params.id, CLIENT_ID]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lead não está na lixeira' });
+    registrarAtividade(rows[0].name || 'Lead', `Lead restaurado da lixeira por ${req.user?.email || 'usuário'}`).catch(() => {});
+    emitirMudancaLeads();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Erro em POST /api/leads/:id/restaurar:', err.message);
+    res.status(500).json({ error: 'Erro ao restaurar lead' });
+  }
+});
+
+// DELETE /api/leads/:id/definitivo — só aceita lead JÁ na lixeira (duas etapas
+// obrigatórias: nunca dá pra apagar de vez com um clique só)
+app.delete('/api/leads/:id/definitivo', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT name FROM leads WHERE id = $1 AND client_id = $2 AND deleted_at IS NOT NULL`,
+      [req.params.id, CLIENT_ID]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lead não está na lixeira' });
+    await excluirLeadDefinitivo(req.params.id);
+    registrarAtividade(rows[0].name || 'Lead', `Lead apagado definitivamente por ${req.user?.email || 'usuário'} (LGPD)`).catch(() => {});
+    emitirMudancaLeads();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Erro em DELETE /api/leads/:id/definitivo:', err.message);
+    res.status(500).json({ error: 'Erro ao apagar lead' });
+  }
+});
+
+// Purge automático: quem passa 30 dias na lixeira é apagado de vez, sem
+// intervenção. Roda a cada 12h (na subida e depois em intervalo).
+async function purgarLixeira() {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, name FROM leads WHERE client_id = $1 AND deleted_at < NOW() - INTERVAL '30 days'`,
+      [CLIENT_ID]
+    );
+    for (const lead of rows) {
+      await excluirLeadDefinitivo(lead.id);
+      console.log(`[lixeira] Purge automático: ${lead.name || lead.id} (30 dias na lixeira)`);
+    }
+    if (rows.length) emitirMudancaLeads();
+  } catch (err) {
+    console.error('[lixeira] Erro no purge:', err.message);
+  }
+}
+setInterval(purgarLixeira, 12 * 60 * 60 * 1000);
+setTimeout(purgarLixeira, 60 * 1000); // 1min após a subida (deixa o banco migrar primeiro)
 
 // PATCH /api/leads/:id/status — atualização manual de etapa pelo especialista
 app.patch('/api/leads/:id/status', verificarToken, async (req, res) => {
@@ -2250,25 +2366,25 @@ app.post('/api/analise', verificarToken, async (req, res) => {
 
     // ── Agregados do CRM (uma passada no banco) ──
     const [porStatus, porTemp, porSegmento, porOrigem, valores, serie30d, reunioes, metasRow, tarefasCount, motivosPerda] = await Promise.all([
-      pool.query(`SELECT status, COUNT(*)::int AS n, COALESCE(SUM(deal_value),0)::float AS valor FROM leads WHERE client_id = $1 GROUP BY status ORDER BY n DESC`, [CLIENT_ID]),
-      pool.query(`SELECT COALESCE(temperature,'sem temperatura') AS temperatura, COUNT(*)::int AS n FROM leads WHERE client_id = $1 GROUP BY 1 ORDER BY n DESC`, [CLIENT_ID]),
+      pool.query(`SELECT status, COUNT(*)::int AS n, COALESCE(SUM(deal_value),0)::float AS valor FROM leads WHERE deleted_at IS NULL AND client_id = $1 GROUP BY status ORDER BY n DESC`, [CLIENT_ID]),
+      pool.query(`SELECT COALESCE(temperature,'sem temperatura') AS temperatura, COUNT(*)::int AS n FROM leads WHERE deleted_at IS NULL AND client_id = $1 GROUP BY 1 ORDER BY n DESC`, [CLIENT_ID]),
       pool.query(`SELECT business_type AS segmento, COUNT(*)::int AS n,
                     COUNT(*) FILTER (WHERE status = 'Fechado e Venda')::int AS vendas,
                     COUNT(*) FILTER (WHERE scheduled_at IS NOT NULL)::int AS agendaram,
                     COALESCE(AVG(score),0)::int AS score_medio
-                  FROM leads WHERE client_id = $1 AND business_type IS NOT NULL GROUP BY 1 ORDER BY n DESC LIMIT 15`, [CLIENT_ID]),
-      pool.query(`SELECT COALESCE(origin,'não informada') AS origem, COUNT(*)::int AS n FROM leads WHERE client_id = $1 GROUP BY 1 ORDER BY n DESC LIMIT 10`, [CLIENT_ID]),
+                  FROM leads WHERE deleted_at IS NULL AND client_id = $1 AND business_type IS NOT NULL GROUP BY 1 ORDER BY n DESC LIMIT 15`, [CLIENT_ID]),
+      pool.query(`SELECT COALESCE(origin,'não informada') AS origem, COUNT(*)::int AS n FROM leads WHERE deleted_at IS NULL AND client_id = $1 GROUP BY 1 ORDER BY n DESC LIMIT 10`, [CLIENT_ID]),
       pool.query(`SELECT COALESCE(SUM(deal_value) FILTER (WHERE status NOT IN ('Fechado e Venda','Fechado e Perdido','Perdido sem resposta','Encerrado sem agendar')),0)::float AS funil,
                     COALESCE(SUM(deal_value) FILTER (WHERE status = 'Fechado e Venda'),0)::float AS fechado,
                     COALESCE(SUM(deal_value * COALESCE(close_probability,50) / 100.0) FILTER (WHERE status NOT IN ('Fechado e Venda','Fechado e Perdido','Perdido sem resposta','Encerrado sem agendar')),0)::float AS previsao,
                     COALESCE(AVG(deal_value),0)::float AS ticket_medio
-                  FROM leads WHERE client_id = $1`, [CLIENT_ID]),
+                  FROM leads WHERE deleted_at IS NULL AND client_id = $1`, [CLIENT_ID]),
       pool.query(`SELECT (created_at AT TIME ZONE 'America/Campo_Grande')::date AS dia, COUNT(*)::int AS novos
-                  FROM leads WHERE client_id = $1 AND created_at >= NOW() - INTERVAL '30 days' GROUP BY 1 ORDER BY 1`, [CLIENT_ID]),
+                  FROM leads WHERE deleted_at IS NULL AND client_id = $1 AND created_at >= NOW() - INTERVAL '30 days' GROUP BY 1 ORDER BY 1`, [CLIENT_ID]),
       pool.query(`SELECT COUNT(*) FILTER (WHERE scheduled_at_ts IS NOT NULL OR scheduled_at IS NOT NULL)::int AS ja_agendaram,
                     COUNT(*) FILTER (WHERE status = 'Reunião agendada')::int AS agendadas_agora,
                     COUNT(*) FILTER (WHERE status = 'No-show')::int AS no_show
-                  FROM leads WHERE client_id = $1`, [CLIENT_ID]),
+                  FROM leads WHERE deleted_at IS NULL AND client_id = $1`, [CLIENT_ID]),
       pool.query(`SELECT settings->'metas' AS metas FROM client_settings WHERE client_id = $1`, [CLIENT_ID]).catch(() => ({ rows: [] })),
       pool.query(`SELECT COUNT(*) FILTER (WHERE status = 'pendente')::int AS pendentes,
                     COUNT(*) FILTER (WHERE status = 'pendente' AND due_at < NOW())::int AS atrasadas
@@ -2418,7 +2534,7 @@ app.get('/api/stream', verificarToken, (req, res) => {
 app.get('/api/health', verificarToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT MAX(updated_at) AS ultima FROM leads WHERE client_id = $1`,
+      `SELECT MAX(updated_at) AS ultima FROM leads WHERE deleted_at IS NULL AND client_id = $1`,
       [process.env.CLIENT_ID]
     );
     res.json({
@@ -2435,9 +2551,9 @@ app.get('/api/health', verificarToken, async (req, res) => {
 app.get('/api/metrics', verificarToken, async (req, res) => {
   try {
     const [{ rows: total }, { rows: porStatus }, { rows: urgentes }, { rows: funil }, { rows: tempos }, { rows: temporal }] = await Promise.all([
-      pool.query(`SELECT COUNT(*) FROM leads WHERE client_id = $1`, [process.env.CLIENT_ID]),
-      pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE client_id = $1 GROUP BY status`, [process.env.CLIENT_ID]),
-      pool.query(`SELECT COUNT(*) FROM leads WHERE client_id = $1 AND urgency = 'imediata'`, [process.env.CLIENT_ID]),
+      pool.query(`SELECT COUNT(*) FROM leads WHERE deleted_at IS NULL AND client_id = $1`, [process.env.CLIENT_ID]),
+      pool.query(`SELECT status, COUNT(*) as count FROM leads WHERE deleted_at IS NULL AND client_id = $1 GROUP BY status`, [process.env.CLIENT_ID]),
+      pool.query(`SELECT COUNT(*) FROM leads WHERE deleted_at IS NULL AND client_id = $1 AND urgency = 'imediata'`, [process.env.CLIENT_ID]),
       pool.query(`
         SELECT
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[EM]%') AS em_conversa,
@@ -2455,14 +2571,14 @@ app.get('/api/metrics', verificarToken, async (req, res) => {
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[R3]%') AS reativacao_3d,
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[R7]%') AS reativacao_7d,
           COUNT(*) FILTER (WHERE funnel_stages LIKE '%[PS]%') AS perdido_sem_resposta
-        FROM leads WHERE client_id = $1
+        FROM leads WHERE deleted_at IS NULL AND client_id = $1
       `, [process.env.CLIENT_ID]),
       pool.query(`
         SELECT
           AVG(EXTRACT(EPOCH FROM (first_response_at - created_at)) / 60)  AS tempo_resposta_min,
           AVG(EXTRACT(EPOCH FROM (scheduled_set_at - created_at)) / 3600) AS tempo_agendamento_h,
           COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE AT TIME ZONE 'America/Campo_Grande') AS leads_hoje
-        FROM leads WHERE client_id = $1
+        FROM leads WHERE deleted_at IS NULL AND client_id = $1
       `, [process.env.CLIENT_ID]),
       pool.query(`
         SELECT
@@ -2470,7 +2586,7 @@ app.get('/api/metrics', verificarToken, async (req, res) => {
           COUNT(*) FILTER (WHERE created_at >= date_trunc('week', NOW() AT TIME ZONE 'America/Campo_Grande') AT TIME ZONE 'America/Campo_Grande' - INTERVAL '7 days'
                            AND created_at < date_trunc('week', NOW() AT TIME ZONE 'America/Campo_Grande') AT TIME ZONE 'America/Campo_Grande') AS leads_semana_anterior,
           COUNT(*) FILTER (WHERE scheduled_at_ts IS NOT NULL AND (scheduled_at_ts AT TIME ZONE 'America/Campo_Grande')::date = (NOW() AT TIME ZONE 'America/Campo_Grande')::date) AS reunioes_hoje
-        FROM leads WHERE client_id = $1
+        FROM leads WHERE deleted_at IS NULL AND client_id = $1
       `, [process.env.CLIENT_ID]),
     ]);
 
