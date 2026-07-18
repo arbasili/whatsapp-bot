@@ -31,7 +31,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.16.5';
+const BOT_VERSION = '1.16.6';
 const BOT_VERSION_DATA = '2026-07-17'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -474,9 +474,13 @@ async function carregarLeads() {
       if (row.lead_agendado) leadsAgendados.add(phone);
       if (row.lead_encerrado) leadsEncerrados.add(phone);
       if (row.agendamento_confirmado) agendamentosConfirmados[phone] = row.agendamento_confirmado;
-      // Marca como já registrado no Postgres para evitar INSERT duplicado
-      if (row.lead_agendado || row.lead_encerrado || row.conversas) leadsRegistradosPg.add(phone);
     }
+    // O cache de "lead já registrado no CRM" é construído a partir da tabela
+    // leads DE VERDADE — não inferido do bot_state. Inferir mentia quando a
+    // linha do CRM era apagada por fora (limpar-banco/seed) com o bot_state
+    // preservado: o bot achava que o lead existia no CRM e nunca mais o criava.
+    const registrados = await pool.query('SELECT phone FROM leads WHERE client_id = $1', [CLIENT_ID]);
+    for (const row of registrados.rows) leadsRegistradosPg.add(row.phone);
     console.log(`Carregados ${res.rows.length} leads do banco (client_id: ${CLIENT_ID}).`);
   } catch (err) {
     console.error('Erro ao carregar leads do banco:', err.message);
@@ -760,8 +764,11 @@ async function atualizarLead(phone, dados) {
        WHERE client_id = $${idx} AND phone = $${idx + 1}`,
       valores
     );
-    // Se o lead não existia ainda, cria e tenta atualizar uma única vez
+    // Se o lead não existia ainda, cria e tenta atualizar uma única vez.
+    // Limpa o cache antes: se a linha sumiu do banco (limpeza externa), o cache
+    // ainda diz "registrado" e registrarLeadInicial viraria no-op silencioso.
     if (resultado.rowCount === 0) {
+      leadsRegistradosPg.delete(phone);
       await registrarLeadInicial(phone);
       await pool.query(
         `UPDATE leads SET ${sets.join(', ')}
@@ -2833,7 +2840,7 @@ async function cancelarReuniaoLead(userPhone, ag) {
 // reunião que o lead quer cancelar, não a troca de horário.
 function _querCancelarReuniao(texto) {
   const t = (texto || '').trim().toLowerCase();
-  return /\bdesmarc|quero cancelar|cancela(r)? (a |o )?(reuni[ãa]o|conversa|consultoria)|cancela tudo/.test(t);
+  return /\bdesmarc|quero cancelar|cancela(r)? (a |o )?(reuni[ãa]o|conversa|consultoria|diagn[óo]stico)|cancela tudo/.test(t);
 }
 
 async function tratarPosAgendamento(userPhone, userText) {
