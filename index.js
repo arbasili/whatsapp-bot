@@ -31,8 +31,8 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.18.3';
-const BOT_VERSION_DATA = '2026-07-18'; // data desta versão
+const BOT_VERSION = '1.18.4';
+const BOT_VERSION_DATA = '2026-07-19'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
 // numa versão morta faz a Meta redirecionar silenciosamente pra outra, sem
@@ -1892,7 +1892,9 @@ app.get('/api/leads', verificarToken, async (req, res) => {
 app.get('/api/leads/:id', verificarToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT * FROM leads WHERE id = $1 AND client_id = $2`,
+      // deleted_at IS NULL: lead na lixeira não é acessível por URL/API direta —
+      // some do CRM de verdade, coerente com a exclusão (a lixeira usa outra rota).
+      `SELECT * FROM leads WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
       [req.params.id, process.env.CLIENT_ID]
     );
     if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
@@ -2036,7 +2038,7 @@ app.patch('/api/leads/:id/status', verificarToken, async (req, res) => {
              ELSE COALESCE(funnel_stages, '') || $2
            END,
            updated_at = NOW()
-       WHERE id = $3 AND client_id = $4
+       WHERE id = $3 AND client_id = $4 AND deleted_at IS NULL
        RETURNING *`,
       [status, sigla, req.params.id, process.env.CLIENT_ID, `%${sigla}%`]
     );
@@ -2055,7 +2057,7 @@ app.patch('/api/leads/:id/notes', verificarToken, async (req, res) => {
     const { notes } = req.body;
     const { rows } = await pool.query(
       `UPDATE leads SET notes = $1, updated_at = NOW()
-       WHERE id = $2 AND client_id = $3 RETURNING *`,
+       WHERE id = $2 AND client_id = $3 AND deleted_at IS NULL RETURNING *`,
       [notes ?? '', req.params.id, process.env.CLIENT_ID]
     );
     if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
@@ -2097,7 +2099,7 @@ app.patch('/api/leads/:id', verificarToken, async (req, res) => {
     sets.push('updated_at = NOW()');
     valores.push(req.params.id, process.env.CLIENT_ID);
     const { rows } = await pool.query(
-      `UPDATE leads SET ${sets.join(', ')} WHERE id = $${idx} AND client_id = $${idx + 1} RETURNING *`,
+      `UPDATE leads SET ${sets.join(', ')} WHERE id = $${idx} AND client_id = $${idx + 1} AND deleted_at IS NULL RETURNING *`,
       valores
     );
     if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
@@ -2160,7 +2162,7 @@ app.patch('/api/leads/:id/snooze', verificarToken, async (req, res) => {
       ? new Date(Date.now() + horas * 3600000).toISOString()
       : null;
     const { rows } = await pool.query(
-      `UPDATE leads SET snooze_until = $1, updated_at = updated_at WHERE id = $2 AND client_id = $3 RETURNING *`,
+      `UPDATE leads SET snooze_until = $1, updated_at = updated_at WHERE id = $2 AND client_id = $3 AND deleted_at IS NULL RETURNING *`,
       [ate, req.params.id, process.env.CLIENT_ID]
     );
     if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
