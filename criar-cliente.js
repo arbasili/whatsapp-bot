@@ -6,12 +6,13 @@
 //   node criar-cliente.js --client-id <UUID> --usuario segundo@empresax.com
 //
 // O que faz:
-//   1. Cria (ou reaproveita) a linha em clients — gera o CLIENT_ID do deploy novo
-//   2. Localiza o usuário no Supabase Auth pelo email; com --convidar, envia o
-//      convite por email pra pessoa definir a própria senha
-//   3. Vincula usuário ↔ cliente em user_clients (role 'admin') — o passo que
-//      hoje é INSERT manual (BOT-004)
-//   4. Imprime o checklist do que continua manual (Railway, Meta, Calendar...)
+//   1. Resolve o usuário no Supabase Auth PRIMEIRO (com --convidar, envia o
+//      convite por email). Se não der pra resolver, o script para antes de
+//      criar qualquer coisa no banco (nada de cliente órfão; re-rodar funciona).
+//   2. Numa transação: cria (ou reaproveita) a linha em clients e vincula o
+//      usuário em user_clients (role 'admin'). Ou os dois existem, ou nenhum.
+//   3. Imprime o CLIENT_ID e o checklist do que continua manual (Railway,
+//      Meta, Calendar...).
 //
 // Requer no .env desta pasta (gitignored): DATABASE_URL, SUPABASE_URL,
 // SUPABASE_SERVICE_ROLE_KEY. Rode da sua máquina ou do console do Railway.
@@ -43,7 +44,7 @@ Uso:
   --nome           Nome do cliente novo (cria a linha em clients e gera o CLIENT_ID)
   --client-id      UUID de um cliente que JÁ existe (só vincula mais um usuário)
   --usuario        Email de login no painel (Supabase Auth)
-  --email-empresa  Email comercial do cliente (opcional; padrão usa o do usuário)
+  --email-empresa  Email comercial do cliente (opcional; padrão usa um placeholder por UUID)
   --convidar       Se o usuário não existir no Supabase, envia convite por email
 `);
   process.exit(1);
@@ -59,7 +60,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 });
 
 // Busca o usuário no Supabase Auth pelo email (a admin API não tem getUserByEmail;
-// pagina a lista — ok pro volume de um SaaS começando)
+// pagina a lista, ok pro volume de um SaaS começando)
 async function buscarUsuario(email) {
   for (let page = 1; page <= 20; page++) {
     const { data, error } = await supabase.auth.admin.listUsers({ page, perPage: 100 });
@@ -72,62 +73,77 @@ async function buscarUsuario(email) {
 }
 
 async function main() {
-  // ── 1. Cliente ──
-  let clientId = CLIENT_ID_ARG;
-  if (clientId) {
-    const { rows } = await pool.query('SELECT id, name FROM clients WHERE id = $1', [clientId]);
-    if (rows.length === 0) {
-      console.error(`Cliente ${clientId} não existe. Pra criar um novo, use --nome.`);
-      process.exit(1);
-    }
-    console.log(`Cliente existente: ${rows[0].name} (${clientId})`);
-  } else {
-    clientId = crypto.randomUUID();
-    await pool.query(
-      `INSERT INTO clients (id, name, email) VALUES ($1, $2, $3)`,
-      [clientId, NOME, EMAIL_EMPRESA || USUARIO]
-    );
-    console.log(`Cliente criado: ${NOME}`);
-    console.log(`CLIENT_ID: ${clientId}  ← guarde, vai nas variáveis do deploy novo`);
-  }
-
-  // ── 2. Usuário no Supabase Auth ──
+  // ── 1. Usuário PRIMEIRO ──────────────────────────────────────────────────
+  // Resolver o usuário antes de tocar no banco garante que uma falha aqui (o
+  // caso comum: usuário ainda não existe e faltou --convidar) não deixe um
+  // cliente órfão. Assim, corrigir e re-rodar simplesmente funciona.
   let usuario = await buscarUsuario(USUARIO);
   if (!usuario && CONVIDAR) {
     const { data, error } = await supabase.auth.admin.inviteUserByEmail(USUARIO);
     if (error) throw new Error(`Convite falhou: ${error.message}`);
     usuario = data.user;
-    console.log(`Convite enviado para ${USUARIO} — a pessoa define a senha pelo link do email.`);
+    console.log(`Convite enviado para ${USUARIO}. A pessoa define a senha pelo link do email.`);
   }
   if (!usuario) {
     console.error(`
-Usuário ${USUARIO} não existe no Supabase Auth.
-Opções: rode de novo com --convidar (envia convite por email), ou crie o usuário
-no dashboard do Supabase (Authentication > Users > Add user) e rode de novo.
-O cliente ${clientId} já ficou criado — use --client-id ${clientId} na próxima.`);
+Usuário ${USUARIO} não existe no Supabase Auth. Nada foi criado no banco.
+Rode de novo com --convidar (envia convite por email), ou crie o usuário no
+dashboard do Supabase (Authentication > Users > Add user) e rode de novo.`);
     process.exit(1);
   }
 
-  // ── 3. Vínculo user_clients ──
-  const vinculo = await pool.query(
-    `INSERT INTO user_clients (user_id, client_id, role) VALUES ($1, $2, 'admin')
-     ON CONFLICT (user_id, client_id) DO NOTHING`,
-    [usuario.id, clientId]
-  );
-  console.log(vinculo.rowCount === 1
-    ? `Vínculo criado: ${USUARIO} → cliente ${clientId} (role admin)`
-    : `Vínculo já existia: ${USUARIO} → cliente ${clientId}`);
+  // ── 2. Cliente + vínculo numa TRANSAÇÃO ──────────────────────────────────
+  // Atômico: ou o cliente e o vínculo existem juntos, ou nada é gravado.
+  const db = await pool.connect();
+  let clientId = CLIENT_ID_ARG;
+  try {
+    await db.query('BEGIN');
 
-  // ── 4. O que continua manual ──
+    if (clientId) {
+      const { rows } = await db.query('SELECT id, name FROM clients WHERE id = $1', [clientId]);
+      if (rows.length === 0) throw new Error(`Cliente ${clientId} não existe. Pra criar um novo, use --nome em vez de --client-id.`);
+      console.log(`Cliente existente: ${rows[0].name} (${clientId})`);
+    } else {
+      clientId = crypto.randomUUID();
+      // Email da empresa: usa --email-empresa se veio; senão um placeholder ÚNICO
+      // por UUID (mesma convenção do auto-registro do bot). Nunca o email de login
+      // do usuário, que colidiria no UNIQUE(email) se o mesmo admin tiver 2 clientes.
+      const emailCliente = EMAIL_EMPRESA || `${clientId}@cliqueefecha.com.br`;
+      await db.query(
+        `INSERT INTO clients (id, name, email) VALUES ($1, $2, $3)`,
+        [clientId, NOME, emailCliente]
+      );
+      console.log(`Cliente criado: ${NOME}`);
+      console.log(`CLIENT_ID: ${clientId}  (guarde: vai nas variáveis do deploy novo)`);
+    }
+
+    const vinculo = await db.query(
+      `INSERT INTO user_clients (user_id, client_id, role) VALUES ($1, $2, 'admin')
+       ON CONFLICT (user_id, client_id) DO NOTHING`,
+      [usuario.id, clientId]
+    );
+
+    await db.query('COMMIT');
+    console.log(vinculo.rowCount === 1
+      ? `Vínculo criado: ${USUARIO} para o cliente ${clientId} (role admin)`
+      : `Vínculo já existia: ${USUARIO} no cliente ${clientId}`);
+  } catch (e) {
+    await db.query('ROLLBACK').catch(() => {});
+    throw e; // sobe pro main().catch: nada ficou gravado pela metade
+  } finally {
+    db.release();
+  }
+
+  // ── 3. O que continua manual ─────────────────────────────────────────────
   console.log(`
 ──────────────────────────────────────────────────────
 Checklist do que falta pro cliente entrar no ar:
 
 [ ] Railway: novo serviço do bot (fork deste repo/deploy) com as variáveis
-    do .env.example — em especial:
+    do .env.example. Em especial:
       CLIENT_ID=${clientId}
       CLIENT_NAME=${NOME || '(nome do cliente)'}
-      CLIENT_EMAIL=${EMAIL_EMPRESA || USUARIO}
+      CLIENT_EMAIL=${EMAIL_EMPRESA || '(email comercial do cliente)'}
       PHONE_NUMBER_ID / WHATSAPP_TOKEN / META_APP_SECRET / VERIFY_TOKEN (Meta do cliente)
       CALENDAR_ID + GOOGLE_SUBJECT (agenda do cliente)
       CORS_ORIGINS (URL do painel do cliente)
