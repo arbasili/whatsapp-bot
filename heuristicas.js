@@ -120,13 +120,27 @@ function extrairTipoNegocio(historico) {
     /meu\s+(?:negócio|trabalho|ramo)\s+(?:é|são|é de)\s+([^.!?\n]{3,40})/i,
   ];
 
+  // Trechos que casam "tenho X" mas NÃO são um ramo de negócio (viravam Segmento
+  // no CRM em produção, ex.: "tenho muitas dúvidas"). Se o trecho capturado contém
+  // um desses, não é negócio: pula e continua procurando — a próxima ocorrência
+  // costuma ser o negócio real (ex.: logo depois o lead diz "tenho uma seguradora").
+  const NAO_EH_NEGOCIO = /\b(d[úu]vidas?|perguntas?|interesse|pressa|medo|receio|certeza|vontade|ideias?|problemas?|dificuldades?|muita|muitas|muito|muitos|v[áa]ri[oa]s?|alguns?|algumas?|nenhum[a]?|tempo)\b/i;
+  const ehNegocio = txt => txt.length >= 3 && !NAO_EH_NEGOCIO.test(txt);
+
   for (const padrao of padroes) {
-    const match = mensagensUsuario.match(padrao);
-    if (match) return match[1].trim();
+    // 'g' pra varrer TODAS as ocorrências, não só a 1ª: a primeira pode ser um
+    // falso positivo ("tenho muitas dúvidas") e o negócio vir logo em seguida.
+    const rx = new RegExp(padrao.source, 'gi');
+    let m;
+    while ((m = rx.exec(mensagensUsuario)) !== null) {
+      const cand = (m[1] || '').trim();
+      if (ehNegocio(cand)) return cand;
+      if (m.index === rx.lastIndex) rx.lastIndex++; // guarda contra match vazio (loop infinito)
+    }
   }
 
   const confirmacaoBot = respostasBot.match(/(?:^|\s)([\w\s]{3,30})\s+(?:é um negócio|é uma área|é um segmento)/i);
-  if (confirmacaoBot) return confirmacaoBot[1].trim();
+  if (confirmacaoBot && ehNegocio(confirmacaoBot[1].trim())) return confirmacaoBot[1].trim();
 
   return null;
 }

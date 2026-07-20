@@ -222,6 +222,18 @@ test('continua extraindo tipo de negócio de mensagem real do lead', () => {
   assert.strictEqual(extrairTipoNegocio(conversa), 'um pet shop aqui no bairro');
 });
 
+// Bug real (Guilherme, seguradora): "tenho muitas dúvidas" casava o padrão de
+// negócio e o card mostrava "muitas dúvidas" como Segmento. O negócio real
+// ("tenho uma seguradora") veio na mensagem seguinte e precisa prevalecer.
+test('ignora "tenho muitas dúvidas" e pega o negócio real (seguradora)', () => {
+  const conversa = conversaCom(
+    'Guilherme',
+    'pelo fato de ser uma IA nao sei se dá conta. pois tenho muitas dúvidas',
+    'Tenho uma seguradora',
+  );
+  assert.strictEqual(extrairTipoNegocio(conversa), 'seguradora');
+});
+
 // ─── extrairUrgencia: "hoje"/"agora" casuais não são urgência ────────────────
 // Bug real: "hoje tem alguns anúncios no instagram..." marcou o lead como
 // urgência imediata — mas "hoje" ali significa "atualmente", induzido pela
