@@ -10,9 +10,11 @@
 // Mantém: clients, user_clients, vendedores.
 //
 // Com --tudo, apaga TAMBÉM user_clients e o próprio registro em clients.
-// É seguro: o bot re-registra o CLIENT_ID no próximo boot (auto-registro do
-// initDb) e o usuário do painel se re-vincula no primeiro login (bootstrap
-// do verificarToken).
+// O bot re-registra o CLIENT_ID no próximo boot (auto-registro do initDb), MAS o
+// vínculo em user_clients NÃO volta sozinho: o bootstrap do primeiro login foi
+// removido (BOT-004). Depois de --tudo, re-vincule seu usuário na mão com
+//   node criar-cliente.js --client-id <UUID> --usuario <email>
+// senão o painel fica inacessível (403) por falta de vínculo.
 //
 // Uso (Railway Console do serviço whatsapp-bot, igual ao seed-leads.js):
 //   node limpar-leads-teste.js --confirmo           (mantém clients/user_clients)
@@ -124,8 +126,9 @@ async function main() {
   console.log('\nIMPORTANTE: reinicie o serviço do bot (Railway → Restart) para limpar');
   console.log('o estado em memória (conversas, agendamentos, lembretes pendentes).');
   if (limparTudo) {
-    console.log('Como --tudo apagou clients/user_clients: o restart re-registra o cliente');
-    console.log('automaticamente, e o primeiro login no painel re-vincula o seu usuário.');
+    console.log('Como --tudo apagou clients/user_clients: o restart re-registra o cliente,');
+    console.log('mas o vinculo do painel NAO volta sozinho (bootstrap removido, BOT-004).');
+    console.log('Re-vincule seu usuario: node criar-cliente.js --client-id <UUID> --usuario <email>');
   }
 }
 
