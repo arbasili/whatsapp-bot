@@ -31,7 +31,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.18.6';
+const BOT_VERSION = '1.18.7';
 const BOT_VERSION_DATA = '2026-07-19'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -897,7 +897,7 @@ ${contexto}
 TRECHO DA CONVERSA:
 ${historicoTexto}
 
-Responda APENAS com um JSON válido, sem texto antes ou depois:
+Responda APENAS com um JSON válido, em uma única linha, sem texto antes ou depois e SEM quebras de linha dentro dos valores de texto (se precisar separar ideias, use ponto ou vírgula, nunca quebra de linha ou aspas soltas):
 {
   "score": <número 0-100 — potencial geral do lead>,
   "close_probability": <número 0-100 — probabilidade de fechamento>,
@@ -928,7 +928,7 @@ Regras:
       'https://api.anthropic.com/v1/messages',
       {
         model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
-        max_tokens: 600,
+        max_tokens: 1024,
         messages: [{ role: 'user', content: prompt }]
       },
       {
@@ -940,8 +940,14 @@ Regras:
     const usoIA = resp.data.usage || {};
     console.log(`[Claude/score] ${duracaoIA}ms | input: ${usoIA.input_tokens || '?'} | output: ${usoIA.output_tokens || '?'} tokens`);
 
-    const texto = textoDaResposta(resp).replace(/```json|```/g, '').trim();
-    const dados = JSON.parse(texto);
+    // Parse defensivo: o Claude às vezes cerca o JSON com prosa/crases ou deixa
+    // uma quebra de linha crua dentro de um valor, o que rebentava o JSON.parse
+    // ("Unterminated string in JSON"). Recorta do 1º { ao último } e neutraliza
+    // caracteres de controle crus antes de parsear.
+    const bruto = textoDaResposta(resp).replace(/```json|```/g, '').trim();
+    const bloco = bruto.match(/\{[\s\S]*\}/);
+    if (!bloco) throw new Error('resposta da IA não trouxe um objeto JSON');
+    const dados = JSON.parse(bloco[0].replace(/[\x00-\x1F]+/g, ' '));
 
     // Com reunião marcada, a próxima ação É a reunião: usa o horário real do slot em
     // vez da estimativa em horas da IA (que chutava errado por não saber a hora atual)
