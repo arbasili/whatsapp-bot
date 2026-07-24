@@ -31,8 +31,8 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.18.7';
-const BOT_VERSION_DATA = '2026-07-19'; // data desta versão
+const BOT_VERSION = '1.19.0';
+const BOT_VERSION_DATA = '2026-07-24'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
 // numa versão morta faz a Meta redirecionar silenciosamente pra outra, sem
@@ -371,6 +371,10 @@ async function initDb() {
   // lead some das telas e métricas mas fica restaurável; o purge diário apaga
   // de vez (LGPD) depois de 30 dias na lixeira.
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`);
+
+  // ID do anúncio (source_id do referral do Meta) para o lead que chegou por
+  // click-to-WhatsApp. Guardado cru para relatório por anúncio/campanha no painel.
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ad_id TEXT`);
 
   // Papel do usuário no cliente — alicerce do sistema de permissões. Hoje todo
   // mundo é 'admin' e nada é filtrado por role; quando existir o segundo perfil
@@ -715,18 +719,20 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const leadsRegistradosPg = new Set();
 
 // Cria o registro inicial do lead no Postgres quando ele inicia a conversa
-async function registrarLeadInicial(phone, origem = '') {
+async function registrarLeadInicial(phone, origem = '', adId = '') {
   if (leadsRegistradosPg.has(phone)) return;
   leadsRegistradosPg.add(phone);
   try {
     await pool.query(
-      `INSERT INTO leads (client_id, phone, status, funnel_stages, origin, created_at, updated_at)
-       VALUES ($1, $2, 'Em conversa', $3, $4, NOW(), NOW())
+      `INSERT INTO leads (client_id, phone, status, funnel_stages, origin, ad_id, created_at, updated_at)
+       VALUES ($1, $2, 'Em conversa', $3, $4, $5, NOW(), NOW())
        ON CONFLICT (client_id, phone) DO UPDATE SET
          deleted_at = NULL, status = 'Em conversa', funnel_stages = EXCLUDED.funnel_stages,
-         origin = EXCLUDED.origin, created_at = NOW(), updated_at = NOW()
+         origin = EXCLUDED.origin,
+         ad_id = COALESCE(NULLIF(EXCLUDED.ad_id, ''), leads.ad_id),
+         created_at = NOW(), updated_at = NOW()
        WHERE leads.deleted_at IS NOT NULL`,
-      [CLIENT_ID, phone, FUNIL.EM_CONVERSA, origem]
+      [CLIENT_ID, phone, FUNIL.EM_CONVERSA, origem, adId || null]
     );
     emitirMudancaLeads(); // novo lead → painel atualiza na hora
   } catch (err) {
@@ -2724,6 +2730,12 @@ app.post('/webhook', async (req, res) => {
   // Nome do perfil do WhatsApp — vem no campo contacts[0].profile.name
   const nomePerfilWhatsApp = changes?.contacts?.[0]?.profile?.name || '';
 
+  // Referral do Meta: presente quando o lead chegou por um anúncio click-to-WhatsApp.
+  // Traz o anúncio exato (source_id) e o criativo que a pessoa leu (headline/body),
+  // o que nos deixa reconhecer a origem com certeza e personalizar a abertura.
+  // Só vem na primeira mensagem; é lido apenas ao abrir uma conversa nova.
+  const anuncio = extrairAnuncio(message.referral);
+
   // Aceitar texto e imagem; outros tipos recebem aviso amigável
   let userText = null;
   let imagemPendente = null;
@@ -2746,7 +2758,7 @@ app.post('/webhook', async (req, res) => {
         const midia = await baixarMidia(message.image.id, 'image/jpeg');
         if (midia) {
           const texto = (message.image.caption || '').slice(0, 1500);
-          processarComLock(userPhone, texto, midia, nomePerfilWhatsApp).catch(err =>
+          processarComLock(userPhone, texto, midia, nomePerfilWhatsApp, anuncio).catch(err =>
             console.error('Erro ao processar imagem:', err.message)
           );
         } else {
@@ -2768,7 +2780,7 @@ app.post('/webhook', async (req, res) => {
           const transcricao = await transcreverAudio(midiaAudio.buffer, midiaAudio.mimeType);
           if (transcricao) {
             console.log(`[Claude] Áudio transcrito de ${mascararTelefone(userPhone)}: "${conteudoParaLog(transcricao.slice(0, 80))}"`);
-            processarComLock(userPhone, transcricao, null, nomePerfilWhatsApp).catch(err =>
+            processarComLock(userPhone, transcricao, null, nomePerfilWhatsApp, anuncio).catch(err =>
               console.error('Erro ao processar áudio:', err.message)
             );
           } else {
@@ -2851,7 +2863,7 @@ app.post('/webhook', async (req, res) => {
       clearTimeout(debounceTimers[userPhone]);
       delete debounceTimers[userPhone];
     }
-    processarMensagem(userPhone, textoAcumulado, imagemPendente, nomePerfilWhatsApp).catch(err =>
+    processarMensagem(userPhone, textoAcumulado, imagemPendente, nomePerfilWhatsApp, anuncio).catch(err =>
       console.error('Erro ao processar imagem:', err.message)
     );
     return res.sendStatus(200);
@@ -2869,7 +2881,7 @@ app.post('/webhook', async (req, res) => {
     delete debounceTimers[userPhone];
     if (!pendentes || pendentes.length === 0) return;
     const textoAcumulado = pendentes.join(' ');
-    processarComLock(userPhone, textoAcumulado, null, nomePerfilWhatsApp).catch(err =>
+    processarComLock(userPhone, textoAcumulado, null, nomePerfilWhatsApp, anuncio).catch(err =>
       console.error('Erro ao processar mensagem:', err.message)
     );
   }, DEBOUNCE_MS);
@@ -2882,11 +2894,11 @@ app.post('/webhook', async (req, res) => {
 // Encadeia o processamento em vez de deixar rodar em paralelo.
 const filaProcessamento = new Map(); // Map<phone, Promise>
 
-function processarComLock(userPhone, textoAcumulado, imagemPendente, nomePerfilWhatsApp) {
+function processarComLock(userPhone, textoAcumulado, imagemPendente, nomePerfilWhatsApp, anuncio = null) {
   const anterior = filaProcessamento.get(userPhone) || Promise.resolve();
   const proximo = anterior
     .catch(() => {}) // nunca deixa um erro de uma mensagem bloquear as próximas
-    .then(() => processarMensagem(userPhone, textoAcumulado, imagemPendente, nomePerfilWhatsApp));
+    .then(() => processarMensagem(userPhone, textoAcumulado, imagemPendente, nomePerfilWhatsApp, anuncio));
   filaProcessamento.set(userPhone, proximo);
   // Limpa a referência quando terminar para evitar vazamento de memória
   proximo.finally(() => {
@@ -3006,6 +3018,27 @@ const motivoCancelamentoPendente = new Map();
 // escapou do consumo (ex.: resposta que virou opt-out) não vazar pra uma mensagem
 // futura sem relação.
 const retomadaPosFollowUp = new Map();
+
+// Anúncio do Meta por lead (phone -> {sourceId, headline, body}), preenchido no
+// webhook quando vem o referral e consumido ao abrir a conversa nova. Preserva a
+// origem quando o debounce agrupa a primeira mensagem (a que traz o referral) com
+// mensagens seguintes. Só é lido uma vez, na abertura; depois é descartado.
+const anuncioPendentePorLead = new Map();
+
+// Normaliza o bloco `referral` do webhook do Meta (click-to-WhatsApp). Só
+// consideramos anúncio de verdade (source_type "ad"/"post"); qualquer outra
+// coisa ou ausência vira null e o fluxo segue como origem padrão. Textos são
+// truncados porque só servem de contexto pro Claude calibrar a abertura.
+function extrairAnuncio(referral) {
+  if (!referral || typeof referral !== 'object') return null;
+  const tipo = referral.source_type;
+  if (tipo !== 'ad' && tipo !== 'post') return null;
+  return {
+    sourceId: (referral.source_id || '').toString().slice(0, 120),
+    headline: (referral.headline || '').toString().replace(/\s+/g, ' ').trim().slice(0, 200),
+    body: (referral.body || '').toString().replace(/\s+/g, ' ').trim().slice(0, 400),
+  };
+}
 
 // O motivo vira tarefa CONCLUÍDA no histórico do lead (origem bot) + aviso ao
 // time. Não entra como "Perdido:" de propósito: cancelar reunião não é negócio
@@ -3314,8 +3347,14 @@ function log(phone, nivel, ...args) {
   else console.log(tag, ...args);
 }
 
-async function processarMensagem(userPhone, userText, imagem = null, nomePerfil = '') {
-  log(userPhone, 'info', `Mensagem recebida: "${conteudoParaLog((userText || '').slice(0, 80))}"${imagem ? ' [+imagem]' : ''}${nomePerfil ? ` | perfil: ${nomePerfil}` : ''}`);
+async function processarMensagem(userPhone, userText, imagem = null, nomePerfil = '', anuncio = null) {
+  log(userPhone, 'info', `Mensagem recebida: "${conteudoParaLog((userText || '').slice(0, 80))}"${imagem ? ' [+imagem]' : ''}${nomePerfil ? ` | perfil: ${nomePerfil}` : ''}${anuncio ? ' | via anúncio' : ''}`);
+
+  // O referral pode ter chegado numa mensagem que o debounce agrupou (a primeira do
+  // lote), enquanto esta chamada carrega a última. O mapa preserva o anúncio por
+  // telefone até a conversa nova consumir; assim não perdemos a origem por timing.
+  if (anuncio) anuncioPendentePorLead.set(userPhone, anuncio);
+  else if (anuncioPendentePorLead.has(userPhone)) anuncio = anuncioPendentePorLead.get(userPhone);
 
   // Marca a atividade do lead para TODOS os tipos de mensagem. O webhook só atualiza
   // ultimaMensagem no caminho de texto; imagem e áudio caem direto aqui (via setImmediate),
@@ -3473,11 +3512,15 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     // Calcula a saudação correta com base na hora real de Campo Grande
     const saudacaoHora = saudacaoAtualCG();
 
-    // Detecta a origem do lead pela primeira mensagem.
-    // Sites geralmente enviam um texto pré-preenchido no link do WhatsApp.
+    // Detecta a origem do lead. O referral do Meta é a fonte mais confiável e tem
+    // prioridade: se o lead clicou num anúncio, sabemos disso com certeza, sem
+    // depender de ele digitar "vim do anúncio". Sem referral, cai na heurística de
+    // texto (sites e links de rede costumam mandar texto pré-preenchido).
     let origemLead = 'WhatsApp direto';
     const textoInicial = (userText || '').toLowerCase();
-    if (/vim do site|pelo site|atrav[ée]s do site|no site de voc[êe]s|site clique e fecha/.test(textoInicial)) {
+    if (anuncio) {
+      origemLead = 'Anúncio';
+    } else if (/vim do site|pelo site|atrav[ée]s do site|no site de voc[êe]s|site clique e fecha/.test(textoInicial)) {
       origemLead = 'Site';
     } else if (/vim do instagram|pelo instagram|no insta|vi no instagram/.test(textoInicial)) {
       origemLead = 'Instagram';
@@ -3486,9 +3529,12 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     } else if (/anúncio|anuncio|vi o an[úu]ncio|pelo facebook|vi no facebook/.test(textoInicial)) {
       origemLead = 'Anúncio';
     }
+    // Consome o anúncio pendente: só vale para abrir a conversa; não deve vazar
+    // para uma reabertura futura do mesmo lead.
+    anuncioPendentePorLead.delete(userPhone);
 
-    // Registrar lead no banco (início da conversa) com a origem detectada
-    registrarLeadInicial(userPhone, origemLead).catch(e => console.error('registrarLeadInicial:', e.message));
+    // Registrar lead no banco (início da conversa) com a origem e o anúncio detectados
+    registrarLeadInicial(userPhone, origemLead, anuncio?.sourceId || '').catch(e => console.error('registrarLeadInicial:', e.message));
 
     conversas[userPhone] = [
       {
@@ -3499,6 +3545,8 @@ Seu objetivo é qualificar o lead e agendar uma conversa gratuita com um especia
 
 NÚMERO DO CLIENTE: ${userPhone}
 NOME DO PERFIL DO WHATSAPP: ${nomeDoWebhook || 'não disponível'}
+ORIGEM DESTE LEAD: ${origemLead}${anuncio ? `
+ESTE LEAD CHEGOU POR UM ANÚNCIO (Meta Ads): ele clicou no anúncio e caiu direto aqui no seu WhatsApp. Você SABE de onde ele veio.${anuncio.headline ? `\nTÍTULO DO ANÚNCIO QUE ELE ACABOU DE LER: "${anuncio.headline}"` : ''}${anuncio.body ? `\nTEXTO DO ANÚNCIO QUE ELE ACABOU DE LER: "${anuncio.body}"` : ''}` : ''}
 HORÁRIOS DISPONÍVEIS NA AGENDA: ${opcoesHorario}
 SAUDAÇÃO CORRETA AGORA (horário de Campo Grande): ${saudacaoHora}
 
@@ -3516,7 +3564,11 @@ MARCADOR DE NOME — OBRIGATÓRIO:
 Assim que souber o nome do lead (seja porque ele informou, confirmou ou corrigiu), inclua na sua resposta o marcador exato: [NOME: PrimeiroNome]
 Exemplo: se o lead disse que se chama João Silva, inclua [NOME: João] em algum lugar da mensagem. O sistema remove esse marcador automaticamente antes de enviar ao lead — não precisa se preocupar em escondê-lo ou explicá-lo, apenas inclua o marcador de forma direta. Faça isso UMA única vez, assim que o nome for confirmado. Nunca repita o marcador.
 
-${nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o nome do lead pode ser "${nomeDoWebhook}" (vindo do perfil do WhatsApp, pode não ser o nome real). Na primeira mensagem, em vez de perguntar o nome do zero, use o formato de 3 partes com "|||" mas substitua a última parte por: "Posso te chamar de ${nomeDoWebhook}?" — e a mensagem TERMINA nessa pergunta: NÃO emende "me conta sobre a sua operação" nem qualquer outra pergunta junto; a pergunta sobre a operação só vem DEPOIS que o lead responder sobre o nome. Se o lead confirmar, inclua [NOME: ${nomeDoWebhook}] na resposta. Se o lead corrigir ou disser que não é esse o nome, pergunte naturalmente "Como você prefere que eu te chame?" e use o nome que ele informar com [NOME: NomeCorrigido]. Seja flexível: o nome do perfil pode estar errado.` : ''}
+${anuncio ? `INSTRUÇÃO ESPECIAL DE ABERTURA (LEAD DE ANÚNCIO): Este lead chegou por um anúncio, então você já sabe de onde ele veio e qual promessa ele acabou de ler. NÃO comece do zero nem pergunte "posso te chamar de X?" nem "me conta o que você faz" de forma genérica: aproveite o contexto. Sua primeira mensagem sai em 3 partes separadas por "|||":
+1) Saudação calorosa e apresentação curta sua e da ${cfg.persona.empresa}${nomeDoWebhook ? `, usando o nome do perfil com naturalidade dentro da saudação (ex.: "Prazer, ${nomeDoWebhook}!"), SEM pedir permissão pra usar o nome` : ''}.
+2) Reconheça que ele veio pelo anúncio e conecte com a promessa que ele leu${(anuncio.headline || anuncio.body) ? ', reaproveitando a ideia do TÍTULO/TEXTO do anúncio acima com as SUAS palavras (não copie literalmente)' : ''}: em uma frase, diga que é exatamente isso que a ${cfg.persona.empresa} resolve.
+3) UMA pergunta só, ancorada na dor do anúncio, pra começar a qualificar (ex.: "Hoje, quando um cliente chama no seu WhatsApp, quem responde?"). A mensagem TERMINA nessa pergunta; não emende nenhuma outra.
+${nomeDoWebhook ? `Inclua [NOME: ${nomeDoWebhook}] uma vez na resposta. Se mais adiante o lead corrigir o nome, passe a usar o correto com [NOME: NomeCorrigido].` : ''}` : (nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o nome do lead pode ser "${nomeDoWebhook}" (vindo do perfil do WhatsApp, pode não ser o nome real). Na primeira mensagem, em vez de perguntar o nome do zero, use o formato de 3 partes com "|||" mas substitua a última parte por: "Posso te chamar de ${nomeDoWebhook}?" — e a mensagem TERMINA nessa pergunta: NÃO emende "me conta sobre a sua operação" nem qualquer outra pergunta junto; a pergunta sobre a operação só vem DEPOIS que o lead responder sobre o nome. Se o lead confirmar, inclua [NOME: ${nomeDoWebhook}] na resposta. Se o lead corrigir ou disser que não é esse o nome, pergunte naturalmente "Como você prefere que eu te chame?" e use o nome que ele informar com [NOME: NomeCorrigido]. Seja flexível: o nome do perfil pode estar errado.` : '')}
 
 SOBRE A EMPRESA:
 Serviços: ${cfg.negocio.servicos}.
@@ -3693,7 +3745,7 @@ DESQUALIFICAÇÃO ELEGANTE: nem todo lead tem perfil. Se depois de uma ou duas t
 
 NÃO SEJA INSISTENTE: se o lead não quiser responder uma pergunta, questionar o porquê dela, ou desviar, NÃO repita a mesma pergunta. Siga a conversa com naturalidade a partir do que ele trouxe. Insistir na mesma pergunta (ex: pedir o mesmo dado três vezes) soa robótico e afasta o lead. Se ele não respondeu algo, tudo bem — avance. A qualificação é uma conversa, não um interrogatório.
 
-USO DA ORIGEM DO LEAD: a origem do lead está disponível no contexto (Site, Instagram, Indicação, Anúncio ou WhatsApp direto). Use essa informação para calibrar a abertura com naturalidade: reconheça a indicação quando vier por indicação ("Que bom que te indicaram pra gente!"), conecte com a promessa do anúncio quando vier de anúncio, e seja caloroso com quem chega pelas redes. Nunca soe automático ao fazer isso, e nunca invente uma origem.
+USO DA ORIGEM DO LEAD: a origem do lead está disponível no contexto (Site, Instagram, Indicação, Anúncio ou WhatsApp direto). Use essa informação para calibrar a abertura com naturalidade: reconheça a indicação quando vier por indicação ("Que bom que te indicaram pra gente!"), conecte com a promessa do anúncio quando vier de anúncio, e seja caloroso com quem chega pelas redes. Quando o contexto trouxer o TÍTULO/TEXTO do anúncio que o lead leu, use as ideias dele (com as suas palavras, sem copiar) para mostrar que você entende o que trouxe a pessoa até aqui. Nunca soe automático ao fazer isso, e nunca invente uma origem nem uma promessa que o anúncio não fez.
 
 RETORNO DE LEAD: se você perceber pelo histórico que já conversou antes com esta pessoa (ela já se apresentou, já falou da empresa dela, ou já havia encerrado a conversa), NÃO comece do zero nem pergunte o nome de novo. Reconheça o retorno de forma natural e responda diretamente ao que a pessoa trouxe agora. Ela pode estar voltando para tirar uma dúvida, negociar, remarcar, ou retomar o interesse. Use o contexto da conversa anterior e seja acolhedor, como alguém que lembra de quem já falou.
 
