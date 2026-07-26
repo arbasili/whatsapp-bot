@@ -31,8 +31,8 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.19.0';
-const BOT_VERSION_DATA = '2026-07-24'; // data desta versão
+const BOT_VERSION = '1.19.1';
+const BOT_VERSION_DATA = '2026-07-26'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
 // numa versão morta faz a Meta redirecionar silenciosamente pra outra, sem
@@ -1495,9 +1495,13 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
     // Cadência reduzida para 2 toques (era 3): a tentativa 1 é a retomada contextual de
     // sempre; a tentativa 2 já é a última antes da janela fechar, então usa o tom de
     // "porta aberta, sem cobrança" que antes só aparecia na 3ª tentativa.
+    // Regra dura em ambas: nunca oferecer canal/ação que o bot não executa sozinho.
+    // Visto em produção um follow-up improvisar "posso te ligar" — promessa que
+    // ninguém cumpre (não há ligação automática nem handoff). Tudo se resolve aqui.
+    const semCanalExterno = ' NUNCA ofereça ligar, telefonar, fazer uma chamada ou videochamada, mandar e-mail, nem qualquer canal ou ação que dependa de outra pessoa. Você conduz tudo por aqui mesmo, nesta conversa por mensagem, e não promete nada além de continuar o papo aqui.';
     const instrucao = tentativa === 1
-      ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead parou de responder.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Com base na conversa, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. Se souber a dor do lead, mencione ela de forma leve e direta (ex: "vi que você falou que perde cliente por demora..."). A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases. Assine como ${cfg.persona.atendente} apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
-      : `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. Esta é a última tentativa antes de encerrar o contato.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem muito curta, sem pressão, deixando a porta aberta. Tom: "tudo bem se não for o momento certo, só queria deixar o caminho aberto". Sem cobrar resposta, sem urgência. Máximo 1 frase. Sem emoji, sem travessão. Responda APENAS com o texto da mensagem, sem aspas.`;
+      ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead parou de responder.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Com base na conversa, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. Se souber a dor do lead, mencione ela de forma leve e direta (ex: "vi que você falou que perde cliente por demora..."). A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela de forma leve, como quem só puxa o assunto de novo, SEM soar como cobrança (evite "fiquei te esperando", "você não respondeu", "estou aguardando"); se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases.${semCanalExterno} Assine como ${cfg.persona.atendente} apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
+      : `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. Esta é a última tentativa antes de encerrar o contato.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem muito curta, sem pressão, deixando a porta aberta. Tom: "tudo bem se não for o momento certo, só queria deixar o caminho aberto". Sem cobrar resposta, sem urgência. Máximo 1 frase. Sem emoji, sem travessão.${semCanalExterno} Responda APENAS com o texto da mensagem, sem aspas.`;
 
     const inicioFollowUp = Date.now();
     const resp = await axios.post(
@@ -3559,6 +3563,8 @@ REGRA DE UMA PERGUNTA POR MENSAGEM (vale para a conversa INTEIRA, não só uma e
 REGRA DE ERRO TÉCNICO: NUNCA diga que houve bug, erro, falha ou problema técnico do seu lado, e nunca peça desculpas por uma mensagem que você mesmo enviou — mensagens de retomada horas depois (follow-up) são intencionais, não são erro. Se o lead parecer confuso ("como assim?", "o quê?", "não entendi"), apenas esclareça com naturalidade o que você quis dizer e siga a conversa. Você é a demonstração viva do produto: admitir um defeito que não existiu destrói a venda.
 
 REGRA DE RESPOSTA A OFERTA: quando sua última mensagem ofereceu mostrar ou resolver algo e o lead responde curto demonstrando interesse ("como", "como assim", "quero", "pode ser", "me mostra", "sim"), trate como um SIM: siga para a ETAPA da ponte (que continua saindo em 3 balões separados por "|||", com UMA pergunta só no fim, exatamente como descrito nessa etapa). NUNCA volte para perguntas de qualificação que já foram respondidas. "Seguir para a ponte" não é apressar nem juntar tudo num balão: é iniciar a etapa da ponte no formato dela.
+
+REGRA DE CANAL: você atende e resolve TUDO por aqui, nesta conversa por mensagem. NUNCA ofereça ligar, telefonar, fazer uma chamada ou videochamada, mandar e-mail, passar o contato pra outra pessoa ligar, nem qualquer canal ou ação que dependa de alguém fora desta conversa. O único próximo passo que você propõe é a reunião com o especialista (agendada por aqui) ou continuar o papo por mensagem. Não prometa retorno por telefone em hipótese alguma.
 
 MARCADOR DE NOME — OBRIGATÓRIO:
 Assim que souber o nome do lead (seja porque ele informou, confirmou ou corrigiu), inclua na sua resposta o marcador exato: [NOME: PrimeiroNome]
