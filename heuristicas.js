@@ -10,6 +10,28 @@ function textoDoConteudo(content) {
   return '';
 }
 
+// Converte a hora mencionada pelo lead para a grade interna de Campo Grande.
+// Por padrão, os horários oferecidos pelo bot são de Brasília. Quando o próprio
+// lead explicita MS/MT ou uma cidade nesses fusos, a hora já é local e não deve
+// sofrer a subtração de 1h.
+function horaCampoGrandeDoPedido(texto, horaInformada) {
+  const t = (texto || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  const fusoCampoGrande =
+    /\b(ms|mt|mato grosso do sul|mato grosso)\b/.test(t) ||
+    /\b(campo grande|cuiaba)\b/.test(t);
+  const fusoBrasilia =
+    /\b(brasilia|df|distrito federal)\b/.test(t) ||
+    /\bhorario de brasilia\b/.test(t);
+
+  if (fusoCampoGrande) return horaInformada;
+  if (fusoBrasilia) return horaInformada - 1;
+  return horaInformada - 1;
+}
+
 const PERGUNTAS_NOME = ['qual o seu nome', 'como posso te chamar', 'como posso chamá-lo', 'como posso chamá-la', 'posso te chamar de'];
 // Palavras que não são nomes (a pessoa responde com frase em vez do nome direto)
 const PALAVRAS_NAO_NOME = new Set([
@@ -437,6 +459,7 @@ function pediuOptOut(texto) {
 
 module.exports = {
   textoDoConteudo,
+  horaCampoGrandeDoPedido,
   temIntencaoDeCompra,
   pediuOptOut,
   escolherSlot,

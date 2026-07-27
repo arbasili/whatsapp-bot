@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const {
   textoDoConteudo,
+  horaCampoGrandeDoPedido,
   escolherSlot,
   extrairNomeLead,
   extrairUrgencia,
@@ -17,6 +18,21 @@ const {
   temIntencaoDeCompra,
   pediuOptOut,
 } = require('./heuristicas');
+
+test('mantém 9h quando o lead explicita horário de MS', () => {
+  assert.strictEqual(horaCampoGrandeDoPedido('amanhã às 9h MS', 9), 9);
+  assert.strictEqual(horaCampoGrandeDoPedido('amanhã 9 horas em Campo Grande', 9), 9);
+});
+
+test('mantém horário local de Cuiabá e MT', () => {
+  assert.strictEqual(horaCampoGrandeDoPedido('amanhã às 9h em Cuiabá', 9), 9);
+  assert.strictEqual(horaCampoGrandeDoPedido('amanhã às 9h MT', 9), 9);
+});
+
+test('converte Brasília para Campo Grande quando explícito ou sem fuso', () => {
+  assert.strictEqual(horaCampoGrandeDoPedido('amanhã às 10h de Brasília', 10), 9);
+  assert.strictEqual(horaCampoGrandeDoPedido('amanhã às 10h', 10), 9);
+});
 
 // Monta uma conversa mínima: roteiro + ack + turnos reais
 function conversaCom(...msgsUsuario) {

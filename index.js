@@ -14,6 +14,7 @@ const cfg = require('./config-cliente');
 // para permitir testes unitários (npm test) sem subir o servidor
 const {
   textoDoConteudo,
+  horaCampoGrandeDoPedido,
   escolherSlot,
   extrairTipoNegocio,
   extrairDorLead,
@@ -31,8 +32,8 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.19.1';
-const BOT_VERSION_DATA = '2026-07-26'; // data desta versão
+const BOT_VERSION = '1.19.2';
+const BOT_VERSION_DATA = '2026-07-27'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
 // numa versão morta faz a Meta redirecionar silenciosamente pra outra, sem
@@ -1342,12 +1343,13 @@ async function interpretarPedidoData(texto) {
   }
 
   // 2. Descobrir a HORA pedida (se houver)
-  // O lead fala em horário de Brasília; internamente trabalhamos em Campo Grande (−1h)
+  // Por padrão o lead fala em horário de Brasília, mas pode explicitar MS/MT
+  // ou Campo Grande/Cuiabá. Nesse caso a hora já está no fuso da agenda.
   let horaAlvo = null;
   const mh = t.match(/\b(\d{1,2})\s*h\b/) || t.match(/\bàs\s+(\d{1,2})\b/) || t.match(/\b(\d{1,2})\s+horas?\b/);
   if (mh) {
-    const horaBrasilia = parseInt(mh[1], 10);
-    horaAlvo = horaBrasilia - 1; // converte Brasília -> Campo Grande
+    const horaInformada = parseInt(mh[1], 10);
+    horaAlvo = horaCampoGrandeDoPedido(t, horaInformada);
   }
 
   // Período mencionado. (?:^|\s) no lugar de casar solto: "amanhã" CONTÉM
