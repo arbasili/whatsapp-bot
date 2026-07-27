@@ -32,7 +32,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.20.0';
+const BOT_VERSION = '1.21.0';
 const BOT_VERSION_DATA = '2026-07-27'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -2308,6 +2308,43 @@ app.post('/api/notifications/read-all', verificarToken, async (req, res) => {
 
 // ── Configurações do cliente ────────────────────────────────────────────
 // GET /api/settings — configurações do painel (metas etc.)
+app.get('/api/integrations/status', verificarToken, async (req, res) => {
+  const agora = new Date().toISOString();
+  const resultado = {
+    checkedAt: agora,
+    database: { status: 'ok', detail: 'Banco de dados conectado', checkedAt: agora },
+    whatsapp: {
+      status: process.env.WHATSAPP_TOKEN && process.env.PHONE_NUMBER_ID ? 'configured' : 'error',
+      detail: process.env.WHATSAPP_TOKEN && process.env.PHONE_NUMBER_ID
+        ? 'Canal configurado. A aprovação de templates é gerenciada pela Meta.'
+        : 'Credenciais do WhatsApp incompletas.',
+      checkedAt: agora,
+    },
+    calendar: { status: 'checking', detail: 'Verificando acesso à agenda', checkedAt: agora },
+  };
+  try {
+    await pool.query('SELECT 1');
+  } catch {
+    resultado.database = { status: 'error', detail: 'Banco de dados indisponível', checkedAt: agora };
+  }
+  try {
+    await calendar.events.list({
+      calendarId: CALENDAR_ID,
+      maxResults: 1,
+      singleEvents: true,
+      timeMin: new Date().toISOString(),
+    });
+    resultado.calendar = { status: 'ok', detail: 'Agenda acessível e respondendo normalmente', checkedAt: agora };
+  } catch (err) {
+    resultado.calendar = {
+      status: 'error',
+      detail: `Não foi possível acessar a agenda: ${String(err.message || 'erro desconhecido').slice(0, 180)}`,
+      checkedAt: agora,
+    };
+  }
+  res.json(resultado);
+});
+
 app.get('/api/settings', verificarToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
