@@ -32,7 +32,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.19.3';
+const BOT_VERSION = '1.20.0';
 const BOT_VERSION_DATA = '2026-07-27'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -308,6 +308,27 @@ async function initDb() {
     )
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_pendentes ON tasks(client_id, status, due_at)`);
+
+  // Central de notificações do painel. É compartilhada com o agente de reuniões:
+  // ambos escrevem eventos e o painel lê por esta API. dedupe_key impede que
+  // reinícios ou webhooks repetidos gerem o mesmo aviso várias vezes.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      tipo TEXT NOT NULL,
+      titulo TEXT NOT NULL,
+      mensagem TEXT,
+      lead_id UUID REFERENCES leads(id) ON DELETE SET NULL,
+      entidade_tipo TEXT,
+      entidade_id TEXT,
+      dedupe_key TEXT NOT NULL,
+      read_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (client_id, dedupe_key)
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_notifications_client_unread ON notifications(client_id, read_at, created_at DESC)`);
 
   // Configurações do cliente no painel (metas do mês etc.) — JSONB único por
   // client_id; o PATCH mescla chaves, então novas configurações não pedem migração.
@@ -1088,6 +1109,41 @@ async function registrarAtividade(leadName, acao) {
     );
   } catch (err) {
     console.error('Erro ao registrar atividade:', err.message);
+  }
+}
+
+async function criarNotificacao({
+  tipo,
+  titulo,
+  mensagem = null,
+  phone = null,
+  leadId = null,
+  entidadeTipo = 'lead',
+  entidadeId = null,
+  dedupeKey,
+}) {
+  try {
+    let resolvedLeadId = leadId;
+    if (!resolvedLeadId && phone) {
+      const r = await pool.query(
+        'SELECT id FROM leads WHERE phone = $1 AND client_id = $2 AND deleted_at IS NULL LIMIT 1',
+        [phone, CLIENT_ID]
+      );
+      resolvedLeadId = r.rows[0]?.id || null;
+    }
+    const { rowCount } = await pool.query(
+      `INSERT INTO notifications
+         (client_id, tipo, titulo, mensagem, lead_id, entidade_tipo, entidade_id, dedupe_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT (client_id, dedupe_key) DO NOTHING`,
+      [CLIENT_ID, tipo, titulo, mensagem, resolvedLeadId, entidadeTipo,
+       entidadeId || resolvedLeadId || phone, dedupeKey]
+    );
+    if (rowCount > 0) emitirMudancaLeads();
+    return rowCount > 0;
+  } catch (err) {
+    console.error('Erro ao criar notificação:', err.message);
+    return false;
   }
 }
 
@@ -2194,6 +2250,59 @@ app.patch('/api/leads/:id/snooze', verificarToken, async (req, res) => {
   } catch (err) {
     console.error('Erro em PATCH /api/leads/:id/snooze:', err.message);
     res.status(500).json({ error: 'Erro ao adiar lead' });
+  }
+});
+
+// ── Central de notificações ─────────────────────────────────────────────────
+app.get('/api/notifications', verificarToken, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
+    const { rows } = await pool.query(
+      `SELECT n.id, n.tipo, n.titulo, n.mensagem, n.lead_id, n.entidade_tipo,
+              n.entidade_id, n.read_at, n.created_at, l.name AS lead_name
+       FROM notifications n
+       LEFT JOIN leads l ON l.id = n.lead_id
+       WHERE n.client_id = $1
+       ORDER BY n.created_at DESC
+       LIMIT $2`,
+      [CLIENT_ID, limit]
+    );
+    const unread = await pool.query(
+      'SELECT COUNT(*)::int AS total FROM notifications WHERE client_id = $1 AND read_at IS NULL',
+      [CLIENT_ID]
+    );
+    res.json({ notifications: rows, unread: unread.rows[0].total });
+  } catch (err) {
+    console.error('Erro em GET /api/notifications:', err.message);
+    res.status(500).json({ error: 'Erro ao buscar notificações' });
+  }
+});
+
+app.patch('/api/notifications/:id/read', verificarToken, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE notifications SET read_at = COALESCE(read_at, NOW())
+       WHERE id = $1 AND client_id = $2 RETURNING id, read_at`,
+      [req.params.id, CLIENT_ID]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Notificação não encontrada' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Erro em PATCH /api/notifications/:id/read:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar notificação' });
+  }
+});
+
+app.post('/api/notifications/read-all', verificarToken, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      'UPDATE notifications SET read_at = NOW() WHERE client_id = $1 AND read_at IS NULL',
+      [CLIENT_ID]
+    );
+    res.json({ updated: rowCount });
+  } catch (err) {
+    console.error('Erro em POST /api/notifications/read-all:', err.message);
+    res.status(500).json({ error: 'Erro ao atualizar notificações' });
   }
 });
 
@@ -3482,6 +3591,13 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     if (negocioQuente) alerta += `Segmento: ${negocioQuente}\n`;
     alerta += `Disse: "${userText.slice(0, 120)}"\n\nEntre agora enquanto está quente.`;
     const alertaEnviado = await enviarMensagem(NUMERO_VENDEDOR, alerta);
+    criarNotificacao({
+      tipo: 'lead_quente',
+      titulo: `${nomeQuente || 'Lead'} demonstrou intenção de compra`,
+      mensagem: userText.slice(0, 180),
+      phone: userPhone,
+      dedupeKey: `lead-quente:${userPhone}`,
+    }).catch(() => {});
     if (alertaEnviado) {
       leadsAlertadosQuente.add(userPhone);
       log(userPhone, 'info', 'Alerta de lead quente enviado ao comercial.');
@@ -4094,6 +4210,15 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       await enviarERegistrar(userPhone, `Qualquer dúvida até a reunião, é só me chamar por aqui. Até lá, ${nomeExibicao}!`);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioInterno}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
+    await criarNotificacao({
+      tipo: 'agendamento_confirmado',
+      titulo: `Reunião de ${nomeExibicao} confirmada`,
+      mensagem: horarioInterno,
+      phone: userPhone,
+      entidadeTipo: 'agendamento',
+      entidadeId: eventId || slotEscolhido.inicio,
+      dedupeKey: `agendamento:${eventId || `${userPhone}:${slotEscolhido.inicio}`}`,
+    });
    } catch (err) {
      console.error('Erro no processamento do agendamento:', err.message);
      // Tranquiliza o lead e sinaliza para a equipe finalizar manualmente
@@ -4244,6 +4369,13 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       if (statusIntermediario === 'Pronto para agendar') {
         registrarEtapaFunil(userPhone, FUNIL.PRONTO_AGENDAR).catch(() => {});
         registrarAtividade(nomeAtual || 'Lead', 'Propôs reunião').catch(() => {});
+        criarNotificacao({
+          tipo: 'pronto_agendar',
+          titulo: `${nomeAtual || 'Lead'} está pronto para agendar`,
+          mensagem: 'A qualificação avançou para a etapa de agendamento.',
+          phone: userPhone,
+          dedupeKey: `pronto-agendar:${userPhone}`,
+        }).catch(() => {});
         // Lead qualificado o suficiente pra proposta: gera Segmento/Dor limpos (uma vez).
         // Assim, se ele travar aqui sem agendar, o card do CRM já fica apresentável em
         // vez de mostrar o texto cru da heurística (ex: transcrição de áudio cortada).
