@@ -32,7 +32,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.19.2';
+const BOT_VERSION = '1.19.3';
 const BOT_VERSION_DATA = '2026-07-27'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -1857,8 +1857,12 @@ setInterval(async () => {
       }
       msg += `\nCombinado para: ${quando}`;
       if (t.origem === 'bot') msg += `\n\n_Tarefa criada automaticamente: o lead pediu esse contato na conversa._`;
-      await enviarMensagem(NUMERO_VENDEDOR, msg);
-      await pool.query('UPDATE tasks SET aviso_enviado = TRUE WHERE id = $1', [t.id]);
+      const enviada = await enviarMensagem(NUMERO_VENDEDOR, msg);
+      if (enviada) {
+        await pool.query('UPDATE tasks SET aviso_enviado = TRUE WHERE id = $1', [t.id]);
+      } else {
+        console.warn(`Aviso da tarefa ${t.id} não foi entregue — permanecerá pendente para nova tentativa.`);
+      }
     }
     if (rows.length) emitirMudancaLeads();
   } catch (err) {
@@ -3470,7 +3474,6 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
   // um aviso imediato pro comercial, uma vez por lead. Não interrompe o fluxo —
   // o bot segue conduzindo; o alerta só acelera a intervenção humana.
   if (userText && temIntencaoDeCompra(userText) && !leadsAlertadosQuente.has(userPhone)) {
-    leadsAlertadosQuente.add(userPhone);
     const nomeQuente = extrairNomeLead(conversas[userPhone] || []) || nomeDoWebhook || '';
     const negocioQuente = extrairTipoNegocio(conversas[userPhone] || []);
     let alerta = `🔥 *Lead quente — intenção de compra*\n\n`;
@@ -3478,8 +3481,13 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     alerta += `WhatsApp: ${userPhone}\n`;
     if (negocioQuente) alerta += `Segmento: ${negocioQuente}\n`;
     alerta += `Disse: "${userText.slice(0, 120)}"\n\nEntre agora enquanto está quente.`;
-    enviarMensagem(NUMERO_VENDEDOR, alerta).catch(() => {});
-    log(userPhone, 'info', 'Alerta de lead quente enviado ao comercial.');
+    const alertaEnviado = await enviarMensagem(NUMERO_VENDEDOR, alerta);
+    if (alertaEnviado) {
+      leadsAlertadosQuente.add(userPhone);
+      log(userPhone, 'info', 'Alerta de lead quente enviado ao comercial.');
+    } else {
+      log(userPhone, 'warn', 'Alerta de lead quente não entregue ao comercial.');
+    }
   }
 
   // Se o lead estava encerrado e mandou mensagem nova, reativa MANTENDO o histórico
