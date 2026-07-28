@@ -106,6 +106,15 @@ function randomScheduledAt() {
   return d.toISOString();
 }
 
+function scheduledAtParaStatus(status) {
+  const d = new Date();
+  const futura = status === 'Reunião agendada';
+  d.setDate(d.getDate() + (futura ? rand(0, 7) : -rand(1, 12)));
+  d.setHours(rand(8, 18), pick([0, 30]), 0, 0);
+  if (futura && d <= new Date()) d.setDate(d.getDate() + 1);
+  return d.toISOString();
+}
+
 function pickWeighted() {
   const totalPeso = STATUS_DIST.reduce((s, x) => s + x.peso, 0);
   let r = Math.random() * totalPeso;
@@ -161,14 +170,17 @@ function gerarBullets(segmento, dor) {
 const TOTAL = Math.max(1, parseInt(process.argv[2], 10) || 150);
 
 function statusParaIndice(i) {
-  if (TOTAL > 40) return pickWeighted(); // modo demo: distribuição realista
-  if (i < STATUS_DIST.length) return STATUS_DIST[i]; // 1 de cada fase primeiro
-  const EXTRAS = ['Em conversa', 'Reunião agendada', 'Reunião realizada', 'Pronto para agendar'];
+  if (TOTAL > 60) return pickWeighted();
+  if (i < STATUS_DIST.length) return STATUS_DIST[i];
+  const EXTRAS = STATUS_DIST.map(s => s.status);
   const alvo = EXTRAS[(i - STATUS_DIST.length) % EXTRAS.length];
   return STATUS_DIST.find(s => s.status === alvo) || STATUS_DIST[0];
 }
 
 async function seed() {
+  if (!process.env.DATABASE_URL || !CLIENT_ID) {
+    throw new Error('DATABASE_URL e CLIENT_ID são obrigatórios.');
+  }
   console.log(`🌱 Gerando ${TOTAL} leads para client_id=${CLIENT_ID}...${TOTAL <= 40 ? ' (modo unitário: 1 por fase garantido)' : ''}\n`);
 
   const contagem = {};
@@ -206,7 +218,7 @@ async function seed() {
 
     // Só gera scheduled_at para status que passaram pelo agendamento
     const temAgendamento = ['Reunião agendada', 'Reunião realizada', 'Proposta', 'Negociação', 'Fechado e Venda', 'Fechado e Perdido'].includes(statusItem.status);
-    const scheduledAt = temAgendamento ? randomScheduledAt() : null;
+    const scheduledAt = temAgendamento ? scheduledAtParaStatus(statusItem.status) : null;
 
     const meetLink = temAgendamento && rand(0, 1) ? `https://meet.google.com/${rand(100,999)}-${rand(100,999)}-${rand(100,999)}` : null;
 
@@ -225,32 +237,67 @@ async function seed() {
     const dealValue = rand(0, 4) === 0 ? null : pick([297, 397, 497, 597, 797, 997, 1297, 1497]);
 
     try {
-      await pool.query(
+      const inserted = await pool.query(
         `INSERT INTO leads (
           name, phone, email, business_type, pain, urgency, status, temperature,
           score, close_probability, next_action, next_action_at,
           ai_insights, summary, summary_bullets,
-          origin, meet_link, scheduled_at, funnel_stages,
+          origin, meet_link, scheduled_at, scheduled_at_ts, funnel_stages,
           created_at, updated_at, client_id, deal_value, scheduled_set_at
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8,
           $9, $10, $11, $12,
           $13, $14, $15,
-          $16, $17, $18, $19,
-          $20, $21, $22, $23, $24
-        )`,
+          $16, $17, $18, $19, $20,
+          $21, $22, $23, $24, $25
+        ) RETURNING id`,
         [
           // "(teste)" no nome distingue leads de seed de leads REAIS que chegam
           // pelo link do Instagram — sem isso não dá pra saber quem é quem no Kanban
           `${nome} (teste)`, phone, email, segmento, dor, urgencia, statusItem.status, temp,
           score, closeProb, nextAction, scheduledAt,
           JSON.stringify(insights), summary, JSON.stringify(bullets),
-          origem, meetLink, scheduledAt, statusItem.siglas,
+          origem, meetLink, scheduledAt, scheduledAt, statusItem.siglas,
           created, updated, CLIENT_ID, dealValue,
           // data em que a reunião foi MARCADA — alimenta a meta de agendamentos do mês
           temAgendamento ? randomDate(10) : null,
         ]
       );
+      const leadId = inserted.rows[0].id;
+
+      const conversa = [
+        { role: 'user', content: `Olá, quero entender como funciona para ${segmento.toLowerCase()}.`, timestamp: created },
+        { role: 'assistant', content: 'Claro! Como funciona hoje o atendimento dos seus clientes pelo WhatsApp?', timestamp: new Date(new Date(created).getTime() + 2 * 60000).toISOString() },
+        { role: 'user', content: dor, timestamp: new Date(new Date(created).getTime() + 5 * 60000).toISOString() },
+      ];
+      await pool.query(
+        `INSERT INTO conversations (lead_id, client_id, messages, updated_at)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (lead_id, client_id) DO UPDATE
+         SET messages = EXCLUDED.messages, updated_at = EXCLUDED.updated_at`,
+        [leadId, CLIENT_ID, JSON.stringify(conversa), updated]
+      );
+
+      // Não cria bot_state: dados de demonstração nunca entram nos jobs que
+      // enviam mensagens, follow-ups ou lembretes do WhatsApp.
+      if (i % 2 === 0) {
+        const due = new Date();
+        due.setHours(due.getHours() + (i % 4 === 0 ? -rand(1, 12) : rand(1, 48)));
+        const concluida = i % 6 === 0;
+        await pool.query(
+          `INSERT INTO tasks (
+             client_id, lead_id, titulo, due_at, status, origem, criado_por, done_at
+           ) VALUES ($1, $2, $3, $4, $5, 'sistema', 'seed-crm', $6)`,
+          [
+            CLIENT_ID,
+            leadId,
+            concluida ? 'Revisar diagnóstico realizado' : nextAction,
+            due.toISOString(),
+            concluida ? 'concluida' : 'pendente',
+            concluida ? randomDate(2) : null,
+          ]
+        );
+      }
       inseridos++;
       contagem[statusItem.status] = (contagem[statusItem.status] || 0) + 1;
     } catch (err) {
@@ -272,12 +319,12 @@ async function seed() {
 
   try {
     for (let i = 0; i < 15; i++) {
-      const nome = pick(NOMES);
+      const nome = `${pick(NOMES)} (teste)`;
       const acao = pick(atividades);
       const quando = randomDate(2);
       await pool.query(
         `INSERT INTO ai_activity (acao, lead_name, created_at, client_id) VALUES ($1, $2, $3, $4)`,
-        [acao, nome.split(' ')[0], quando, CLIENT_ID]
+        [acao, nome, quando, CLIENT_ID]
       );
     }
     console.log('\n✅ 15 registros de atividade da IA inseridos!');
