@@ -37,7 +37,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.26.2';
+const BOT_VERSION = '1.26.3';
 const BOT_VERSION_DATA = '2026-07-28'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -2278,12 +2278,18 @@ app.get('/api/notifications', verificarToken, async (req, res) => {
        FROM notifications n
        LEFT JOIN leads l ON l.id = n.lead_id
        WHERE n.client_id = $1
+         AND (n.lead_id IS NULL OR l.deleted_at IS NULL)
        ORDER BY n.created_at DESC
        LIMIT $2`,
       [CLIENT_ID, limit]
     );
     const unread = await pool.query(
-      'SELECT COUNT(*)::int AS total FROM notifications WHERE client_id = $1 AND read_at IS NULL',
+      `SELECT COUNT(*)::int AS total
+         FROM notifications n
+         LEFT JOIN leads l ON l.id = n.lead_id
+        WHERE n.client_id = $1
+          AND n.read_at IS NULL
+          AND (n.lead_id IS NULL OR l.deleted_at IS NULL)`,
       [CLIENT_ID]
     );
     res.json({ notifications: rows, unread: unread.rows[0].total });
