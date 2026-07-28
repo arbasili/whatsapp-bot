@@ -21,6 +21,7 @@ const {
   interpretarDataTarefa,
   temIntencaoDeCompra,
   pediuOptOut,
+  separarPonteComercial,
 } = require('./heuristicas');
 
 test('mantém 9h quando o lead explicita horário de MS', () => {
@@ -589,4 +590,22 @@ test('NÃO confunde opt-out com recusa de horário ou preposição', () => {
   assert.ok(!pediuOptOut('pode ser para amanhã'))
   assert.ok(!pediuOptOut('não quero esse horário'))
   assert.ok(!pediuOptOut('manda o link por favor'))
+})
+
+test('divide ponte comercial longa em três balões', () => {
+  const resposta = 'Paciente que desiste de esperar é o pior tipo de perda, ele já queria fechar com você e a demora acabou afastando. Isso dá pra resolver bem com um atendimento automático, que responde na hora mesmo quando você tá ocupada com outro paciente. Pra te ajudar com isso, a gente oferece uma conversa gratuita e online, pelo Google Meet, de uns 30 minutos com um especialista, sem compromisso. Quer que eu veja um horário?';
+  const partes = separarPonteComercial(resposta).split('|||');
+  assert.strictEqual(partes.length, 3);
+  assert.match(partes[0], /Paciente que desiste/);
+  assert.match(partes[1], /atendimento automático/);
+  assert.match(partes[2], /Quer que eu veja um horário\?/);
+})
+
+test('preserva respostas comuns e pontes que já estão separadas', () => {
+  assert.strictEqual(
+    separarPonteComercial('Entendi. Como funciona seu atendimento hoje?'),
+    'Entendi. Como funciona seu atendimento hoje?',
+  );
+  const separada = 'Entendo a perda.|||Isso dá pra automatizar.|||Quer que eu veja um horário?';
+  assert.strictEqual(separarPonteComercial(separada), separada);
 })

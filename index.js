@@ -31,12 +31,13 @@ const {
   interpretarDataTarefa,
   temIntencaoDeCompra,
   pediuOptOut,
+  separarPonteComercial,
 } = require('./heuristicas');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.26.1';
+const BOT_VERSION = '1.26.2';
 const BOT_VERSION_DATA = '2026-07-28'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -4400,6 +4401,11 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
           ? 'E hoje, como funciona o seu atendimento pelo WhatsApp?'
           : 'Me conta sobre a sua operação, o que você faz?'}`;
       }
+    }
+    const respostaSeparada = separarPonteComercial(resposta);
+    if (respostaSeparada !== resposta) {
+      log(userPhone, 'warn', 'Ponte comercial longa dividida automaticamente em 3 balões');
+      resposta = respostaSeparada;
     }
     log(userPhone, 'info', `Resposta Claude: "${conteudoParaLog(resposta.slice(0, 100))}"`);
     conversas[userPhone].push({ role: 'assistant', content: resposta });

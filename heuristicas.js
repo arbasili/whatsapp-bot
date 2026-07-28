@@ -512,11 +512,40 @@ function pediuOptOut(texto) {
   return /\bn[ãa]o (me )?(mande|manda|envie|envia|chame|chama|perturbe|perturba|encha)\b|\bpar(e|a) de (me )?(mandar|enviar|chamar|perturbar|encher)\b|me (tir[ae]|remov[ae]|descadastr[ae])|\b(descadastr|desinscrev)|sair da lista|n[ãa]o quero (mais )?(receber|mensagen|ser chamad|que me mand)|me deixa? em paz|n[ãa]o me procur|perde(u)? meu (n[úu]mero|contato)|bloquea/.test(t);
 }
 
+// A ponte comercial deve chegar em três balões curtos. O modelo normalmente
+// obedece ao marcador "|||", mas pode ocasionalmente devolver tudo num parágrafo.
+// Esta proteção reconhece a estrutura sem alterar respostas comuns.
+function separarPonteComercial(texto) {
+  const original = String(texto || '').trim();
+  if (!original || original.includes('|||')) return original;
+  if (!/quer que eu veja um hor[áa]rio\?/i.test(original)) return original;
+  if (!/(atendimento autom[áa]tico|automatizar|google meet|especialista)/i.test(original)) return original;
+
+  const inicioSolucao = original.search(
+    /\b(?:isso|essa situa[çc][ãa]o|esse problema|esse tipo de (?:coisa|situa[çc][ãa]o))\s+(?:d[áa]|pode)(?=\s)/i,
+  );
+  if (inicioSolucao <= 0) return original;
+
+  const trechoAposSolucao = original.slice(inicioSolucao);
+  const propostaRelativa = trechoAposSolucao.search(
+    /\b(?:pra te ajudar|para te ajudar|por isso|se fizer sentido|a gente oferece)\b/i,
+  );
+  if (propostaRelativa <= 0) return original;
+
+  const inicioProposta = inicioSolucao + propostaRelativa;
+  return [
+    original.slice(0, inicioSolucao).trim(),
+    original.slice(inicioSolucao, inicioProposta).trim(),
+    original.slice(inicioProposta).trim(),
+  ].filter(Boolean).join('|||');
+}
+
 module.exports = {
   textoDoConteudo,
   horaCampoGrandeDoPedido,
   temIntencaoDeCompra,
   pediuOptOut,
+  separarPonteComercial,
   escolherSlot,
   extrairTipoNegocio,
   extrairDorLead,
