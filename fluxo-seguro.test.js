@@ -35,3 +35,14 @@ test('lead quente registra o painel antes de tentar o WhatsApp', () => {
   assert.ok(trecho.indexOf('await criarNotificacao') < trecho.indexOf('await enviarMensagem'));
   assert.match(trecho, /notificacao === 'existing'/);
 });
+
+test('lead excluído que retorna começa com dados comerciais limpos', () => {
+  const trecho = source.slice(
+    source.indexOf('async function registrarLeadInicial'),
+    source.indexOf('// Atualiza campos do lead no Postgres')
+  );
+  assert.match(trecho, /deleted_at = NULL/);
+  assert.match(trecho, /name = NULL, email = NULL, business_type = NULL/);
+  assert.match(trecho, /score = NULL, close_probability = NULL, next_action = NULL/);
+  assert.match(trecho, /scheduled_at = NULL, scheduled_at_ts = NULL/);
+});

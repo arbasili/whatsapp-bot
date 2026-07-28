@@ -35,7 +35,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.23.0';
+const BOT_VERSION = '1.24.0';
 const BOT_VERSION_DATA = '2026-07-28'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -755,6 +755,12 @@ async function registrarLeadInicial(phone, origem = '', adId = '') {
          deleted_at = NULL, status = 'Em conversa', funnel_stages = EXCLUDED.funnel_stages,
          origin = EXCLUDED.origin,
          ad_id = COALESCE(NULLIF(EXCLUDED.ad_id, ''), leads.ad_id),
+         name = NULL, email = NULL, business_type = NULL, pain = NULL, urgency = NULL,
+         temperature = NULL, scheduled_at = NULL, scheduled_at_ts = NULL,
+         scheduled_set_at = NULL, meet_link = NULL, summary = NULL,
+         score = NULL, close_probability = NULL, next_action = NULL,
+         next_action_at = NULL, ai_insights = NULL, summary_bullets = NULL,
+         snooze_until = NULL, first_response_at = NULL, deal_value = NULL,
          created_at = NOW(), updated_at = NOW()
        WHERE leads.deleted_at IS NOT NULL`,
       [CLIENT_ID, phone, FUNIL.EM_CONVERSA, origem, adId || null]
@@ -3667,7 +3673,8 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     // Se o lead tinha agendado, mantém leadsAgendados para cair no fluxo pós-agendamento.
   }
 
-  if (!conversas[userPhone]) {
+  const iniciandoNovaConversa = !conversas[userPhone];
+  if (iniciandoNovaConversa) {
     // Conversa nova: limpa qualquer estado de agendamento anterior para evitar
     // que o lead caia em modo pós-agendamento por engano.
     leadsAgendados.delete(userPhone);
@@ -3918,6 +3925,7 @@ REGRAS DAS SEQUÊNCIAS DE QUEBRA DE OBJEÇÃO (método SPIN aplicado a objeçõe
 REGRAS DE LINGUAGEM:
 Responda sempre em português brasileiro.
 Seja humano, próximo e natural, com um jeito leve de quem conversa no WhatsApp. Evite frases genéricas como "Que bom te ter aqui".
+ESPELHE AS PALAVRAS DO LEAD: não invente sinônimos para uma ação que a pessoa acabou de descrever. Se ela disse "eu respondo", use "você responde" ou "o atendimento fica com você". Nunca transforme isso em construções estranhas como "decidir e responder tudo sozinha". Quando não houver certeza sobre gênero, prefira frases neutras.
 TOM DE ESCRITA: use contrações naturais do dia a dia, como "tô" (em vez de "estou"), "tá" (em vez de "está"), "pra" (em vez de "para"), "pro" (em vez de "para o"). Isso deixa a conversa leve e humana, como uma pessoa real escreveria. Mas não force gírias pesadas ou regionais (evite "mano", "cê", "top", "firmeza") — o tom é próximo, não desleixado.
 EMOJIS: pode usar emoji de forma ocasional e com moderação, em momentos certos (uma saudação calorosa, ao validar algo que o lead disse, ao comemorar um agendamento). POSIÇÃO DO EMOJI: o emoji só pode aparecer ao FINAL de uma mensagem curta de reação, como pontuação emocional isolada (ex: "Que bom 😄", "Boa 👍", "Show 😊"). NUNCA coloque emoji no meio de uma frase, mesmo que curta — jamais faça "Ótimo! 😊 Tenho duas opções..." ou "Perfeito! 🙌 Vou reservar...". O emoji fecha uma reação, não abre um conteúdo. Regra: no máximo UM emoji por mensagem, e NÃO em toda mensagem — só quando agregar. Emoji demais vira spam e parece infantil. Prefira os discretos (como 😊 😄 👍). Nunca use emoji ao falar de números, emails ou dados do agendamento.
 NUNCA use travessão (—) em nenhuma hipótese. Nem nas mensagens ao lead, nem internamente. Substitua sempre por vírgula ou ponto. Exemplos do que nunca fazer: "o cliente espera — e vai embora", "me conta sobre o negócio — o que você faz?", "responde na hora — mesmo fora do horário". Se sentir vontade de usar travessão, use vírgula ou reescreva a frase.
@@ -4340,6 +4348,18 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
         contextoDinamico += ` ATENÇÃO CRÍTICA: o sistema perguntou ao lead se o email ${agLead.emailPendente} está correto e AINDA AGUARDA a confirmação — o agendamento NÃO FOI CRIADO. Não diga que está agendado, confirmado ou "tudo certo". Se a mensagem do lead parecer confirmar o email, responda APENAS pedindo uma confirmação clara, por exemplo: "Perfeito! Só me confirma com um sim que eu já registro o agendamento aqui." Se o lead corrigir o email, o sistema trata sozinho.`;
       }
     }
+
+    // O roteiro orienta a IA, mas estes dados objetivos são reforçados no turno
+    // atual para impedir abertura genérica e repetição de perguntas já respondidas.
+    const nomeConhecido = agLead?.nomeConfirmado || extrairNomeLead(conversas[userPhone]) || nomeDoWebhook || '';
+    const negocioConhecido = extrairTipoNegocio(conversas[userPhone]);
+    if (iniciandoNovaConversa && nomeConhecido) {
+      contextoDinamico += ` ABERTURA PERSONALIZADA OBRIGATÓRIA: o nome conhecido é "${nomeConhecido}". Cumprimente usando o primeiro nome logo na abertura, sem perguntar o nome novamente e sem pedir autorização para usá-lo.`;
+    }
+    if (negocioConhecido) {
+      contextoDinamico += ` DADO JÁ CONHECIDO: o lead trabalha com "${negocioConhecido}". NÃO pergunte "o que você faz?", "qual é a sua operação?" nem repita a etapa de segmento. Reconheça esse contexto brevemente e avance para a próxima informação que ainda falta. Se esse dado veio de uma conversa antiga, confirme de forma natural apenas se continua válido, sem fazê-lo contar tudo de novo.`;
+    }
+    contextoDinamico += ` REVISÃO DE LINGUAGEM: espelhe as palavras usadas pelo lead e prefira construções neutras como "o atendimento fica com você". Não escreva combinações artificiais como "decidir e responder tudo sozinha".`;
 
     // O lead está respondendo a um follow-up enviado horas atrás — sem este aviso o
     // Claude vê a própria retomada como mensagem estranha no histórico e pode "pedir
