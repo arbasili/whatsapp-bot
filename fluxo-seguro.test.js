@@ -46,3 +46,14 @@ test('lead excluído que retorna começa com dados comerciais limpos', () => {
   assert.match(trecho, /score = NULL, close_probability = NULL, next_action = NULL/);
   assert.match(trecho, /scheduled_at = NULL, scheduled_at_ts = NULL/);
 });
+
+test('abertura usa nome do perfil sem pedir confirmação e não fica sem pergunta', () => {
+  assert.match(source, /Considere o nome do perfil válido/);
+  assert.match(source, /NÃO pergunte "posso te chamar de \$\{nomeDoWebhook\}\?"/);
+  assert.match(source, /iniciandoNovaConversa && !resposta\.includes\('\?'\)/);
+  assert.match(source, /Me conta sobre a sua operação, o que você faz\?/);
+});
+
+test('texto que menciona anúncio recebe a abertura especial mesmo sem referral da Meta', () => {
+  assert.match(source, /\$\{origemLead === 'Anúncio' \?/);
+});

@@ -35,7 +35,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.24.0';
+const BOT_VERSION = '1.25.0';
 const BOT_VERSION_DATA = '2026-07-28'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -3759,11 +3759,11 @@ MARCADOR DE NOME — OBRIGATÓRIO:
 Assim que souber o nome do lead (seja porque ele informou, confirmou ou corrigiu), inclua na sua resposta o marcador exato: [NOME: PrimeiroNome]
 Exemplo: se o lead disse que se chama João Silva, inclua [NOME: João] em algum lugar da mensagem. O sistema remove esse marcador automaticamente antes de enviar ao lead — não precisa se preocupar em escondê-lo ou explicá-lo, apenas inclua o marcador de forma direta. Faça isso UMA única vez, assim que o nome for confirmado. Nunca repita o marcador.
 
-${anuncio ? `INSTRUÇÃO ESPECIAL DE ABERTURA (LEAD DE ANÚNCIO): Este lead chegou por um anúncio, então você já sabe de onde ele veio e qual promessa ele acabou de ler. NÃO comece do zero nem pergunte "posso te chamar de X?" nem "me conta o que você faz" de forma genérica: aproveite o contexto. Sua primeira mensagem sai em 3 partes separadas por "|||":
+${origemLead === 'Anúncio' ? `INSTRUÇÃO ESPECIAL DE ABERTURA (LEAD DE ANÚNCIO): Este lead chegou por um anúncio, então você já sabe de onde ele veio. NÃO comece do zero nem pergunte "posso te chamar de X?". Sua primeira mensagem sai em 3 partes separadas por "|||":
 1) Saudação calorosa e apresentação curta sua e da ${cfg.persona.empresa}${nomeDoWebhook ? `, usando o nome do perfil com naturalidade dentro da saudação (ex.: "Prazer, ${nomeDoWebhook}!"), SEM pedir permissão pra usar o nome` : ''}.
-2) Reconheça que ele veio pelo anúncio e conecte com a promessa que ele leu${(anuncio.headline || anuncio.body) ? ', reaproveitando a ideia do TÍTULO/TEXTO do anúncio acima com as SUAS palavras (não copie literalmente)' : ''}: em uma frase, diga que é exatamente isso que a ${cfg.persona.empresa} resolve.
-3) UMA pergunta só, ancorada na dor do anúncio, pra começar a qualificar (ex.: "Hoje, quando um cliente chama no seu WhatsApp, quem responde?"). A mensagem TERMINA nessa pergunta; não emende nenhuma outra.
-${nomeDoWebhook ? `Inclua [NOME: ${nomeDoWebhook}] uma vez na resposta. Se mais adiante o lead corrigir o nome, passe a usar o correto com [NOME: NomeCorrigido].` : ''}` : (nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: O sistema identificou que o nome do lead pode ser "${nomeDoWebhook}" (vindo do perfil do WhatsApp, pode não ser o nome real). Na primeira mensagem, em vez de perguntar o nome do zero, use o formato de 3 partes com "|||" mas substitua a última parte por: "Posso te chamar de ${nomeDoWebhook}?" — e a mensagem TERMINA nessa pergunta: NÃO emende "me conta sobre a sua operação" nem qualquer outra pergunta junto; a pergunta sobre a operação só vem DEPOIS que o lead responder sobre o nome. Se o lead confirmar, inclua [NOME: ${nomeDoWebhook}] na resposta. Se o lead corrigir ou disser que não é esse o nome, pergunte naturalmente "Como você prefere que eu te chame?" e use o nome que ele informar com [NOME: NomeCorrigido]. Seja flexível: o nome do perfil pode estar errado.` : '')}
+2) Reconheça que ele veio pelo anúncio${anuncio && (anuncio.headline || anuncio.body) ? ', reaproveitando com suas palavras a promessa do anúncio acima' : ''} e explique em uma frase curta o que a ${cfg.persona.empresa} resolve.
+3) UMA pergunta só para começar a qualificar. Se o segmento ainda não foi informado, pergunte sobre a operação, por exemplo: "Me conta sobre a sua operação, o que você faz?". Se ele já informou o segmento na primeira mensagem, avance para o atendimento atual. A mensagem TERMINA nessa pergunta.
+${nomeDoWebhook ? `Inclua [NOME: ${nomeDoWebhook}] uma vez na resposta. Considere o nome do perfil válido para a abertura: NÃO pergunte depois se pode chamá-lo assim. Se o próprio lead corrigir espontaneamente, passe a usar o nome correto.` : ''}` : (nomeDoWebhook ? `INSTRUÇÃO ESPECIAL DE ABERTURA: use "${nomeDoWebhook}" com naturalidade na saudação e inclua [NOME: ${nomeDoWebhook}] uma vez. Considere o nome do perfil válido: NÃO pergunte "posso te chamar de ${nomeDoWebhook}?" nem peça confirmação. Termine a abertura com UMA pergunta sobre a operação, a menos que o lead já tenha informado o que faz; nesse caso, avance para o atendimento atual. Se o próprio lead corrigir espontaneamente, passe a usar o nome correto.` : '')}
 
 SOBRE A EMPRESA:
 Serviços: ${cfg.negocio.servicos}.
@@ -4383,6 +4383,19 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
         `${contextoDinamico} CORREÇÃO OBRIGATÓRIA DE FORMATO: gere novamente a resposta com no máximo UMA pergunta em cada balão separado por "|||". Não junte duas perguntas, nem mesmo perguntas relacionadas. Use linguagem natural e direta, sem trocar as palavras do lead por sinônimos estranhos.`
       );
       resposta = limitarPerguntasPorMensagem(resposta);
+    }
+    if (iniciandoNovaConversa && !resposta.includes('?')) {
+      log(userPhone, 'warn', 'Claude abriu a conversa sem pergunta; solicitando reescrita');
+      resposta = await chamarClaude(
+        conversas[userPhone],
+        `${contextoDinamico} CORREÇÃO OBRIGATÓRIA DE ABERTURA: a resposta anterior ficou sem pergunta e deixou a conversa parada. Reescreva a abertura em 3 balões separados por "|||", usando o nome conhecido e terminando com exatamente UMA pergunta de qualificação. ${negocioConhecido ? `O segmento "${negocioConhecido}" já é conhecido, então pergunte sobre como funciona o atendimento atual.` : 'O segmento ainda não é conhecido, então pergunte sobre a operação e o que o lead faz.'} Não peça confirmação do nome.`
+      );
+      resposta = limitarPerguntasPorMensagem(resposta);
+      if (!resposta.includes('?')) {
+        resposta = `${resposta.replace(/\|+\s*$/, '').trim()}|||${negocioConhecido
+          ? 'E hoje, como funciona o seu atendimento pelo WhatsApp?'
+          : 'Me conta sobre a sua operação, o que você faz?'}`;
+      }
     }
     log(userPhone, 'info', `Resposta Claude: "${conteudoParaLog(resposta.slice(0, 100))}"`);
     conversas[userPhone].push({ role: 'assistant', content: resposta });
