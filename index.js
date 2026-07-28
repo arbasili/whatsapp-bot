@@ -37,7 +37,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.26.3';
+const BOT_VERSION = '1.26.4';
 const BOT_VERSION_DATA = '2026-07-28'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -3514,7 +3514,11 @@ async function tratarPosAgendamento(userPhone, userText) {
     // Direto ao ponto: repetir o horário atual + "vamos remarcar então" em balão
     // separado era redundância — o lead acabou de pedir a remarcação, ele sabe
     // o horário que tem. Um balão só: reconhece o pedido e já oferece as opções.
-    await enviarERegistrar(userPhone, `Sem problema, vamos remarcar! ${_msgOfertaRemarcacao(novosSlots)}`);
+    const primeiroNome = String(ag.nome || '').trim().split(/\s+/)[0];
+    const acolhimento = primeiroNome
+      ? `Sem problema, ${primeiroNome}! Imprevistos acontecem.`
+      : 'Sem problema! Imprevistos acontecem.';
+    await enviarERegistrar(userPhone, `${acolhimento} ${_msgOfertaRemarcacao(novosSlots)}`);
     return true;
   }
 

@@ -69,3 +69,8 @@ test('remarcação sincroniza próxima ação e limpa o estado transitório', ()
   assert.match(trecho, /confirmouOpcaoUnica\(userText\)/);
   assert.doesNotMatch(trecho, /'Temperatura':/);
 });
+
+test('pedido de remarcação acolhe o imprevisto e usa o primeiro nome', () => {
+  assert.match(source, /const primeiroNome = String\(ag\.nome \|\| ''\)/);
+  assert.match(source, /Sem problema, \$\{primeiroNome\}! Imprevistos acontecem\./);
+});
