@@ -21,6 +21,9 @@ const {
   extrairUrgencia,
   extrairNomeLead,
   interpretarRespostaEmail,
+  temParteComMultiplasPerguntas,
+  limitarPerguntasPorMensagem,
+  normalizarInteligenciaLead,
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
   querAdiarRemarcacao,
@@ -32,8 +35,8 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.22.0';
-const BOT_VERSION_DATA = '2026-07-27'; // data desta versão
+const BOT_VERSION = '1.23.0';
+const BOT_VERSION_DATA = '2026-07-28'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
 // numa versão morta faz a Meta redirecionar silenciosamente pra outra, sem
@@ -975,7 +978,10 @@ Regras:
     const bruto = textoDaResposta(resp).replace(/```json|```/g, '').trim();
     const bloco = bruto.match(/\{[\s\S]*\}/);
     if (!bloco) throw new Error('resposta da IA não trouxe um objeto JSON');
-    const dados = JSON.parse(bloco[0].replace(/[\x00-\x1F]+/g, ' '));
+    const dados = normalizarInteligenciaLead(
+      JSON.parse(bloco[0].replace(/[\x00-\x1F]+/g, ' ')),
+      { agendou, tipoNegocio }
+    );
 
     // Com reunião marcada, a próxima ação É a reunião: usa o horário real do slot em
     // vez da estimativa em horas da IA (que chutava errado por não saber a hora atual)
@@ -4349,7 +4355,15 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     }
 
     log(userPhone, 'info', `Chamando Claude — histórico: ${conversas[userPhone].length} msgs`);
-    const resposta = await chamarClaude(conversas[userPhone], contextoDinamico);
+    let resposta = await chamarClaude(conversas[userPhone], contextoDinamico);
+    if (temParteComMultiplasPerguntas(resposta)) {
+      log(userPhone, 'warn', 'Claude gerou mais de uma pergunta no mesmo balão; solicitando reescrita');
+      resposta = await chamarClaude(
+        conversas[userPhone],
+        `${contextoDinamico} CORREÇÃO OBRIGATÓRIA DE FORMATO: gere novamente a resposta com no máximo UMA pergunta em cada balão separado por "|||". Não junte duas perguntas, nem mesmo perguntas relacionadas. Use linguagem natural e direta, sem trocar as palavras do lead por sinônimos estranhos.`
+      );
+      resposta = limitarPerguntasPorMensagem(resposta);
+    }
     log(userPhone, 'info', `Resposta Claude: "${conteudoParaLog(resposta.slice(0, 100))}"`);
     conversas[userPhone].push({ role: 'assistant', content: resposta });
 

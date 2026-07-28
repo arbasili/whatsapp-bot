@@ -293,15 +293,60 @@ function extrairNomeLead(conversa) {
 function interpretarRespostaEmail(texto) {
   const t = (texto || '').trim().toLowerCase();
   if (!t) return null;
+  // Negação tem prioridade: "sim, mas o email está errado" não pode concluir
+  // o agendamento apenas porque a frase começou com "sim".
+  if (/^n[ãa]o\b/.test(t) || /\b(errad[oa]|incorret[oa]|errei|escrevi errado|corrig)/.test(t)) {
+    return 'negou';
+  }
   // Lista generosa de propósito: "está" (fora da lista original) travou um agendamento
   // real em produção — o lead confirmou, o sistema não reconheceu e nada foi agendado.
   if (/^(sim( sim)?|isso|isso mesmo|isso aí|é isso|certinho|certo|cert[íi]ssimo|correto|exato|exatamente|t[áa] certo|t[áa] certinho|t[áa] sim|t[áa] [óo]timo|t[áa]|est[áa] certo|est[áa] certinho|est[áa] sim|est[áa] [óo]timo|est[áa]|pode ser|pode|confirmo|confirmado|perfeito|show|ok|okay|beleza|blz|uhum|aham|esse mesmo|é esse|é esse mesmo|👍)[\s!.,]*$/.test(t)) {
     return 'confirmou';
   }
-  if (/^n[ãa]o\b/.test(t) || /\b(errad[oa]|errei|escrevi errado|corrig)/.test(t)) {
-    return 'negou';
+  // Confirmações naturais completas, comuns em conversa real.
+  if (/^(sim[\s,!.:-]*)?(esse|este|o)?\s*(e-?mail)?\s*(est[áa]|t[áa]|[ée])\s*(correto|certo|certinho|exato|perfeito)[\s!.,]*$/.test(t)) {
+    return 'confirmou';
   }
   return null;
+}
+
+// A IA recebe a regra de fazer uma pergunta por mensagem, mas uma resposta
+// eventualmente pode escapar. Estas funções permitem tentar uma reescrita e,
+// como última proteção, cortar somente a parte que trouxe perguntas extras.
+function temParteComMultiplasPerguntas(texto) {
+  return String(texto || '').split('|||').some(parte => (parte.match(/\?/g) || []).length > 1);
+}
+
+function limitarPerguntasPorMensagem(texto) {
+  return String(texto || '').split('|||').map(parte => {
+    const primeira = parte.indexOf('?');
+    if (primeira < 0 || parte.indexOf('?', primeira + 1) < 0) return parte.trim();
+    return parte.slice(0, primeira + 1).trim();
+  }).join('|||');
+}
+
+// A IA enriquece o CRM, mas estados objetivos não podem ficar incoerentes.
+// Uma reunião confirmada implica lead qualificado e a próxima ação humana é
+// preparar a reunião — nunca voltar etapas e perguntar dados já conhecidos.
+function normalizarInteligenciaLead(dados, { agendou, tipoNegocio } = {}) {
+  const normalizados = { ...(dados || {}) };
+  const numeroEntre = (valor, minimo, maximo) => {
+    const numero = Number(valor);
+    return Number.isFinite(numero) ? Math.min(maximo, Math.max(minimo, Math.round(numero))) : minimo;
+  };
+
+  normalizados.score = numeroEntre(normalizados.score, agendou ? 70 : 0, 100);
+  normalizados.close_probability = numeroEntre(normalizados.close_probability, agendou ? 35 : 0, 100);
+
+  if (agendou) {
+    const segmento = String(tipoNegocio || '').trim();
+    normalizados.next_action = segmento
+      ? `Preparar a reunião e revisar o diagnóstico de ${segmento}`
+      : 'Preparar a reunião e revisar o diagnóstico do lead';
+    normalizados.next_action_at_horas = null;
+  }
+
+  return normalizados;
 }
 
 // Mescla turnos consecutivos do mesmo role num único turno (separados por quebra de
@@ -468,6 +513,9 @@ module.exports = {
   extrairUrgencia,
   extrairNomeLead,
   interpretarRespostaEmail,
+  temParteComMultiplasPerguntas,
+  limitarPerguntasPorMensagem,
+  normalizarInteligenciaLead,
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
   querAdiarRemarcacao,

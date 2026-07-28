@@ -11,6 +11,9 @@ const {
   extrairTipoNegocio,
   extrairDorLead,
   interpretarRespostaEmail,
+  temParteComMultiplasPerguntas,
+  limitarPerguntasPorMensagem,
+  normalizarInteligenciaLead,
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
   querAdiarRemarcacao,
@@ -329,16 +332,56 @@ test('confirmações com "está" (bug real: não era reconhecido e nada era agen
   assert.strictEqual(interpretarRespostaEmail('exatamente'), 'confirmou');
 });
 
+test('confirmações naturais e completas de email', () => {
+  assert.strictEqual(interpretarRespostaEmail('Sim, esse email está correto.'), 'confirmou');
+  assert.strictEqual(interpretarRespostaEmail('Esse e-mail está certinho.'), 'confirmou');
+  assert.strictEqual(interpretarRespostaEmail('O email é correto!'), 'confirmou');
+});
+
 test('negações de email', () => {
   assert.strictEqual(interpretarRespostaEmail('não, tá errado'), 'negou');
   assert.strictEqual(interpretarRespostaEmail('errei uma letra'), 'negou');
   assert.strictEqual(interpretarRespostaEmail('escrevi errado'), 'negou');
+  assert.strictEqual(interpretarRespostaEmail('Sim, mas esse email está errado.'), 'negou');
 });
 
 test('resposta ambígua não confirma nem nega', () => {
   assert.strictEqual(interpretarRespostaEmail('quanto custa a reunião?'), null);
   assert.strictEqual(interpretarRespostaEmail('vocês mandam convite?'), null);
   assert.strictEqual(interpretarRespostaEmail(''), null);
+});
+
+test('detecta e limita duas perguntas no mesmo balão', () => {
+  const texto = 'Como funciona o atendimento hoje? Você responde sozinha?|||Entendi.';
+  assert.strictEqual(temParteComMultiplasPerguntas(texto), true);
+  assert.strictEqual(limitarPerguntasPorMensagem(texto), 'Como funciona o atendimento hoje?|||Entendi.');
+  assert.strictEqual(temParteComMultiplasPerguntas('Como funciona hoje?|||Quem responde?'), false);
+});
+
+test('normaliza a inteligência de lead com reunião marcada', () => {
+  const dados = normalizarInteligenciaLead({
+    score: 15,
+    close_probability: 10,
+    next_action: 'Fazer follow-up em 3 dias perguntando o segmento',
+    next_action_at_horas: 72,
+  }, { agendou: true, tipoNegocio: 'clínica odontológica' });
+
+  assert.strictEqual(dados.score, 70);
+  assert.strictEqual(dados.close_probability, 35);
+  assert.strictEqual(dados.next_action, 'Preparar a reunião e revisar o diagnóstico de clínica odontológica');
+  assert.strictEqual(dados.next_action_at_horas, null);
+});
+
+test('preserva a inteligência coerente de lead sem reunião', () => {
+  const dados = normalizarInteligenciaLead({
+    score: 42,
+    close_probability: 20,
+    next_action: 'Fazer follow-up em 3 dias',
+  }, { agendou: false });
+
+  assert.strictEqual(dados.score, 42);
+  assert.strictEqual(dados.close_probability, 20);
+  assert.strictEqual(dados.next_action, 'Fazer follow-up em 3 dias');
 });
 
 // ─── mesclarTurnosConsecutivos ───────────────────────────────────────────────
