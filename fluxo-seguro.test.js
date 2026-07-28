@@ -57,3 +57,14 @@ test('abertura usa nome do perfil sem pedir confirmação e não fica sem pergun
 test('texto que menciona anúncio recebe a abertura especial mesmo sem referral da Meta', () => {
   assert.match(source, /\$\{origemLead === 'Anúncio' \?/);
 });
+
+test('remarcação sincroniza próxima ação e limpa o estado transitório', () => {
+  const trecho = source.slice(
+    source.indexOf('async function tratarPosAgendamento'),
+    source.indexOf('// Despedidas simples logo após a confirmação')
+  );
+  assert.match(trecho, /'PróximaAçãoEm': escolhido\.inicio/);
+  assert.match(trecho, /delete ag\.remarcandoDesde/);
+  assert.match(trecho, /ag\.remarcacaoTentativas = 0/);
+  assert.match(trecho, /confirmouOpcaoUnica\(userText\)/);
+});

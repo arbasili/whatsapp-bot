@@ -325,6 +325,16 @@ function limitarPerguntasPorMensagem(texto) {
   }).join('|||');
 }
 
+// Confirmação curta só é usada quando existe UMA única opção pendente.
+// Nesse contexto, "sim, esse funciona" é inequívoco; fora dele continua sem
+// escolher horário para não transformar um "sim" vago numa reserva errada.
+function confirmouOpcaoUnica(texto) {
+  const t = String(texto || '').trim().toLowerCase();
+  if (!t) return false;
+  if (/\b(n[ãa]o|mas n[ãa]o|n[ãa]o funciona|outro|outra|errad[oa])\b/.test(t)) return false;
+  return /^(sim\b|isso\b|esse\b|essa\b|pode\b|confirmo\b|confirmado\b|fechado\b|perfeito\b|combinado\b|funciona\b|serve\b|t[áa] (bom|certo|[óo]timo)\b)/.test(t);
+}
+
 // A IA enriquece o CRM, mas estados objetivos não podem ficar incoerentes.
 // Uma reunião confirmada implica lead qualificado e a próxima ação humana é
 // preparar a reunião — nunca voltar etapas e perguntar dados já conhecidos.
@@ -515,6 +525,7 @@ module.exports = {
   interpretarRespostaEmail,
   temParteComMultiplasPerguntas,
   limitarPerguntasPorMensagem,
+  confirmouOpcaoUnica,
   normalizarInteligenciaLead,
   mesclarTurnosConsecutivos,
   querPararRemarcacao,

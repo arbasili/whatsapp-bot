@@ -23,6 +23,7 @@ const {
   interpretarRespostaEmail,
   temParteComMultiplasPerguntas,
   limitarPerguntasPorMensagem,
+  confirmouOpcaoUnica,
   normalizarInteligenciaLead,
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
@@ -35,7 +36,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.25.0';
+const BOT_VERSION = '1.26.0';
 const BOT_VERSION_DATA = '2026-07-28'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -791,6 +792,7 @@ async function atualizarLead(phone, dados) {
     'Origem':         'origin',
     'Funil':          'funnel_stages',
     'Temperatura':    'temperature',
+    'PróximaAçãoEm':  'next_action_at',
   };
 
   const sets = [];
@@ -3244,7 +3246,8 @@ async function tratarPosAgendamento(userPhone, userText) {
 
   // Se está no meio de uma remarcação, verifica se o lead escolheu um novo horário
   if (ag.remarcando && ag.novosSlots?.length) {
-    const escolhido = escolherSlot(userText, ag.novosSlots);
+    const escolhido = escolherSlot(userText, ag.novosSlots)
+      || (ag.novosSlots.length === 1 && confirmouOpcaoUnica(userText) ? ag.novosSlots[0] : null);
 
     if (escolhido) {
       const ok = await remarcarEvento(ag.eventId, escolhido.inicio, escolhido.fim);
@@ -3254,6 +3257,8 @@ async function tratarPosAgendamento(userPhone, userText) {
         ag.labelCG = escolhido.labelCG || escolhido.label;
         ag.remarcando = false;
         ag.novosSlots = null;
+        delete ag.remarcandoDesde;
+        ag.remarcacaoTentativas = 0;
         // Só consome a tentativa de remarcação quando ela de fato se confirma —
         // uma falha do lado do Calendar não deveria custar uma das 2 chances do lead.
         ag.totalRemarcacoes = (ag.totalRemarcacoes || 0) + 1;
@@ -3266,6 +3271,7 @@ async function tratarPosAgendamento(userPhone, userText) {
         await atualizarLead(userPhone, {
           'Horário': escolhido.labelCG || escolhido.label,
           'HorárioTS': escolhido.inicio,
+          'PróximaAçãoEm': escolhido.inicio,
           'Status': 'Reunião agendada',
           'Temperatura': tempAtual || calcularTemperatura(agendamentos[userPhone]?.urgencia, agendamentos[userPhone]?.dor)
         });

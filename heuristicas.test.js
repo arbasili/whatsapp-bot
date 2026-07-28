@@ -13,6 +13,7 @@ const {
   interpretarRespostaEmail,
   temParteComMultiplasPerguntas,
   limitarPerguntasPorMensagem,
+  confirmouOpcaoUnica,
   normalizarInteligenciaLead,
   mesclarTurnosConsecutivos,
   querPararRemarcacao,
@@ -356,6 +357,14 @@ test('detecta e limita duas perguntas no mesmo balão', () => {
   assert.strictEqual(temParteComMultiplasPerguntas(texto), true);
   assert.strictEqual(limitarPerguntasPorMensagem(texto), 'Como funciona o atendimento hoje?|||Entendi.');
   assert.strictEqual(temParteComMultiplasPerguntas('Como funciona hoje?|||Quem responde?'), false);
+});
+
+test('confirma opção única de remarcação com linguagem natural', () => {
+  assert.strictEqual(confirmouOpcaoUnica('Sim, esse funciona para mim.'), true);
+  assert.strictEqual(confirmouOpcaoUnica('Pode reservar esse.'), true);
+  assert.strictEqual(confirmouOpcaoUnica('Perfeito, combinado!'), true);
+  assert.strictEqual(confirmouOpcaoUnica('Não, esse não funciona.'), false);
+  assert.strictEqual(confirmouOpcaoUnica('Quero outro horário.'), false);
 });
 
 test('normaliza a inteligência de lead com reunião marcada', () => {
