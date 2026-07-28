@@ -36,7 +36,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.26.0';
+const BOT_VERSION = '1.26.1';
 const BOT_VERSION_DATA = '2026-07-28'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -3267,13 +3267,11 @@ async function tratarPosAgendamento(userPhone, userText) {
         ag.lembrete24hEnviado = msAteNovoSlot < LEMBRETE_24H_MS;
         ag.lembrete2hEnviado = false;
         ag.lembrete30minEnviado = false;
-        const tempAtual = agendamentos[userPhone]?.temperatura;
         await atualizarLead(userPhone, {
           'Horário': escolhido.labelCG || escolhido.label,
           'HorárioTS': escolhido.inicio,
           'PróximaAçãoEm': escolhido.inicio,
-          'Status': 'Reunião agendada',
-          'Temperatura': tempAtual || calcularTemperatura(agendamentos[userPhone]?.urgencia, agendamentos[userPhone]?.dor)
+          'Status': 'Reunião agendada'
         });
         registrarEtapaFunil(userPhone, FUNIL.REUNIAO_AGENDADA).catch(e => console.error('funil reagendado:', e.message));
         let msg = `Prontinho, remarcado pra ${escolhido.label}.`;

@@ -67,4 +67,5 @@ test('remarcação sincroniza próxima ação e limpa o estado transitório', ()
   assert.match(trecho, /delete ag\.remarcandoDesde/);
   assert.match(trecho, /ag\.remarcacaoTentativas = 0/);
   assert.match(trecho, /confirmouOpcaoUnica\(userText\)/);
+  assert.doesNotMatch(trecho, /'Temperatura':/);
 });
