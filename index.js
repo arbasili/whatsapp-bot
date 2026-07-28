@@ -32,7 +32,7 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.21.0';
+const BOT_VERSION = '1.22.0';
 const BOT_VERSION_DATA = '2026-07-27'; // data desta versão
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
@@ -1140,10 +1140,10 @@ async function criarNotificacao({
        entidadeId || resolvedLeadId || phone, dedupeKey]
     );
     if (rowCount > 0) emitirMudancaLeads();
-    return rowCount > 0;
+    return rowCount > 0 ? 'created' : 'existing';
   } catch (err) {
     console.error('Erro ao criar notificação:', err.message);
-    return false;
+    return 'error';
   }
 }
 
@@ -2891,6 +2891,9 @@ app.post('/webhook', async (req, res) => {
   // o que nos deixa reconhecer a origem com certeza e personalizar a abertura.
   // Só vem na primeira mensagem; é lido apenas ao abrir uma conversa nova.
   const anuncio = extrairAnuncio(message.referral);
+  // Preserva o referral antes do debounce: uma mensagem seguinte pode substituir
+  // o timer da primeira, mas não pode apagar a origem da campanha.
+  if (anuncio) anuncioPendentePorLead.set(userPhone, anuncio);
 
   // Aceitar texto e imagem; outros tipos recebem aviso amigável
   let userText = null;
@@ -3056,12 +3059,13 @@ function processarComLock(userPhone, textoAcumulado, imagemPendente, nomePerfilW
     .catch(() => {}) // nunca deixa um erro de uma mensagem bloquear as próximas
     .then(() => processarMensagem(userPhone, textoAcumulado, imagemPendente, nomePerfilWhatsApp, anuncio));
   filaProcessamento.set(userPhone, proximo);
-  // Limpa a referência quando terminar para evitar vazamento de memória
-  proximo.finally(() => {
+  // Limpa em sucesso ou erro sem criar uma Promise rejeitada secundária.
+  const limpar = () => {
     if (filaProcessamento.get(userPhone) === proximo) {
       filaProcessamento.delete(userPhone);
     }
-  });
+  };
+  proximo.then(limpar, limpar);
   return proximo;
 }
 // Nunca oferecer, numa remarcação, o mesmo horário que o lead está tentando largar.
@@ -3627,17 +3631,23 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     alerta += `WhatsApp: ${userPhone}\n`;
     if (negocioQuente) alerta += `Segmento: ${negocioQuente}\n`;
     alerta += `Disse: "${userText.slice(0, 120)}"\n\nEntre agora enquanto está quente.`;
-    const alertaEnviado = await enviarMensagem(NUMERO_VENDEDOR, alerta);
-    criarNotificacao({
+    const notificacao = await criarNotificacao({
       tipo: 'lead_quente',
       titulo: `${nomeQuente || 'Lead'} demonstrou intenção de compra`,
       mensagem: userText.slice(0, 180),
       phone: userPhone,
       dedupeKey: `lead-quente:${userPhone}`,
-    }).catch(() => {});
+    });
+    // Registrar no painel e entregar no WhatsApp são resultados independentes.
+    // Se já existe no painel, não repete a tentativa a cada nova fala do lead.
+    leadsAlertadosQuente.add(userPhone);
+    const alertaEnviado = notificacao === 'existing'
+      ? false
+      : await enviarMensagem(NUMERO_VENDEDOR, alerta);
     if (alertaEnviado) {
-      leadsAlertadosQuente.add(userPhone);
       log(userPhone, 'info', 'Alerta de lead quente enviado ao comercial.');
+    } else if (notificacao === 'existing') {
+      log(userPhone, 'info', 'Lead quente já registrado no painel; WhatsApp não reenviado.');
     } else {
       log(userPhone, 'warn', 'Alerta de lead quente não entregue ao comercial.');
     }
@@ -3657,7 +3667,7 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     leadsAgendados.delete(userPhone);
     delete agendamentosConfirmados[userPhone];
 
-    let opcoesHorario = 'amanhã às 10h ou amanhã às 14h (horário de Brasília)';
+    let opcoesHorario = '';
     let slotsDisponiveis = [];
 
     try {
@@ -3673,6 +3683,9 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     } catch (err) {
       console.error('Erro ou timeout ao buscar horários:', err.message);
     }
+    const orientacaoAgenda = slotsDisponiveis.length
+      ? `HORÁRIOS DISPONÍVEIS NA AGENDA: ${opcoesHorario}`
+      : 'AGENDA TEMPORARIAMENTE INDISPONÍVEL PARA CONSULTA. Não mencione, sugira nem invente horários. Quando chegar à etapa de agendamento, diga apenas que o time verificará a agenda e retornará com as opções.';
 
     agendamentos[userPhone] = { slots: slotsDisponiveis, slotsGeradosEm: Date.now() };
 
@@ -3714,7 +3727,7 @@ NÚMERO DO CLIENTE: ${userPhone}
 NOME DO PERFIL DO WHATSAPP: ${nomeDoWebhook || 'não disponível'}
 ORIGEM DESTE LEAD: ${origemLead}${anuncio ? `
 ESTE LEAD CHEGOU POR UM ANÚNCIO (Meta Ads): ele clicou no anúncio e caiu direto aqui no seu WhatsApp. Você SABE de onde ele veio.${anuncio.headline ? `\nTÍTULO DO ANÚNCIO QUE ELE ACABOU DE LER: "${anuncio.headline}"` : ''}${anuncio.body ? `\nTEXTO DO ANÚNCIO QUE ELE ACABOU DE LER: "${anuncio.body}"` : ''}` : ''}
-HORÁRIOS DISPONÍVEIS NA AGENDA: ${opcoesHorario}
+${orientacaoAgenda}
 SAUDAÇÃO CORRETA AGORA (horário de Campo Grande): ${saudacaoHora}
 
 REGRA DE SAUDAÇÃO: Use EXCLUSIVAMENTE "${saudacaoHora}" se for saudar pelo período do dia. NUNCA use outra saudação de período (não diga "Bom dia" se a saudação correta é "Boa noite"). Se o lead saudou primeiro, você pode espelhar a saudação dele apenas se coincidir com "${saudacaoHora}"; caso contrário, use "${saudacaoHora}" ou uma saudação neutra como "Olá!". Quando em dúvida, prefira "Olá!".
@@ -3813,9 +3826,9 @@ Exemplo completo com pet shop:
 IMPORTANTE na proposta: retome em uma frase a dor principal que o lead citou, usando as palavras dele sempre que possível. Nunca proponha a reunião de forma genérica se o lead já contou um problema específico.
 
 A partir daqui, siga esta sequência obrigatória, uma mensagem por vez:
-b. Somente após a confirmação, ofereça os horários. Você já apresentou o formato (gratuita, 30 minutos, sem compromisso) na proposta, então NÃO repita a explicação inteira — vá direto: "Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor pra você?"
+b. Somente após a confirmação, ofereça horários se existirem opções confirmadas acima. Você já apresentou o formato (gratuita, 30 minutos, sem compromisso), então NÃO repita a explicação inteira. ${slotsDisponiveis.length ? `Vá direto: "Tenho ${slotsDisponiveis.length > 1 ? 'duas opções disponíveis' : 'um horário disponível'}: ${opcoesHorario}. Qual funciona melhor pra você?"` : 'Como a agenda está indisponível, não ofereça horário. Diga: "Vou pedir para o nosso time verificar a agenda e te retornar com as opções disponíveis."'}
 Exceção: se o lead chegou aqui sem ter visto a apresentação do formato (ex: fast-track de lead quente), explique antes, em EXATAMENTE 2 partes separadas pelo marcador "|||":
-"É uma conversa gratuita e sem compromisso, pelo Google Meet, com um dos nossos especialistas. Em 30 minutos ele entende o seu caso e te mostra o que dá pra fazer pra resolver isso no seu negócio.|||Tenho duas opções disponíveis: ${opcoesHorario}. Qual funciona melhor pra você?"
+"É uma conversa gratuita e sem compromisso, pelo Google Meet, com um dos nossos especialistas. Em 30 minutos ele entende o seu caso e te mostra o que dá pra fazer pra resolver isso no seu negócio.|||${slotsDisponiveis.length ? `Tenho ${slotsDisponiveis.length > 1 ? 'duas opções disponíveis' : 'um horário disponível'}: ${opcoesHorario}. Qual funciona melhor pra você?` : 'Vou pedir para o nosso time verificar a agenda e te retornar com as opções disponíveis.'}"
 Adapte ao contexto do lead (ex: "no seu pet shop", "na sua empresa", etc).
 
 MARCADOR DE SLOT — OBRIGATÓRIO: Quando o lead escolher ou confirmar um horário (qualquer resposta indicando aceitação de um slot, mesmo indireta como "pode ser", "esse mesmo", "pode", "tá bom"), inclua na sua resposta o marcador exato com o horário completo escolhido: [SLOT: label completo do slot escolhido]
