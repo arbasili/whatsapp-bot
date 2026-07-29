@@ -2741,7 +2741,13 @@ app.get('/api/stream', verificarToken, (req, res) => {
     try { res.write(': ping\n\n'); } catch { encerrar(); }
   }, 15000);
 
-  req.on('close', encerrar);
+  // Em Node moderno, `close` no IncomingMessage também pode ocorrer quando a
+  // requisição de entrada terminou normalmente, mesmo com a resposta SSE ainda
+  // aberta. Isso encerrava o stream cedo e fazia o painel reconectar em loop.
+  // `aborted` representa abandono real da requisição; `close` da resposta cobre
+  // o fechamento efetivo do navegador/proxy.
+  req.on('aborted', encerrar);
+  res.on('close', encerrar);
   req.on('error', encerrar);
   res.on('error', encerrar);
 });
