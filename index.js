@@ -2421,6 +2421,47 @@ app.patch('/api/settings', verificarToken, async (req, res) => {
 // ── Tarefas e compromissos ──────────────────────────────────────────────
 // GET /api/tasks — lista tarefas com dados do lead. ?status=pendente (padrão),
 // concluida ou todas. Pendentes vêm ordenadas por vencimento (atrasadas primeiro).
+// Vincula as etapas aos nomes dos modelos já aprovados diretamente na Meta.
+// Salvar este mapeamento não ativa disparos nem muda a lógica atual.
+const MODELOS_META_PERMITIDOS = [
+  'confirmacao',
+  'lembrete_24h',
+  'lembrete_2h',
+  'lembrete_30m',
+  'reativacao_3d',
+  'reativacao_7d',
+];
+app.patch('/api/settings/automacoes', verificarToken, async (req, res) => {
+  try {
+    const recebidos = req.body?.modelos_meta;
+    if (!recebidos || typeof recebidos !== 'object' || Array.isArray(recebidos)) {
+      return res.status(400).json({ error: 'Modelos da Meta inválidos' });
+    }
+    const modelos = {};
+    for (const chave of MODELOS_META_PERMITIDOS) {
+      const valor = String(recebidos[chave] || '').trim().toLowerCase();
+      if (valor && !/^[a-z0-9_]{1,512}$/.test(valor)) {
+        return res.status(400).json({ error: `Nome de modelo inválido em ${chave}` });
+      }
+      modelos[chave] = valor;
+    }
+    const automacoes = { modelos_meta: modelos };
+    const { rows } = await pool.query(
+      `INSERT INTO client_settings (client_id, settings, updated_at)
+       VALUES ($1, jsonb_build_object('automacoes', $2::jsonb), NOW())
+       ON CONFLICT (client_id) DO UPDATE SET
+         settings = jsonb_set(client_settings.settings, '{automacoes}', $2::jsonb, true),
+         updated_at = NOW()
+       RETURNING settings`,
+      [process.env.CLIENT_ID, JSON.stringify(automacoes)]
+    );
+    res.json(rows[0].settings);
+  } catch (err) {
+    console.error('Erro em PATCH /api/settings/automacoes:', err.message);
+    res.status(500).json({ error: 'Erro ao salvar modelos da Meta' });
+  }
+});
+
 app.get('/api/tasks', verificarToken, async (req, res) => {
   try {
     const status = req.query.status || 'pendente';
