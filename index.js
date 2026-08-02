@@ -37,8 +37,17 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.26.5';
+const BOT_VERSION = '1.27.0';
 const BOT_VERSION_DATA = '2026-08-02'; // data desta versão
+
+// Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
+// - MODELO_LEAD: conversa e mensagens que o LEAD lê (resposta principal, follow-up).
+//   Precisa do modelo forte, é o que vende.
+// - MODELO_INTERNO: tarefas internas que o lead NUNCA vê (score, extração de tipo de
+//   negócio/dor, classificação de intenção, resumo da ficha). Modelo mais barato:
+//   sem perda de qualidade percebida, com custo por lead menor.
+const MODELO_LEAD = process.env.CLAUDE_MODEL || 'claude-sonnet-5';
+const MODELO_INTERNO = process.env.CLAUDE_MODEL_INTERNO || 'claude-haiku-4-5';
 const MARCADOR_FALHA_IA = '__FALHA_IA__';
 let ultimoErroIa = null;
 let ultimoAlertaFalhaIa = 0;
@@ -970,7 +979,7 @@ Regras:
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
+        model: MODELO_INTERNO,
         max_tokens: 1024,
         messages: [{ role: 'user', content: prompt }]
       },
@@ -1057,7 +1066,7 @@ async function gerarResumoParcial(phone) {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
+        model: MODELO_INTERNO,
         max_tokens: 200,
         messages: mesclarTurnosConsecutivos([
           ...hist,
@@ -1583,7 +1592,7 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
+        model: MODELO_LEAD,
         max_tokens: 120,
         messages: mesclarTurnosConsecutivos([...historicoReal, { role: 'user', content: instrucao }])
       },
@@ -2751,7 +2760,7 @@ app.post('/api/analise', verificarToken, async (req, res) => {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
+        model: MODELO_LEAD,
         max_tokens: 1600,
         messages: [{
           role: 'user',
@@ -3503,7 +3512,7 @@ async function tratarPosAgendamento(userPhone, userText) {
     const resp = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
+        model: MODELO_INTERNO,
         max_tokens: 10,
         messages: [{
           role: 'user',
@@ -4233,7 +4242,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       const resumoResp = await axios.post(
         'https://api.anthropic.com/v1/messages',
         {
-          model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
+          model: MODELO_INTERNO,
           max_tokens: 400,
           messages: mesclarTurnosConsecutivos([
             ...historicoParaResumo,
@@ -4857,7 +4866,7 @@ async function chamarClaude(historico, contextoDinamico = '') {
     try {
       const response = await axios.post(
         'https://api.anthropic.com/v1/messages',
-        { model: process.env.CLAUDE_MODEL || 'claude-sonnet-5', max_tokens: 500, system, messages: mensagens },
+        { model: MODELO_LEAD, max_tokens: 500, system, messages: mensagens },
         {
           headers: {
             'x-api-key': process.env.ANTHROPIC_API_KEY,
