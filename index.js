@@ -37,8 +37,11 @@ const {
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.26.4';
-const BOT_VERSION_DATA = '2026-07-28'; // data desta versão
+const BOT_VERSION = '1.26.5';
+const BOT_VERSION_DATA = '2026-08-02'; // data desta versão
+const MARCADOR_FALHA_IA = '__FALHA_IA__';
+let ultimoErroIa = null;
+let ultimoAlertaFalhaIa = 0;
 
 // Versão da Graph API da Meta (BOT-011). A v19.0 expirou em maio/2026; ficar
 // numa versão morta faz a Meta redirecionar silenciosamente pra outra, sem
@@ -2804,6 +2807,7 @@ app.get('/api/health', verificarToken, async (req, res) => {
       online: true,
       ultima_atividade: rows[0]?.ultima ?? null,
       versao: BOT_VERSION,
+      ia: ultimoErroIa ? { status: 'degradada', ...ultimoErroIa } : { status: 'ok' },
     });
   } catch (err) {
     res.status(500).json({ online: false });
@@ -2910,6 +2914,10 @@ app.get('/health', (req, res) => {
       lembretesPendentes
     },
     ultimaAtividade,
+    ia: {
+      status: ultimoErroIa ? 'degradada' : 'ok',
+      ultimoErroEm: ultimoErroIa?.at || null,
+    },
     timestamp: new Date().toISOString()
   });
 });
@@ -4438,6 +4446,21 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
 
     log(userPhone, 'info', `Chamando Claude — histórico: ${conversas[userPhone].length} msgs`);
     let resposta = await chamarClaude(conversas[userPhone], contextoDinamico);
+    // Contingência comercial: indisponibilidade da IA não pode ser exposta ao
+    // lead como "problema técnico". Responde de forma curta e útil, mantém a
+    // conversa andando e alerta o responsável sem revelar dados sensíveis.
+    if (resposta === MARCADOR_FALHA_IA) {
+      const primeiroNome = String(nomeConhecido || '').trim().split(/\s+/)[0];
+      const prefixo = primeiroNome ? `${primeiroNome}, funciona` : 'Funciona';
+      resposta = negocioConhecido
+        ? `${prefixo} como um atendente no WhatsApp: responde na hora, entende o que o cliente precisa e pode qualificar e agendar sozinho.|||E hoje, como funciona o atendimento da sua empresa pelo WhatsApp?`
+        : `${prefixo} como um atendente no WhatsApp: responde na hora, entende o que o cliente precisa e pode qualificar e agendar sozinho.|||Pra eu te explicar no seu cenário, que tipo de negócio você tem?`;
+      log(userPhone, 'error', 'IA indisponível; resposta comercial de contingência aplicada');
+      if (Date.now() - ultimoAlertaFalhaIa > 15 * 60 * 1000) {
+        ultimoAlertaFalhaIa = Date.now();
+        enviarMensagem(MEU_NUMERO, '*Alerta do bot*\n\nA IA ficou indisponível e o bot usou a resposta comercial de contingência. Verifique a integração com o modelo no painel.').catch(() => {});
+      }
+    }
     if (temParteComMultiplasPerguntas(resposta)) {
       log(userPhone, 'warn', 'Claude gerou mais de uma pergunta no mesmo balão; solicitando reescrita');
       resposta = await chamarClaude(
@@ -4815,7 +4838,13 @@ async function chamarClaude(historico, contextoDinamico = '') {
         await new Promise(r => setTimeout(r, espera));
         continue;
       }
-      return 'Desculpe, tive um problema técnico. Pode tentar novamente em instantes?';
+      const erroApi = err.response?.data?.error || {};
+      ultimoErroIa = {
+        at: new Date().toISOString(),
+        status: status || null,
+        type: String(erroApi.type || erroApi.code || 'sem_resposta').slice(0, 80),
+      };
+      return MARCADOR_FALHA_IA;
     }
   }
 }
