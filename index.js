@@ -749,18 +749,18 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const leadsRegistradosPg = new Set();
 
 // Cria o registro inicial do lead no Postgres quando ele inicia a conversa
-async function registrarLeadInicial(phone, origem = '', adId = '') {
+async function registrarLeadInicial(phone, origem = '', adId = '', nomePerfil = '') {
   if (leadsRegistradosPg.has(phone)) return;
   leadsRegistradosPg.add(phone);
   try {
     await pool.query(
-      `INSERT INTO leads (client_id, phone, status, funnel_stages, origin, ad_id, created_at, updated_at)
-       VALUES ($1, $2, 'Em conversa', $3, $4, $5, NOW(), NOW())
+      `INSERT INTO leads (client_id, phone, name, status, funnel_stages, origin, ad_id, created_at, updated_at)
+       VALUES ($1, $2, NULLIF($6, ''), 'Em conversa', $3, $4, $5, NOW(), NOW())
        ON CONFLICT (client_id, phone) DO UPDATE SET
          deleted_at = NULL, status = 'Em conversa', funnel_stages = EXCLUDED.funnel_stages,
          origin = EXCLUDED.origin,
          ad_id = COALESCE(NULLIF(EXCLUDED.ad_id, ''), leads.ad_id),
-         name = NULL, email = NULL, business_type = NULL, pain = NULL, urgency = NULL,
+         name = EXCLUDED.name, email = NULL, business_type = NULL, pain = NULL, urgency = NULL,
          temperature = NULL, scheduled_at = NULL, scheduled_at_ts = NULL,
          scheduled_set_at = NULL, meet_link = NULL, summary = NULL,
          score = NULL, close_probability = NULL, next_action = NULL,
@@ -768,7 +768,7 @@ async function registrarLeadInicial(phone, origem = '', adId = '') {
          snooze_until = NULL, first_response_at = NULL, deal_value = NULL,
          created_at = NOW(), updated_at = NOW()
        WHERE leads.deleted_at IS NOT NULL`,
-      [CLIENT_ID, phone, FUNIL.EM_CONVERSA, origem, adId || null]
+      [CLIENT_ID, phone, FUNIL.EM_CONVERSA, origem, adId || null, nomePerfil]
     );
     emitirMudancaLeads(); // novo lead → painel atualiza na hora
   } catch (err) {
@@ -3840,7 +3840,7 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     anuncioPendentePorLead.delete(userPhone);
 
     // Registrar lead no banco (início da conversa) com a origem e o anúncio detectados
-    registrarLeadInicial(userPhone, origemLead, anuncio?.sourceId || '').catch(e => console.error('registrarLeadInicial:', e.message));
+    registrarLeadInicial(userPhone, origemLead, anuncio?.sourceId || '', nomeDoWebhook).catch(e => console.error('registrarLeadInicial:', e.message));
 
     conversas[userPhone] = [
       {
@@ -4531,7 +4531,12 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       resposta = respostaSeparada;
     }
     log(userPhone, 'info', `Resposta Claude: "${conteudoParaLog(resposta.slice(0, 100))}"`);
-    conversas[userPhone].push({ role: 'assistant', content: resposta });
+    // O separador ||| é uma instrução interna para criar balões distintos. Mantê-lo
+    // numa única entrada fazia o CRM exibir o marcador cru, embora a Meta recebesse
+    // as mensagens separadas. O histórico agora espelha o que o lead realmente vê.
+    resposta.split('|||').map(p => p.trim()).filter(Boolean).forEach(parte => {
+      conversas[userPhone].push({ role: 'assistant', content: parte });
+    });
 
     // Grava nome, tipo de negócio, dor e urgência assim que detectados, sem esperar
     // o agendamento, para o painel CRM mostrar dados em tempo real. Consolidado numa

@@ -42,7 +42,7 @@ test('lead excluído que retorna começa com dados comerciais limpos', () => {
     source.indexOf('// Atualiza campos do lead no Postgres')
   );
   assert.match(trecho, /deleted_at = NULL/);
-  assert.match(trecho, /name = NULL, email = NULL, business_type = NULL/);
+  assert.match(trecho, /name = EXCLUDED\.name, email = NULL, business_type = NULL/);
   assert.match(trecho, /score = NULL, close_probability = NULL, next_action = NULL/);
   assert.match(trecho, /scheduled_at = NULL, scheduled_at_ts = NULL/);
 });
