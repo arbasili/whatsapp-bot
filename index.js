@@ -2032,6 +2032,49 @@ async function excluirLeadDefinitivo(leadId) {
 }
 
 // DELETE /api/leads/:id — manda pra lixeira (soft delete)
+// Envio manual pelo CRM usando a API oficial da Meta. Exige usuário autenticado
+// e mantém o histórico persistido mesmo quando a conversa saiu da memória do bot.
+app.post('/api/leads/:id/mensagem', verificarToken, async (req, res) => {
+  try {
+    const texto = typeof req.body?.texto === 'string' ? req.body.texto.trim() : '';
+    if (!texto) return res.status(400).json({ error: 'Mensagem vazia' });
+    if (texto.length > 2000) return res.status(400).json({ error: 'Mensagem muito longa' });
+
+    const { rows } = await pool.query(
+      `SELECT id, phone, name FROM leads
+       WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL`,
+      [req.params.id, CLIENT_ID]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lead não encontrado' });
+
+    const lead = rows[0];
+    const enviada = await enviarMensagem(lead.phone, texto);
+    if (!enviada) return res.status(502).json({ error: 'A Meta não confirmou o envio da mensagem' });
+
+    const conversa = await pool.query(
+      `SELECT messages FROM conversations WHERE lead_id = $1 AND client_id = $2`,
+      [lead.id, CLIENT_ID]
+    );
+    const mensagens = Array.isArray(conversa.rows[0]?.messages) ? conversa.rows[0].messages : [];
+    mensagens.push({ role: 'bot', content: texto, timestamp: new Date().toISOString() });
+    await pool.query(
+      `INSERT INTO conversations (lead_id, client_id, messages, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (lead_id, client_id)
+       DO UPDATE SET messages = $3, updated_at = NOW()`,
+      [lead.id, CLIENT_ID, JSON.stringify(mensagens)]
+    );
+
+    if (conversas[lead.phone]) conversas[lead.phone].push({ role: 'assistant', content: texto });
+    registrarAtividade(lead.name || lead.phone, `Mensagem manual enviada por ${req.user?.email || 'usuário'}`).catch(() => {});
+    emitirMudancaLeads();
+    res.status(201).json({ ok: true });
+  } catch (err) {
+    console.error('Erro em POST /api/leads/:id/mensagem:', err.message);
+    res.status(500).json({ error: 'Erro ao enviar mensagem' });
+  }
+});
+
 app.delete('/api/leads/:id', verificarToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
