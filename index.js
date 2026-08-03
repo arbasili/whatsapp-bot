@@ -38,7 +38,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio } = require('./follow-up-po
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.28.1';
+const BOT_VERSION = '1.29.0';
 const BOT_VERSION_DATA = '2026-08-02'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -438,6 +438,7 @@ async function initDb() {
   // ID do anúncio (source_id do referral do Meta) para o lead que chegou por
   // click-to-WhatsApp. Guardado cru para relatório por anúncio/campanha no painel.
   await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS ad_id TEXT`);
+  await pool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS operational_alert JSONB`);
 
   // Papel do usuário no cliente — alicerce do sistema de permissões. Hoje todo
   // mundo é 'admin' e nada é filtrado por role; quando existir o segundo perfil
@@ -1748,6 +1749,11 @@ setInterval(async () => {
         }
         const enviada = await enviarERegistrar(phone, msg, { gravarNoCrm: true });
         if (!enviada?.messageId) {
+          await definirAlertaOperacional(phone, {
+            type: 'follow_up_failed', severity: 'warning',
+            title: `Follow-up ${tentativa} não entregue`,
+            detail: 'A Meta não confirmou o envio. A tentativa continua pendente.',
+          });
           console.warn(`[${mascararTelefone(phone)}] Follow-up ${tentativa} não confirmado pela Meta; tentativa continuará pendente.`);
           return false;
         }
@@ -1769,6 +1775,7 @@ setInterval(async () => {
           statusEnvio: 'accepted',
         };
         await persistirLead(phone);
+        await definirAlertaOperacional(phone, null);
         return true;
       };
 
@@ -2102,7 +2109,15 @@ app.post('/api/leads/:id/mensagem', verificarToken, async (req, res) => {
 
     const lead = rows[0];
     const enviada = await enviarMensagem(lead.phone, texto);
-    if (!enviada) return res.status(502).json({ error: 'A Meta não confirmou o envio da mensagem' });
+    if (!enviada) {
+      await definirAlertaOperacional(lead.phone, {
+        type: 'manual_message_failed', severity: 'critical',
+        title: 'Mensagem manual não entregue',
+        detail: 'A Meta não confirmou o envio feito pelo painel.',
+      });
+      return res.status(502).json({ error: 'A Meta não confirmou o envio da mensagem' });
+    }
+    await definirAlertaOperacional(lead.phone, null);
 
     const conversa = await pool.query(
       `SELECT messages FROM conversations WHERE lead_id = $1 AND client_id = $2`,
@@ -4830,6 +4845,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     }
 
     const partes = respostaSemMarcador.split('|||').map(p => p.trim()).filter(Boolean);
+    let respostaAceitaPelaMeta = true;
     if (partes.length >= 2) {
       // Cada parte vira uma mensagem própria com pausa entre elas:
       // 2 partes (ponte+proposta ou empatia+implicação) usam pausa maior;
@@ -4842,10 +4858,23 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
           const pausa = partes.length === 2 ? 5000 : (i === 1 ? 1500 : 3000);
           await new Promise(r => setTimeout(r, pausa));
         }
-        await enviarMensagem(userPhone, partes[i]);
+        const envio = await enviarMensagem(userPhone, partes[i]);
+        if (!envio) respostaAceitaPelaMeta = false;
       }
     } else {
-      await enviarMensagem(userPhone, respostaSemMarcador);
+      const envio = await enviarMensagem(userPhone, respostaSemMarcador);
+      if (!envio) respostaAceitaPelaMeta = false;
+    }
+
+    if (respostaAceitaPelaMeta) {
+      await definirAlertaOperacional(userPhone, null);
+    } else {
+      await definirAlertaOperacional(userPhone, {
+        type: iniciandoNovaConversa ? 'first_response_failed' : 'message_failed',
+        severity: 'critical',
+        title: iniciandoNovaConversa ? 'Falha na primeira resposta' : 'Mensagem não entregue',
+        detail: 'A Meta não confirmou o envio. O lead precisa de atenção.',
+      });
     }
 
     if (encerrarEfetivo) {
@@ -5057,6 +5086,19 @@ async function enviarERegistrar(userPhone, texto, { gravarNoCrm = false } = {}) 
     if (gravarNoCrm) await gravarConversa(userPhone, conversas[userPhone].slice(2));
   }
   return enviada;
+}
+
+async function definirAlertaOperacional(phone, alerta = null) {
+  try {
+    await pool.query(
+      `UPDATE leads SET operational_alert = $1, updated_at = NOW()
+       WHERE client_id = $2 AND phone = $3`,
+      [alerta ? JSON.stringify({ ...alerta, at: new Date().toISOString() }) : null, CLIENT_ID, phone]
+    );
+    emitirMudancaLeads();
+  } catch (err) {
+    console.error(`[${mascararTelefone(phone)}] Erro ao atualizar alerta operacional:`, err.message);
+  }
 }
 
 // Grava ou atualiza o histórico de conversa na tabela conversations
