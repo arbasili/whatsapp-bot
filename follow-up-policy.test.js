@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { proximaTentativaFollowUp, horaEstaNoSilencio } = require('./follow-up-policy');
+const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPareceCortado } = require('./follow-up-policy');
 
 const HORA = 60 * 60 * 1000;
 const inicio = Date.UTC(2026, 7, 2, 12);
@@ -33,4 +33,15 @@ test('permite follow-up todos os dias entre 6h e 21h', () => {
   assert.equal(horaEstaNoSilencio(6), false);
   assert.equal(horaEstaNoSilencio(20), false);
   assert.equal(horaEstaNoSilencio(21), true);
+});
+
+test('sem contexto confirmado, follow-up não inventa dor do lead', () => {
+  const mensagem = followUpSeguro('José', 1);
+  assert.equal(mensagem, 'José, consigo te explicar isso de forma bem direta no seu cenário. Que tipo de negócio você tem?');
+  assert.doesNotMatch(mensagem, /perder cliente|demora|problema/i);
+});
+
+test('detecta follow-up cortado antes de ser enviado', () => {
+  assert.equal(followUpPareceCortado('José, outra vantagem é que ele fica de olho 24 horas, então mesmo fora do'), true);
+  assert.equal(followUpPareceCortado('José, posso continuar e te mostrar como isso funciona no seu cenário?'), false);
 });

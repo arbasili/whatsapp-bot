@@ -33,12 +33,12 @@ const {
   pediuOptOut,
   separarPonteComercial,
 } = require('./heuristicas');
-const { proximaTentativaFollowUp, horaEstaNoSilencio } = require('./follow-up-policy');
+const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPareceCortado } = require('./follow-up-policy');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.30.0';
+const BOT_VERSION = '1.31.0';
 const BOT_VERSION_DATA = '2026-08-03'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -1601,6 +1601,10 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
       dorConhecida ? `Dor relatada: ${dorConhecida.slice(0, 100)}` : '',
     ].filter(Boolean).join(' | ');
 
+    // Sem contexto comercial confirmado, a IA tenderia a completar as lacunas
+    // com uma dor plausível. A retomada segura preserva apenas o que sabemos.
+    if (!contextoLead) return followUpSeguro(nome, tentativa);
+
     // Cadência de 3 toques: retomada contextual, reforço curto de valor e, por fim,
     // porta aberta sem cobrança antes de a janela da Meta fechar.
     // Regra dura em ambas: nunca oferecer canal/ação que o bot não executa sozinho.
@@ -1608,7 +1612,7 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
     // ninguém cumpre (não há ligação automática nem handoff). Tudo se resolve aqui.
     const semCanalExterno = ' NUNCA ofereça ligar, telefonar, fazer uma chamada ou videochamada, mandar e-mail, nem qualquer canal ou ação que dependa de outra pessoa. Você conduz tudo por aqui mesmo, nesta conversa por mensagem, e não promete nada além de continuar o papo aqui.';
     const instrucao = tentativa === 1
-      ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead parou de responder.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Com base na conversa, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. Se souber a dor do lead, mencione ela de forma leve e direta (ex: "vi que você falou que perde cliente por demora..."). A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela de forma leve, como quem só puxa o assunto de novo, SEM soar como cobrança (evite "fiquei te esperando", "você não respondeu", "estou aguardando"); se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases.${semCanalExterno} Assine como ${cfg.persona.atendente} apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
+      ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead parou de responder. Contexto confirmado pelo lead: ${contextoLead}. Com base SOMENTE no que o lead realmente disse, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. NUNCA invente dor, problema, urgência ou informação que não esteja no contexto confirmado. Se o lead parou no meio de uma pergunta, retome ela de forma leve, sem soar como cobrança; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases.${semCanalExterno} Assine como ${cfg.persona.atendente} apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
       : tentativa === 2
         ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead ainda não respondeu.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem curta que acrescente UM benefício concreto ligado ao contexto já conhecido e retome a pergunta pendente. Não repita a mensagem anterior, não cobre resposta, não invente números, clientes ou resultados. Máximo 2 frases. Sem emoji, sem travessão.${semCanalExterno} Responda APENAS com o texto da mensagem, sem aspas.`
         : `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. Esta é a última tentativa antes de encerrar o contato.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem muito curta, sem pressão, deixando a porta aberta. Tom: "tudo bem se não for o momento certo, só queria deixar o caminho aberto". Sem cobrar resposta, sem urgência. Máximo 1 frase. Sem emoji, sem travessão.${semCanalExterno} Responda APENAS com o texto da mensagem, sem aspas.`;
@@ -1629,7 +1633,12 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
     const duracaoFollowUp = Date.now() - inicioFollowUp;
     const usoFollowUp = resp.data.usage || {};
     console.log(`[Claude/followup] ${duracaoFollowUp}ms | input: ${usoFollowUp.input_tokens || '?'} | output: ${usoFollowUp.output_tokens || '?'} tokens`);
-    return textoDaResposta(resp).trim();
+    const mensagemGerada = textoDaResposta(resp).trim();
+    if (resp.data?.stop_reason === 'max_tokens' || followUpPareceCortado(mensagemGerada)) {
+      console.warn(`[${mascararTelefone(phone)}] Follow-up ${tentativa} incompleto; usando texto seguro.`);
+      return followUpSeguro(nome, tentativa, tipoNegocioConhecido, dorConhecida);
+    }
+    return mensagemGerada;
   } catch (err) {
     console.error(`Erro ao gerar follow-up contextual (tentativa ${tentativa}):`, err.message);
     if (tentativa === 1) return `Oi ${nome}, consigo continuar daqui quando você puder.`;
@@ -1747,7 +1756,7 @@ setInterval(async () => {
             || leadsAgendados.has(phone) || leadsEncerrados.has(phone) || leadsOptOut.has(phone)) {
           return; // lead reengajou ou mudou de estado durante a geração — aborta o envio
         }
-        const enviada = await enviarERegistrar(phone, msg, { gravarNoCrm: true, source: 'follow_up' });
+        const enviada = await enviarERegistrar(phone, msg, { gravarNoCrm: true, source: 'follow_up', attempt: tentativa });
         if (!enviada?.messageId) {
           await definirAlertaOperacional(phone, {
             type: 'follow_up_failed', severity: 'warning',
@@ -1757,13 +1766,6 @@ setInterval(async () => {
           console.warn(`[${mascararTelefone(phone)}] Follow-up ${tentativa} não confirmado pela Meta; tentativa continuará pendente.`);
           return false;
         }
-        await pool.query(
-          `INSERT INTO outbound_messages
-             (client_id, phone, kind, attempt, meta_message_id, message_text, status)
-           VALUES ($1, $2, 'follow_up', $3, $4, $5, 'accepted')
-           ON CONFLICT (meta_message_id) DO NOTHING`,
-          [CLIENT_ID, phone, tentativa, enviada.messageId, msg]
-        );
         // ultimoFollowUp = marca do último toque automático. Não é lido pelo gating de
         // follow-up (que usa ultimaMensagem); é mantido de propósito como base pra
         // frequency-capping futuro e pra depuração.
@@ -2117,6 +2119,7 @@ app.post('/api/leads/:id/mensagem', verificarToken, async (req, res) => {
       });
       return res.status(502).json({ error: 'A Meta não confirmou o envio da mensagem' });
     }
+    await registrarEnvioAuditoria(lead.phone, texto, enviada, { kind: 'manual' });
     await definirAlertaOperacional(lead.phone, null);
 
     const conversa = await pool.query(
@@ -2690,12 +2693,65 @@ app.delete('/api/tasks/:id', verificarToken, async (req, res) => {
 app.get('/api/leads/:id/conversation', verificarToken, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT messages FROM conversations
-       WHERE lead_id = $1 AND client_id = $2
-       ORDER BY updated_at DESC LIMIT 1`,
+      `SELECT c.messages, c.updated_at, l.phone, l.created_at AS lead_created_at
+       FROM conversations c
+       JOIN leads l ON l.id = c.lead_id AND l.client_id = c.client_id
+       WHERE c.lead_id = $1 AND c.client_id = $2
+       ORDER BY c.updated_at DESC LIMIT 1`,
       [req.params.id, process.env.CLIENT_ID]
     );
-    res.json({ messages: rows[0]?.messages ?? [] });
+    if (!rows.length) return res.json({ messages: [] });
+
+    const conversa = rows[0];
+    const messages = Array.isArray(conversa.messages) ? conversa.messages : [];
+    const { rows: envios } = await pool.query(
+      `SELECT kind, attempt, message_text, status, accepted_at, sent_at,
+              delivered_at, read_at, failed_at, error_details
+       FROM outbound_messages
+       WHERE client_id = $1 AND phone = $2
+       ORDER BY accepted_at ASC`,
+      [process.env.CLIENT_ID, conversa.phone]
+    );
+
+    // Versões antigas regravavam todo o histórico com o horário da última
+    // atualização. Detecta esse lote corrompido para reconstruir a sequência:
+    // comprovantes da Meta têm prioridade; o restante fica próximo da captação.
+    const temposOriginais = messages
+      .map(m => new Date(m?.timestamp).getTime())
+      .filter(Number.isFinite);
+    const loteComMesmoHorario = temposOriginais.length > 1
+      && Math.max(...temposOriginais) - Math.min(...temposOriginais) <= 1000
+      && new Date(conversa.updated_at).getTime() - new Date(conversa.lead_created_at).getTime() > 5 * 60 * 1000;
+    const enviosDisponiveis = [...envios];
+    const inicio = new Date(conversa.lead_created_at).getTime();
+
+    const mensagensAuditadas = messages.map((msg, indice) => {
+      const bot = msg?.role === 'bot' || msg?.role === 'assistant';
+      const posicaoEnvio = bot
+        ? enviosDisponiveis.findIndex(envio => envio.message_text === msg.content)
+        : -1;
+      if (posicaoEnvio >= 0) {
+        const envio = enviosDisponiveis.splice(posicaoEnvio, 1)[0];
+        return {
+          ...msg,
+          source: envio.kind === 'follow_up' ? 'follow_up' : (msg.source || envio.kind),
+          timestamp: envio.accepted_at,
+          deliveryStatus: envio.status,
+          sentAt: envio.sent_at,
+          deliveredAt: envio.delivered_at,
+          readAt: envio.read_at,
+          failedAt: envio.failed_at,
+          deliveryError: envio.error_details,
+          followUpAttempt: envio.attempt,
+        };
+      }
+      if (loteComMesmoHorario && Number.isFinite(inicio)) {
+        return { ...msg, timestamp: new Date(inicio + indice * 1000).toISOString(), timestampInferred: true };
+      }
+      return msg;
+    });
+
+    res.json({ messages: mensagensAuditadas });
   } catch (err) {
     console.error('Erro em GET /api/leads/:id/conversation:', err.message);
     res.status(500).json({ error: 'Erro ao buscar conversa' });
@@ -4860,10 +4916,12 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
         }
         const envio = await enviarMensagem(userPhone, partes[i]);
         if (!envio) respostaAceitaPelaMeta = false;
+        else await registrarEnvioAuditoria(userPhone, partes[i], envio, { kind: 'bot' });
       }
     } else {
       const envio = await enviarMensagem(userPhone, respostaSemMarcador);
       if (!envio) respostaAceitaPelaMeta = false;
+      else await registrarEnvioAuditoria(userPhone, respostaSemMarcador, envio, { kind: 'bot' });
     }
 
     if (respostaAceitaPelaMeta) {
@@ -5077,11 +5135,23 @@ const ERRO_FORA_DA_JANELA = 131047;
 // Envia uma mensagem ao lead E registra no histórico da conversa como assistant.
 // Usado quando o CÓDIGO (não o Claude) gera a mensagem — garante que o Claude
 // tenha contexto do que foi dito e não repita ofertas ou se perca no fluxo.
-async function enviarERegistrar(userPhone, texto, { gravarNoCrm = false, source = 'bot' } = {}) {
+async function registrarEnvioAuditoria(userPhone, texto, envio, { kind = 'bot', attempt = null } = {}) {
+  if (!envio?.messageId) return;
+  await pool.query(
+    `INSERT INTO outbound_messages
+       (client_id, phone, kind, attempt, meta_message_id, message_text, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'accepted')
+     ON CONFLICT (meta_message_id) DO NOTHING`,
+    [CLIENT_ID, userPhone, kind, attempt, envio.messageId, texto]
+  ).catch(err => console.error(`[${mascararTelefone(userPhone)}] Erro ao auditar envio:`, err.message));
+}
+
+async function enviarERegistrar(userPhone, texto, { gravarNoCrm = false, source = 'bot', attempt = null } = {}) {
   const enviada = await enviarMensagem(userPhone, texto);
   // Só registra no histórico se a mensagem realmente foi entregue ao WhatsApp.
   // Evita que o Claude continue a conversa baseado em mensagem que o lead nunca recebeu.
   if (enviada && conversas[userPhone]) {
+    await registrarEnvioAuditoria(userPhone, texto, enviada, { kind: source, attempt });
     conversas[userPhone].push({ role: 'assistant', source, content: texto, timestamp: new Date().toISOString() });
     if (gravarNoCrm) await gravarConversa(userPhone, conversas[userPhone].slice(2));
   }
