@@ -38,8 +38,8 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio } = require('./follow-up-po
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.29.0';
-const BOT_VERSION_DATA = '2026-08-02'; // data desta versão
+const BOT_VERSION = '1.30.0';
+const BOT_VERSION_DATA = '2026-08-03'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
 // - MODELO_LEAD: conversa e mensagens que o LEAD lê (resposta principal, follow-up).
@@ -1662,7 +1662,7 @@ setInterval(async () => {
         const msg = nome !== 'você'
           ? `${nome}, ainda tenho horários disponíveis pra mostrar como automatizar${negocio}. Se quiser ver como ficaria, é só me chamar.`
           : `Ainda tenho horários disponíveis pra mostrar como automatizar${negocio}. Se quiser ver como ficaria, é só me chamar.`;
-        await enviarERegistrar(phone, msg);
+        await enviarERegistrar(phone, msg, { source: 'follow_up' });
         atualizarLead(phone, { 'Status': 'Reativação 3 dias' }).catch(() => {});
         registrarEtapaFunil(phone, FUNIL.REATIVACAO_3D).catch(() => {});
         followUpStatus[phone] = { ...status, reativacao3dEnviada: true, ultimoFollowUp: agora };
@@ -1673,7 +1673,7 @@ setInterval(async () => {
         const msg = nome !== 'você'
           ? `${nome}, tudo bem por aí? Se o momento não era o certo antes, sem problema. Se em algum momento fizer sentido melhorar${negocio}, é só me chamar.`
           : `Tudo bem por aí? Se o momento não era o certo antes, sem problema. Se em algum momento fizer sentido melhorar${negocio}, é só me chamar.`;
-        await enviarERegistrar(phone, msg);
+        await enviarERegistrar(phone, msg, { source: 'follow_up' });
         atualizarLead(phone, { 'Status': 'Reativação 7 dias' }).catch(() => {});
         registrarEtapaFunil(phone, FUNIL.REATIVACAO_7D).catch(() => {});
         followUpStatus[phone] = { ...status, reativacao7dEnviada: true, ultimoFollowUp: agora };
@@ -1747,7 +1747,7 @@ setInterval(async () => {
             || leadsAgendados.has(phone) || leadsEncerrados.has(phone) || leadsOptOut.has(phone)) {
           return; // lead reengajou ou mudou de estado durante a geração — aborta o envio
         }
-        const enviada = await enviarERegistrar(phone, msg, { gravarNoCrm: true });
+        const enviada = await enviarERegistrar(phone, msg, { gravarNoCrm: true, source: 'follow_up' });
         if (!enviada?.messageId) {
           await definirAlertaOperacional(phone, {
             type: 'follow_up_failed', severity: 'warning',
@@ -2124,7 +2124,7 @@ app.post('/api/leads/:id/mensagem', verificarToken, async (req, res) => {
       [lead.id, CLIENT_ID]
     );
     const mensagens = Array.isArray(conversa.rows[0]?.messages) ? conversa.rows[0].messages : [];
-    mensagens.push({ role: 'bot', content: texto, timestamp: new Date().toISOString() });
+    mensagens.push({ role: 'bot', source: 'manual', content: texto, timestamp: new Date().toISOString() });
     await pool.query(
       `INSERT INTO conversations (lead_id, client_id, messages, updated_at)
        VALUES ($1, $2, $3, NOW())
@@ -2133,7 +2133,7 @@ app.post('/api/leads/:id/mensagem', verificarToken, async (req, res) => {
       [lead.id, CLIENT_ID, JSON.stringify(mensagens)]
     );
 
-    if (conversas[lead.phone]) conversas[lead.phone].push({ role: 'assistant', content: texto });
+    if (conversas[lead.phone]) conversas[lead.phone].push({ role: 'assistant', source: 'manual', content: texto, timestamp: new Date().toISOString() });
     registrarAtividade(lead.name || lead.phone, `Mensagem manual enviada por ${req.user?.email || 'usuário'}`).catch(() => {});
     emitirMudancaLeads();
     res.status(201).json({ ok: true });
@@ -3796,7 +3796,7 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     // Registra o pedido E a despedida no histórico: se o lead reengajar dias
     // depois, o Claude precisa ver que houve opt-out + despedida pra retomar
     // com coerência (antes a despedida ia por fora e sumia da conversa).
-    if (conversas[userPhone]) conversas[userPhone].push({ role: 'user', content: userText });
+    if (conversas[userPhone]) conversas[userPhone].push({ role: 'user', content: userText, timestamp: new Date().toISOString() });
     await registrarOptOut(userPhone);
     await enviarERegistrar(userPhone, 'Sem problema, não te envio mais mensagens por aqui. Se um dia quiser retomar, é só me chamar. Abraço!').catch(() => {});
     await persistirLead(userPhone);
@@ -3814,7 +3814,7 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     const dispensou = /^(n[ãa]o|nada|ok|blz|beleza|tchau|valeu|obrigad[oa]|depois)[.!\s]*$/i.test(textoMotivo);
     if (Date.now() - motivoDesde < 24 * 60 * 60 * 1000 && !dispensou && textoMotivo.length >= 3) {
       registrarMotivoCancelamento(userPhone, textoMotivo).catch(e => log(userPhone, 'error', 'motivo cancelamento:', e.message));
-      if (conversas[userPhone]) conversas[userPhone].push({ role: 'user', content: textoMotivo });
+      if (conversas[userPhone]) conversas[userPhone].push({ role: 'user', content: textoMotivo, timestamp: new Date().toISOString() });
       await enviarERegistrar(userPhone, 'Entendi, obrigado por compartilhar! 🙏 Se mudar de ideia ou quiser retomar, é só me chamar por aqui.');
       await persistirLead(userPhone);
       return;
@@ -4172,9 +4172,9 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     } else {
       conteudoMultimodal.push({ type: 'text', text: '[O cliente enviou uma imagem]' });
     }
-    conversas[userPhone].push({ role: 'user', content: conteudoMultimodal });
+    conversas[userPhone].push({ role: 'user', content: conteudoMultimodal, timestamp: new Date().toISOString() });
   } else {
-    conversas[userPhone].push({ role: 'user', content: userText });
+    conversas[userPhone].push({ role: 'user', content: userText, timestamp: new Date().toISOString() });
   }
 
   // MODO PÓS-AGENDAMENTO: lead já agendou e está respondendo (ex: a um lembrete)
@@ -4618,7 +4618,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     // numa única entrada fazia o CRM exibir o marcador cru, embora a Meta recebesse
     // as mensagens separadas. O histórico agora espelha o que o lead realmente vê.
     resposta.split('|||').map(p => p.trim()).filter(Boolean).forEach(parte => {
-      conversas[userPhone].push({ role: 'assistant', content: parte });
+      conversas[userPhone].push({ role: 'assistant', source: 'bot', content: parte, timestamp: new Date().toISOString() });
     });
 
     // Grava nome, tipo de negócio, dor e urgência assim que detectados, sem esperar
@@ -5077,12 +5077,12 @@ const ERRO_FORA_DA_JANELA = 131047;
 // Envia uma mensagem ao lead E registra no histórico da conversa como assistant.
 // Usado quando o CÓDIGO (não o Claude) gera a mensagem — garante que o Claude
 // tenha contexto do que foi dito e não repita ofertas ou se perca no fluxo.
-async function enviarERegistrar(userPhone, texto, { gravarNoCrm = false } = {}) {
+async function enviarERegistrar(userPhone, texto, { gravarNoCrm = false, source = 'bot' } = {}) {
   const enviada = await enviarMensagem(userPhone, texto);
   // Só registra no histórico se a mensagem realmente foi entregue ao WhatsApp.
   // Evita que o Claude continue a conversa baseado em mensagem que o lead nunca recebeu.
   if (enviada && conversas[userPhone]) {
-    conversas[userPhone].push({ role: 'assistant', content: texto });
+    conversas[userPhone].push({ role: 'assistant', source, content: texto, timestamp: new Date().toISOString() });
     if (gravarNoCrm) await gravarConversa(userPhone, conversas[userPhone].slice(2));
   }
   return enviada;
@@ -5114,13 +5114,20 @@ async function gravarConversa(userPhone, mensagens) {
     const leadId = leadRes.rows[0].id;
 
     // Formata mensagens para o painel: role user/bot + content + timestamp
+    const agora = new Date().toISOString();
     const mensagensFormatadas = mensagens
       .filter(m => m.role !== 'system')
-      .map(m => ({
-        role: m.role === 'assistant' ? 'bot' : 'user',
-        content: typeof m.content === 'string' ? m.content : textoDoConteudo(m.content),
-        timestamp: new Date().toISOString()
-      }))
+      .map(m => {
+        // O horário nasce junto com a mensagem e não é reescrito nas próximas
+        // atualizações. Históricos antigos recebem uma data apenas uma vez.
+        if (!m.timestamp) m.timestamp = agora;
+        return {
+          role: m.role === 'assistant' ? 'bot' : 'user',
+          source: m.source || (m.role === 'assistant' ? 'bot' : undefined),
+          content: typeof m.content === 'string' ? m.content : textoDoConteudo(m.content),
+          timestamp: m.timestamp
+        };
+      })
       .filter(m => m.content && m.content.trim());
 
     // Upsert: cria ou atualiza a conversa do lead
