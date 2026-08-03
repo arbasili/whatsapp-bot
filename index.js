@@ -33,11 +33,12 @@ const {
   pediuOptOut,
   separarPonteComercial,
 } = require('./heuristicas');
+const { proximaTentativaFollowUp } = require('./follow-up-policy');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.27.0';
+const BOT_VERSION = '1.28.0';
 const BOT_VERSION_DATA = '2026-08-02'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -391,6 +392,29 @@ async function initDb() {
     )
   `);
 
+  // Auditoria dos envios proativos. O POST da Meta confirma apenas que aceitou a
+  // mensagem; os webhooks posteriores promovem o estado até entregue/lida/falhou.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS outbound_messages (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      phone TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      attempt INTEGER,
+      meta_message_id TEXT NOT NULL UNIQUE,
+      message_text TEXT,
+      status TEXT NOT NULL DEFAULT 'accepted',
+      accepted_at TIMESTAMPTZ DEFAULT NOW(),
+      sent_at TIMESTAMPTZ,
+      delivered_at TIMESTAMPTZ,
+      read_at TIMESTAMPTZ,
+      failed_at TIMESTAMPTZ,
+      error_details JSONB,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_outbound_messages_phone ON outbound_messages(client_id, phone, accepted_at DESC)`);
+
   // Migração: bancos criados antes desta constraint existir não a recebem
   // automaticamente do CREATE TABLE IF NOT EXISTS acima (é um no-op nesse caso).
   // Sem ela, TODO gravarConversa() falha com "no unique or exclusion constraint
@@ -617,10 +641,8 @@ const EXPIRACAO_ENCERRADO_MS = 30 * 24 * 60 * 60 * 1000;
 
 // Follow-ups dentro da janela de 24h da Meta
 // Após 24h da última mensagem do lead, a janela fecha e não podemos mais enviar mensagens livres
-// Reduzido de 3 para 2 toques dentro da janela (era 1h/6h/22h) — o toque de 6h
-// foi eliminado por ser o principal risco de reputação do número conforme o volume cresce.
-const FOLLOWUP_1_MS  =  4 * 60 * 60 * 1000; //  4h — primeira tentativa
-const FOLLOWUP_2_MS  = 22 * 60 * 60 * 1000; // 22h — última tentativa dentro da janela
+// Três toques progressivos em 1h, 6h e 20h. A política exige intervalos mínimos
+// entre eles para não concentrar mensagens depois do horário de silêncio.
 const JANELA_META_MS = 24 * 60 * 60 * 1000; // 24h — após isso, silêncio (janela fechada)
 
 // Reativação de leads encerrados
@@ -1559,9 +1581,9 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
   try {
     const historico = conversas[phone];
     if (!historico || historico.length < 3) {
-      return tentativa === 1
-        ? `Oi ${nome}, tudo bem? Ainda estou por aqui caso queira continuar.`
-        : `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`;
+      if (tentativa === 1) return `Oi ${nome}, consigo continuar daqui quando você puder.`;
+      if (tentativa === 2) return `Se quiser, te explico isso de forma bem direta no seu cenário.`;
+      return `Tudo bem se agora não for o melhor momento, quando quiser continuar é só me chamar.`;
     }
     const historicoReal = historico.slice(2).slice(-10)
       .map(m => ({ role: m.role, content: textoDoConteudo(m.content) }))
@@ -1577,16 +1599,17 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
       dorConhecida ? `Dor relatada: ${dorConhecida.slice(0, 100)}` : '',
     ].filter(Boolean).join(' | ');
 
-    // Cadência reduzida para 2 toques (era 3): a tentativa 1 é a retomada contextual de
-    // sempre; a tentativa 2 já é a última antes da janela fechar, então usa o tom de
-    // "porta aberta, sem cobrança" que antes só aparecia na 3ª tentativa.
+    // Cadência de 3 toques: retomada contextual, reforço curto de valor e, por fim,
+    // porta aberta sem cobrança antes de a janela da Meta fechar.
     // Regra dura em ambas: nunca oferecer canal/ação que o bot não executa sozinho.
     // Visto em produção um follow-up improvisar "posso te ligar" — promessa que
     // ninguém cumpre (não há ligação automática nem handoff). Tudo se resolve aqui.
     const semCanalExterno = ' NUNCA ofereça ligar, telefonar, fazer uma chamada ou videochamada, mandar e-mail, nem qualquer canal ou ação que dependa de outra pessoa. Você conduz tudo por aqui mesmo, nesta conversa por mensagem, e não promete nada além de continuar o papo aqui.';
     const instrucao = tentativa === 1
       ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead parou de responder.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Com base na conversa, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. Se souber a dor do lead, mencione ela de forma leve e direta (ex: "vi que você falou que perde cliente por demora..."). A mensagem deve ser contextual: se o lead parou no meio de uma pergunta, retome ela de forma leve, como quem só puxa o assunto de novo, SEM soar como cobrança (evite "fiquei te esperando", "você não respondeu", "estou aguardando"); se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases.${semCanalExterno} Assine como ${cfg.persona.atendente} apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
-      : `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. Esta é a última tentativa antes de encerrar o contato.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem muito curta, sem pressão, deixando a porta aberta. Tom: "tudo bem se não for o momento certo, só queria deixar o caminho aberto". Sem cobrar resposta, sem urgência. Máximo 1 frase. Sem emoji, sem travessão.${semCanalExterno} Responda APENAS com o texto da mensagem, sem aspas.`;
+      : tentativa === 2
+        ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead ainda não respondeu.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem curta que acrescente UM benefício concreto ligado ao contexto já conhecido e retome a pergunta pendente. Não repita a mensagem anterior, não cobre resposta, não invente números, clientes ou resultados. Máximo 2 frases. Sem emoji, sem travessão.${semCanalExterno} Responda APENAS com o texto da mensagem, sem aspas.`
+        : `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. Esta é a última tentativa antes de encerrar o contato.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem muito curta, sem pressão, deixando a porta aberta. Tom: "tudo bem se não for o momento certo, só queria deixar o caminho aberto". Sem cobrar resposta, sem urgência. Máximo 1 frase. Sem emoji, sem travessão.${semCanalExterno} Responda APENAS com o texto da mensagem, sem aspas.`;
 
     const inicioFollowUp = Date.now();
     const resp = await axios.post(
@@ -1607,9 +1630,9 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
     return textoDaResposta(resp).trim();
   } catch (err) {
     console.error(`Erro ao gerar follow-up contextual (tentativa ${tentativa}):`, err.message);
-    return tentativa === 1
-      ? `Oi ${nome}, tudo bem? Ainda estou por aqui caso queira continuar.`
-      : `Olá ${nome}, queria retomar nossa conversa. Quando tiver um momento, é só me chamar.`;
+    if (tentativa === 1) return `Oi ${nome}, consigo continuar daqui quando você puder.`;
+    if (tentativa === 2) return `Se quiser, te explico isso de forma bem direta no seu cenário.`;
+    return `Tudo bem se agora não for o melhor momento, quando quiser continuar é só me chamar.`;
   }
 }
 
@@ -1722,19 +1745,39 @@ setInterval(async () => {
             || leadsAgendados.has(phone) || leadsEncerrados.has(phone) || leadsOptOut.has(phone)) {
           return; // lead reengajou ou mudou de estado durante a geração — aborta o envio
         }
-        await enviarERegistrar(phone, msg);
+        const enviada = await enviarERegistrar(phone, msg, { gravarNoCrm: true });
+        if (!enviada?.messageId) {
+          console.warn(`[${mascararTelefone(phone)}] Follow-up ${tentativa} não confirmado pela Meta; tentativa continuará pendente.`);
+          return false;
+        }
+        await pool.query(
+          `INSERT INTO outbound_messages
+             (client_id, phone, kind, attempt, meta_message_id, message_text, status)
+           VALUES ($1, $2, 'follow_up', $3, $4, $5, 'accepted')
+           ON CONFLICT (meta_message_id) DO NOTHING`,
+          [CLIENT_ID, phone, tentativa, enviada.messageId, msg]
+        );
         // ultimoFollowUp = marca do último toque automático. Não é lido pelo gating de
         // follow-up (que usa ultimaMensagem); é mantido de propósito como base pra
         // frequency-capping futuro e pra depuração.
-        followUpStatus[phone] = { tentativas: tentativa, ultimoFollowUp: agora };
+        followUpStatus[phone] = {
+          tentativas: tentativa,
+          ultimoFollowUp: Date.now(),
+          confirmadoPelaMeta: true,
+          metaMessageId: enviada.messageId || null,
+          statusEnvio: 'accepted',
+        };
         await persistirLead(phone);
+        return true;
       };
 
-      if (status.tentativas === 0 && tempoSemResposta > FOLLOWUP_1_MS) {
-        await enviarFollowUp(1);
-      } else if (status.tentativas === 1 && tempoSemResposta > FOLLOWUP_2_MS) {
-        await enviarFollowUp(2);
-      }
+      const tentativaDevida = proximaTentativaFollowUp({
+        tentativas: status.tentativas,
+        ultimoFollowUp: status.ultimoFollowUp,
+        ultimaMensagem: marcaUltima,
+        agora,
+      });
+      if (tentativaDevida) await enviarFollowUp(tentativaDevida);
 
     } else {
       // ── Janela fechou — mover para reativação e encerrar ───────────────────
@@ -2992,6 +3035,21 @@ app.post('/webhook', async (req, res) => {
   }
 
   const changes = req.body?.entry?.[0]?.changes?.[0]?.value;
+  for (const statusEnvio of changes?.statuses || []) {
+   if (statusEnvio?.id && statusEnvio?.status) {
+    const colunaPorStatus = { sent: 'sent_at', delivered: 'delivered_at', read: 'read_at', failed: 'failed_at' };
+    const coluna = colunaPorStatus[statusEnvio.status];
+    if (coluna) {
+      await pool.query(
+        `UPDATE outbound_messages
+         SET status = $1, ${coluna} = COALESCE(${coluna}, NOW()),
+             error_details = $2, updated_at = NOW()
+         WHERE meta_message_id = $3 AND client_id = $4`,
+        [statusEnvio.status, statusEnvio.errors ? JSON.stringify(statusEnvio.errors) : null, statusEnvio.id, CLIENT_ID]
+      ).catch(err => console.error('Erro ao atualizar confirmação da Meta:', err.message));
+    }
+   }
+  }
   const message = changes?.messages?.[0];
   if (!message) return res.sendStatus(200);
 
@@ -4989,12 +5047,13 @@ const ERRO_FORA_DA_JANELA = 131047;
 // Envia uma mensagem ao lead E registra no histórico da conversa como assistant.
 // Usado quando o CÓDIGO (não o Claude) gera a mensagem — garante que o Claude
 // tenha contexto do que foi dito e não repita ofertas ou se perca no fluxo.
-async function enviarERegistrar(userPhone, texto) {
+async function enviarERegistrar(userPhone, texto, { gravarNoCrm = false } = {}) {
   const enviada = await enviarMensagem(userPhone, texto);
   // Só registra no histórico se a mensagem realmente foi entregue ao WhatsApp.
   // Evita que o Claude continue a conversa baseado em mensagem que o lead nunca recebeu.
   if (enviada && conversas[userPhone]) {
     conversas[userPhone].push({ role: 'assistant', content: texto });
+    if (gravarNoCrm) await gravarConversa(userPhone, conversas[userPhone].slice(2));
   }
   return enviada;
 }
@@ -5037,7 +5096,7 @@ async function gravarConversa(userPhone, mensagens) {
 async function enviarMensagem(para, texto, tentativa = 1) {
   const MAX_TENTATIVAS_ENVIO = 2;
   try {
-    await axios.post(
+    const respostaMeta = await axios.post(
       `https://graph.facebook.com/${META_GRAPH_API}/${process.env.PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: 'whatsapp',
@@ -5053,7 +5112,10 @@ async function enviarMensagem(para, texto, tentativa = 1) {
         timeout: 15000
       }
     );
-    return true; // enviada com sucesso
+    return {
+      ok: true,
+      messageId: respostaMeta.data?.messages?.[0]?.id || null,
+    }; // aceita pela Meta; entrega e leitura chegam depois pelo webhook
   } catch (err) {
     const codigoErro = err.response?.data?.error?.code;
     // Fora da janela de 24h (131047): não entrega, mas NÃO invalida o lead.
