@@ -33,12 +33,12 @@ const {
   pediuOptOut,
   separarPonteComercial,
 } = require('./heuristicas');
-const { proximaTentativaFollowUp } = require('./follow-up-policy');
+const { proximaTentativaFollowUp, horaEstaNoSilencio } = require('./follow-up-policy');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.28.0';
+const BOT_VERSION = '1.28.1';
 const BOT_VERSION_DATA = '2026-08-02'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -706,9 +706,10 @@ const MEU_NUMERO = process.env.MEU_NUMERO || '';
 const NUMERO_VENDEDOR = process.env.NUMERO_VENDEDOR || MEU_NUMERO;
 const CALENDAR_ID = cfg.agenda.calendarId; // antes hardcoded; agora vem do config do cliente
 
-// Horário de silêncio: não envia mensagens entre 20h e 8h (Campo Grande)
-const SILENCIO_INICIO = 20;
-const SILENCIO_FIM = 8;
+// Follow-ups e lembretes automáticos funcionam em qualquer dia da semana.
+// A única restrição é o horário de silêncio, das 21h às 6h (Campo Grande).
+const SILENCIO_INICIO = 21;
+const SILENCIO_FIM = 6;
 
 // Saudação correta para o momento atual (horário de Campo Grande)
 function saudacaoAtualCG() {
@@ -723,7 +724,7 @@ function saudacaoAtualCG() {
 function dentroDoHorarioSilencio() {
   const agora = new Date();
   const hora = parseInt(agora.toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'America/Campo_Grande' }), 10);
-  return hora >= SILENCIO_INICIO || hora < SILENCIO_FIM;
+  return horaEstaNoSilencio(hora, SILENCIO_INICIO, SILENCIO_FIM);
 }
 
 // Validação de variáveis de ambiente obrigatórias no boot — falha cedo e claro
@@ -1728,10 +1729,10 @@ setInterval(async () => {
     const dentroJanela = tempoSemResposta < JANELA_META_MS;
 
     if (dentroJanela) {
-      // O horário de silêncio (20h–8h) vale só para os ENVIOS de follow-up. A
+      // O horário de silêncio (21h–6h) vale só para os ENVIOS de follow-up. A
       // transição do ramo "janela fechou" (abaixo) NÃO manda mensagem ao lead —
       // só atualiza o CRM — então não pode ser bloqueada pela madrugada, senão o
-      // lead fica preso como "Em conversa" até as 8h. Por isso o teste fica aqui.
+      // lead fica preso como "Em conversa" até as 6h. Por isso o teste fica aqui.
       if (dentroDoHorarioSilencio()) continue;
 
       // Envia um follow-up REVALIDANDO o estado depois de gerar o texto: a chamada

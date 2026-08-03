@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { proximaTentativaFollowUp } = require('./follow-up-policy');
+const { proximaTentativaFollowUp, horaEstaNoSilencio } = require('./follow-up-policy');
 
 const HORA = 60 * 60 * 1000;
 const inicio = Date.UTC(2026, 7, 2, 12);
@@ -26,4 +26,11 @@ test('impede disparos acumulados depois do horário de silêncio', () => {
 
 test('encerra a cadência após três tentativas', () => {
   assert.equal(proximaTentativaFollowUp({ tentativas: 3, ultimoFollowUp: inicio + 20 * HORA, ultimaMensagem: inicio, agora: inicio + 23 * HORA }), null);
+});
+
+test('permite follow-up todos os dias entre 6h e 21h', () => {
+  assert.equal(horaEstaNoSilencio(5), true);
+  assert.equal(horaEstaNoSilencio(6), false);
+  assert.equal(horaEstaNoSilencio(20), false);
+  assert.equal(horaEstaNoSilencio(21), true);
 });

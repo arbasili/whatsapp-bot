@@ -11,4 +11,8 @@ function proximaTentativaFollowUp({ tentativas = 0, ultimoFollowUp = 0, ultimaMe
   return indice + 1;
 }
 
-module.exports = { LIMITES_FOLLOW_UP, INTERVALOS_MINIMOS, proximaTentativaFollowUp };
+function horaEstaNoSilencio(hora, inicio = 21, fim = 6) {
+  return hora >= inicio || hora < fim;
+}
+
+module.exports = { LIMITES_FOLLOW_UP, INTERVALOS_MINIMOS, proximaTentativaFollowUp, horaEstaNoSilencio };
