@@ -50,8 +50,32 @@ test('lead excluído que retorna começa com dados comerciais limpos', () => {
 test('abertura usa nome do perfil sem pedir confirmação e não fica sem pergunta', () => {
   assert.match(source, /Considere o nome do perfil válido/);
   assert.match(source, /NÃO pergunte "posso te chamar de \$\{nomeDoWebhook\}\?"/);
-  assert.match(source, /iniciandoNovaConversa && !resposta\.includes\('\?'\)/);
+  assert.match(source, /iniciandoNovaConversa && !conversaRetomada && !resposta\.includes\('\?'\)/);
   assert.match(source, /Me conta sobre a sua operação, o que você faz\?/);
+});
+
+test('lead que volta é reconhecido: histórico do banco é reidratado na memória', () => {
+  // `conversas` só vive em memória e todo deploy do Railway zera o processo.
+  // Sem reidratar, quem já está no CRM era recebido como desconhecido.
+  assert.match(source, /async function carregarConversaDoBanco/);
+  assert.match(source, /await carregarConversaDoBanco\(userPhone\)/);
+  assert.match(source, /conversaRetomada = true/);
+  // o papel gravado no painel é 'bot'; a API precisa de 'assistant'
+  assert.match(source, /m\.role === 'bot' \|\| m\.role === 'assistant' \? 'assistant' : 'user'/);
+  // lead na lixeira não volta a ser tratado como conhecido
+  assert.match(source, /l\.deleted_at IS NULL/);
+});
+
+test('roteiro não usa travessão no próprio corpo, só na regra que o proíbe', () => {
+  // O modelo aprende por exemplo: um roteiro cheio de travessões ensina a usar
+  // travessão, por mais que uma linha mande não usar.
+  const inicio = source.indexOf('REGRA DE SAUDAÇÃO:');
+  const fim = source.indexOf('Montar a mensagem do usuário');
+  assert.ok(inicio > 0 && fim > inicio, 'não localizou o bloco do roteiro');
+  const comTravessao = source.slice(inicio, fim)
+    .split('\n')
+    .filter(l => l.includes('—') && !l.includes('NUNCA use travessão'));
+  assert.deepEqual(comTravessao, [], `linhas do roteiro ainda usam travessão:\n${comTravessao.join('\n')}`);
 });
 
 test('texto que menciona anúncio recebe a abertura especial mesmo sem referral da Meta', () => {
