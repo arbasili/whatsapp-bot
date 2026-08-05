@@ -66,6 +66,14 @@ test('lead que volta é reconhecido: histórico do banco é reidratado na memór
   assert.match(source, /l\.deleted_at IS NULL/);
 });
 
+test('quebra em balões continua liberada depois da abertura', () => {
+  // O roteiro dizia "a partir da segunda mensagem, responda sem o |||", o que
+  // anulava a regra de tamanho: toda resposta virava um balão único e longo.
+  assert.doesNotMatch(source, /responda normalmente sem o marcador/);
+  assert.match(source, /o marcador "\|\|\|" continua valendo para a conversa inteira/);
+  assert.match(source, /QUEBRE em balões com "\|\|\|"/);
+});
+
 test('roteiro não usa travessão no próprio corpo, só na regra que o proíbe', () => {
   // O modelo aprende por exemplo: um roteiro cheio de travessões ensina a usar
   // travessão, por mais que uma linha mande não usar.
