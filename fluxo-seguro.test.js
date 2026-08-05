@@ -66,6 +66,18 @@ test('lead que volta é reconhecido: histórico do banco é reidratado na memór
   assert.match(source, /l\.deleted_at IS NULL/);
 });
 
+test('não repete pergunta que o lead não respondeu, nem na conversa nem no follow-up', () => {
+  // Visto em produção: o segmento foi perguntado 4 vezes seguidas (abertura,
+  // 2 follow-ups e a resposta a uma dúvida). É o que mais denuncia robô.
+  assert.match(source, /REGRA DE NÃO INSISTIR NA MESMA PERGUNTA/);
+  assert.match(source, /NÃO repita aquela pergunta, nem reformulada com outras palavras/);
+});
+
+test('pergunta direta do lead é respondida antes de qualquer qualificação', () => {
+  assert.match(source, /REGRA DE RESPONDER ANTES DE PERGUNTAR/);
+  assert.match(source, /Informação não é moeda de troca/);
+});
+
 test('quebra em balões continua liberada depois da abertura', () => {
   // O roteiro dizia "a partir da segunda mensagem, responda sem o |||", o que
   // anulava a regra de tamanho: toda resposta virava um balão único e longo.
