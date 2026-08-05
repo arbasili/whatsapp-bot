@@ -38,8 +38,8 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.31.0';
-const BOT_VERSION_DATA = '2026-08-03'; // data desta versão
+const BOT_VERSION = '1.31.1';
+const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
 // - MODELO_LEAD: conversa e mensagens que o LEAD lê (resposta principal, follow-up).
@@ -1601,9 +1601,16 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
       dorConhecida ? `Dor relatada: ${dorConhecida.slice(0, 100)}` : '',
     ].filter(Boolean).join(' | ');
 
-    // Sem contexto comercial confirmado, a IA tenderia a completar as lacunas
-    // com uma dor plausível. A retomada segura preserva apenas o que sabemos.
-    if (!contextoLead) return followUpSeguro(nome, tentativa);
+    // A IA escreve o follow-up SEMPRE, com base no histórico real da conversa.
+    // O que muda com/sem contexto extraído é só a instrução: sem contexto, ela
+    // é proibida de presumir qualquer coisa e retoma a pergunta pendente.
+    // (v1.31.0 curto-circuitava pra um texto enlatado sempre que a extração não
+    // achava tipo/dor — ou seja, em quase todo lead novo. Visto em produção:
+    // mensagens em minúscula, sem saudação e com a MESMA pergunta repetida nos
+    // toques 1 e 2. O enlatado agora é só plano B de erro/corte, lá embaixo.)
+    const blocoContexto = contextoLead
+      ? ` Contexto confirmado pelo lead: ${contextoLead}.`
+      : ' Ainda NÃO há nada confirmado sobre o negócio ou a dor do lead: não presuma nada sobre ele, apenas retome a conversa a partir do que está no histórico.';
 
     // Cadência de 3 toques: retomada contextual, reforço curto de valor e, por fim,
     // porta aberta sem cobrança antes de a janela da Meta fechar.
@@ -1612,10 +1619,10 @@ async function gerarMsgFollowUp(phone, nome, tentativa) {
     // ninguém cumpre (não há ligação automática nem handoff). Tudo se resolve aqui.
     const semCanalExterno = ' NUNCA ofereça ligar, telefonar, fazer uma chamada ou videochamada, mandar e-mail, nem qualquer canal ou ação que dependa de outra pessoa. Você conduz tudo por aqui mesmo, nesta conversa por mensagem, e não promete nada além de continuar o papo aqui.';
     const instrucao = tentativa === 1
-      ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead parou de responder. Contexto confirmado pelo lead: ${contextoLead}. Com base SOMENTE no que o lead realmente disse, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. NUNCA invente dor, problema, urgência ou informação que não esteja no contexto confirmado. Se o lead parou no meio de uma pergunta, retome ela de forma leve, sem soar como cobrança; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases.${semCanalExterno} Assine como ${cfg.persona.atendente} apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
+      ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead parou de responder.${blocoContexto} Com base SOMENTE no que o lead realmente disse, escreva UMA mensagem curta e natural de follow-up, com tom leve de WhatsApp (pode usar contrações como "tô", "tá", "pra"). Sem travessão. Evite emoji aqui para não soar insistente. NUNCA invente dor, problema, urgência ou informação que não esteja no histórico. Se o lead parou no meio de uma pergunta, retome ela de forma leve, sem soar como cobrança; se estava prestes a agendar, relembre os horários; se disse que ia pensar, seja leve e sem pressão. Máximo 2 frases.${semCanalExterno} Assine como ${cfg.persona.atendente} apenas se fizer sentido natural. Responda APENAS com o texto da mensagem, sem aspas.`
       : tentativa === 2
-        ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead ainda não respondeu.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem curta que acrescente UM benefício concreto ligado ao contexto já conhecido e retome a pergunta pendente. Não repita a mensagem anterior, não cobre resposta, não invente números, clientes ou resultados. Máximo 2 frases. Sem emoji, sem travessão.${semCanalExterno} Responda APENAS com o texto da mensagem, sem aspas.`
-        : `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. Esta é a última tentativa antes de encerrar o contato.${contextoLead ? ` Contexto do lead: ${contextoLead}.` : ''} Escreva UMA mensagem muito curta, sem pressão, deixando a porta aberta. Tom: "tudo bem se não for o momento certo, só queria deixar o caminho aberto". Sem cobrar resposta, sem urgência. Máximo 1 frase. Sem emoji, sem travessão.${semCanalExterno} Responda APENAS com o texto da mensagem, sem aspas.`;
+        ? `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. O lead ainda não respondeu.${blocoContexto} Escreva UMA mensagem curta que acrescente UM benefício concreto ${contextoLead ? 'ligado ao contexto já conhecido' : 'do serviço, sem presumir nada sobre o lead,'} e retome a pergunta pendente com outras palavras (nunca repita a formulação do follow-up anterior, que está no histórico). Não cobre resposta, não invente números, clientes ou resultados. Máximo 2 frases. Sem emoji, sem travessão.${semCanalExterno} Responda APENAS com o texto da mensagem, sem aspas.`
+        : `Você é o ${cfg.persona.atendente}, do time da ${cfg.persona.empresa}. Esta é a última tentativa antes de encerrar o contato.${blocoContexto} Escreva UMA mensagem muito curta, sem pressão, deixando a porta aberta. Tom: "tudo bem se não for o momento certo, só queria deixar o caminho aberto". Sem cobrar resposta, sem urgência. Máximo 1 frase. Sem emoji, sem travessão.${semCanalExterno} Responda APENAS com o texto da mensagem, sem aspas.`;
 
     const inicioFollowUp = Date.now();
     const resp = await axios.post(

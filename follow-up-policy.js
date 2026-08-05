@@ -15,18 +15,23 @@ function horaEstaNoSilencio(hora, inicio = 21, fim = 6) {
   return hora >= inicio || hora < fim;
 }
 
+// Plano B do follow-up: usado SOMENTE quando a geração por IA falhou ou veio
+// cortada (nunca como caminho padrão — v1.31.0 fez isso e soltou em produção
+// mensagens em minúscula, sem saudação e com a mesma pergunta repetida).
+// Regras da copy: começa com maiúscula mesmo sem nome, cumprimenta no toque 1,
+// e cada toque termina com uma pergunta DIFERENTE do anterior.
 function followUpSeguro(nome, tentativa, tipoNegocio = '', dor = '') {
   const primeiroNome = nome && nome !== 'você' ? String(nome).trim().split(/\s+/)[0] : '';
-  const chamada = primeiroNome ? `${primeiroNome}, ` : '';
+  const oi = primeiroNome ? `Oi ${primeiroNome}! ` : 'Oi! ';
   if (tentativa === 1) {
-    if (tipoNegocio || dor) return `${chamada}consigo continuar daqui e te mostrar como isso funcionaria no seu cenário. Quer seguir?`;
-    return `${chamada}consigo te explicar isso de forma bem direta no seu cenário. Que tipo de negócio você tem?`;
+    if (tipoNegocio || dor) return `${oi}Posso continuar daqui e te mostrar como isso funcionaria no seu cenário. Quer seguir?`;
+    return `${oi}Posso te explicar direitinho como isso funcionaria no seu caso. Me conta: qual é o seu negócio?`;
   }
   if (tentativa === 2) {
-    if (tipoNegocio || dor) return `${chamada}uma vantagem é responder e organizar os contatos mesmo fora do horário comercial. Quer que eu continue?`;
-    return `${chamada}o atendimento automático pode responder e organizar os contatos mesmo fora do horário comercial. Que tipo de negócio você tem?`;
+    if (tipoNegocio || dor) return `Uma vantagem que costuma pesar: o atendimento responde e organiza os contatos mesmo fora do horário comercial. Quer que eu continue?`;
+    return `Uma vantagem que costuma pesar: o atendimento responde e organiza os contatos mesmo fora do horário comercial. Quer ver como ficaria no seu caso?`;
   }
-  return `${chamada}tudo bem se não for o momento certo agora, fico por aqui e quando fizer sentido é só me chamar.`;
+  return `Tudo bem se agora não for o momento. Fico por aqui, e quando fizer sentido é só me chamar.`;
 }
 
 function followUpPareceCortado(texto) {

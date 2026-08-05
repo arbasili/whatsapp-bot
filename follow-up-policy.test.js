@@ -37,8 +37,18 @@ test('permite follow-up todos os dias entre 6h e 21h', () => {
 
 test('sem contexto confirmado, follow-up não inventa dor do lead', () => {
   const mensagem = followUpSeguro('José', 1);
-  assert.equal(mensagem, 'José, consigo te explicar isso de forma bem direta no seu cenário. Que tipo de negócio você tem?');
+  assert.equal(mensagem, 'Oi José! Posso te explicar direitinho como isso funcionaria no seu caso. Me conta: qual é o seu negócio?');
   assert.doesNotMatch(mensagem, /perder cliente|demora|problema/i);
+});
+
+test('follow-up seguro sem nome ainda começa com saudação em maiúscula', () => {
+  assert.match(followUpSeguro('', 1), /^Oi! /);
+  assert.match(followUpSeguro('você', 1), /^Oi! /);
+});
+
+test('toques 1 e 2 do follow-up seguro nunca repetem a mesma pergunta', () => {
+  const pergunta = (t) => String(followUpSeguro('', t)).split(/(?<=[.!])\s+/).pop();
+  assert.notEqual(pergunta(1), pergunta(2));
 });
 
 test('detecta follow-up cortado antes de ser enviado', () => {
