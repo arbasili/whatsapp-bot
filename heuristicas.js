@@ -574,6 +574,23 @@ function separarPonteComercial(texto) {
   return partes.filter(Boolean).join('|||');
 }
 
+// Balão que chegou cortado no meio da frase. Visto em produção: a ponte
+// terminou em "É online, gratuita e sem", perdendo "compromisso" e, junto,
+// a pergunta que fecha a etapa. O lead ficou 5 minutos sem entender e teve
+// que perguntar "como funciona?" sozinho.
+// Não basta checar "não termina com pontuação": balão curto sem ponto final
+// é comum e legítimo ("Boa noite, Adriano! 😊", "Show", "Perfeito"). O sinal
+// confiável é terminar numa palavra de LIGAÇÃO, que nunca encerra uma frase.
+function balaoCortadoNoMeio(texto) {
+  const limpo = String(texto || '').trim();
+  if (!limpo) return true;
+  if (/[.!?…:;)\]"'»]$/.test(limpo)) return false;
+  // (?:^|\s) em vez de \b: em JS o \b casa entre "ã" e "o", então "\bo$"
+  // acusaria "então", "não", "informação" e toda palavra terminada em "ão".
+  // Mesma armadilha de acento já encontrada em separarPonteComercial.
+  return /(?:^|\s)(?:a|ao|aos|as|at[ée]|com|como|da|das|de|do|dos|e|em|entre|mas|na|nas|nem|no|nos|o|os|ou|para|pela|pelo|por|pra|pro|que|se|sem|sobre|um|uma|uns|umas)$/i.test(limpo);
+}
+
 // Detecta se a resposta está propondo a reunião (etapa da ponte do roteiro).
 // Alimenta o PORTÃO DE QUALIFICAÇÃO: propor reunião sem saber o segmento e a
 // dor gera proposta genérica, que o próprio roteiro proíbe e que não converte.
@@ -588,6 +605,7 @@ function propoeReuniao(texto) {
 
 module.exports = {
   propoeReuniao,
+  balaoCortadoNoMeio,
   textoDoConteudo,
   horaCampoGrandeDoPedido,
   temIntencaoDeCompra,

@@ -89,6 +89,17 @@ test('confirmação do número é afirmação, para o turno ter uma pergunta só
 test('a ponte usa 4 balões, com a pergunta isolada no último', () => {
   assert.match(source, /Responda em EXATAMENTE 4 partes separadas pelo marcador "\|\|\|"/);
   assert.match(source, /única etapa da conversa que usa 4 balões/);
+  // As travas e o exemplo ficaram falando em 3 balões depois da v1.35.0, com
+  // a pergunta na parte 3. O modelo obedeceu à trava, não ao cabeçalho: a
+  // parte 4 saiu como sobra cortada ("É online, gratuita e sem") e a pergunta
+  // sumiu. Roteiro que se contradiz é roteiro que o modelo resolve sozinho.
+  assert.match(source, /SEMPRE os 4 balões separados por "\|\|\|"/);
+  assert.match(source, /A parte 4 é OBRIGATÓRIA e termina em UMA ÚNICA pergunta/);
+  assert.doesNotMatch(source, /SEMPRE os 3 balões/);
+  assert.doesNotMatch(source, /A parte 3 termina em UMA ÚNICA pergunta/);
+  // "corte palavra" era licença explícita pra entregar frase pela metade
+  assert.doesNotMatch(source, /corte palavra em vez de criar outro balão/);
+  assert.match(source, /NUNCA entregue um balão pela metade/);
   assert.match(source, /a prova ao vivo, ligando o tempo de resposta que ELE acabou de receber/);
   // "Acho que vale" (consultor dando opinião) em vez de "Ia te sugerir"
   // (recuo na hora do fechamento) ou "Vou te sugerir" (anuncia em vez de fazer).
@@ -108,6 +119,17 @@ test('qualificação tem três dados obrigatórios e portão de saída', () => {
   assert.match(source, /URGÊNCIA: não pergunte, deduza/);
   // a pergunta longa que o lead ignorou 4 vezes não pode voltar
   assert.doesNotMatch(source, /pergunte sobre a operação, por exemplo/);
+});
+
+test('balão cortado e ponte sem pergunta são consertados antes do envio', () => {
+  // Instrução no roteiro não basta: o lead não pode ver frase pela metade
+  // nem ficar sem saber o que responder.
+  assert.match(source, /balaoCortadoNoMeio\(ultimoBalao\)/);
+  assert.match(source, /if \(ateFraseCompleta\) partesResposta\[partesResposta\.length - 1\] = ateFraseCompleta;/);
+  assert.match(source, /apresentaConversa && !resposta\.includes\('\?'\)/);
+  assert.match(source, /\|\|\|Quer que eu veja um horário\?/);
+  // sem isso não dá pra distinguir "terminou" de "bateu no teto de tokens"
+  assert.match(source, /stop_reason: \$\{response\.data\.stop_reason\}/);
 });
 
 test('portão de qualificação é trava de código, não só instrução', () => {

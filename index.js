@@ -33,13 +33,14 @@ const {
   pediuOptOut,
   separarPonteComercial,
   propoeReuniao,
+  balaoCortadoNoMeio,
 } = require('./heuristicas');
 const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPareceCortado } = require('./follow-up-policy');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.36.2';
+const BOT_VERSION = '1.37.0';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -4141,14 +4142,15 @@ Em seguida, proponha a conversa. REGRA CRÍTICA DA PRIMEIRA MENÇÃO: a reunião
 
 Responda em EXATAMENTE 4 partes separadas pelo marcador "|||", UMA frase curta em cada. Esta é a única etapa da conversa que usa 4 balões: é o momento da decisão e cada balão faz um trabalho diferente.
 [1: espelhamento da consequência, com as palavras do lead]|||[2: a prova ao vivo, ligando o tempo de resposta que ELE acabou de receber aqui ao cliente dele, ex: "É esse tempo de resposta que você teve aqui comigo que deixa de acontecer com o seu cliente."]|||[3: proposta APRESENTANDO a conversa e o que ele ganha nela, ex: "Acho que vale uma conversa com um especialista, pra te mostrar o que dá pra automatizar aí."]|||[4: os redutores de risco e a pergunta, ex: "É online, gratuita e sem compromisso. Quer que eu veja um horário?"]
-Balão curto de verdade: se algum passar de uma linha, corte palavra em vez de criar outro balão.
+Balão curto de verdade: escolha desde o começo a frase mais enxuta que diz a mesma coisa, em vez de escrever uma frase longa. NUNCA entregue um balão pela metade: toda frase que você começar precisa terminar, com ponto ou com a interrogação.
 
-DUAS TRAVAS INEGOCIÁVEIS desta etapa (as violações mais comuns aqui):
-- SEMPRE os 3 balões separados por "|||". NUNCA junte espelhamento + ponte + proposta num bloco único de texto corrido, isso vira um parágrafo pesado e derruba a leitura no WhatsApp. Se você escrever tudo sem "|||", está errado.
-- A parte 3 termina em UMA ÚNICA pergunta: "Quer que eu veja um horário?". É PROIBIDO colocar qualquer outra pergunta antes dela nesta etapa. Em especial, NÃO pergunte "Faz sentido eu te falar sobre uma conversa...?", "Posso te apresentar...?" ou similar: APRESENTE a conversa como uma AFIRMAÇÃO (ex: "Acho que vale uma conversa gratuita...") e deixe a única pergunta para o "Quer que eu veja um horário?" no fim.
+TRÊS TRAVAS INEGOCIÁVEIS desta etapa (as violações mais comuns aqui):
+- SEMPRE os 4 balões separados por "|||". NUNCA junte espelhamento + prova + proposta + fechamento num bloco único de texto corrido, isso vira um parágrafo pesado e derruba a leitura no WhatsApp. Se você escrever tudo sem "|||", está errado.
+- A parte 4 é OBRIGATÓRIA e termina em UMA ÚNICA pergunta: "Quer que eu veja um horário?". Sem ela o lead fica sem saber o que fazer e a conversa morre aqui. Nunca encerre a etapa na parte 3.
+- É PROIBIDO colocar qualquer outra pergunta antes dessa. Em especial, NÃO pergunte "Faz sentido eu te falar sobre uma conversa...?", "Posso te apresentar...?" ou similar: APRESENTE a conversa como uma AFIRMAÇÃO (ex: "Acho que vale uma conversa com um especialista...") e deixe a única pergunta para o "Quer que eu veja um horário?" no fim.
 
-Exemplo completo com pet shop:
-"Cliente que chama e vai embora sem resposta é a pior perda, ele já tava decidido a falar com você.|||Esse tipo de coisa dá pra resolver bem com atendimento automático, que responde na hora mesmo quando você tá ocupado.|||Se fizer sentido, a gente oferece uma conversa gratuita e online, pelo Google Meet, de uns 30 minutos com um especialista, sem compromisso: ele olha como funciona o seu atendimento hoje e te mostra o que dá pra automatizar. Quer que eu veja um horário?"
+Exemplo completo com pet shop, nos 4 balões:
+"Cliente que chama e vai embora sem resposta é a pior perda, ele já tava decidido a falar com você.|||É esse tempo de resposta que você teve aqui comigo que deixa de acontecer com o seu cliente quando ninguém pode atender.|||Acho que vale uma conversa com um especialista, pra ele olhar como funciona o seu atendimento hoje e te mostrar o que dá pra automatizar.|||É online, gratuita e sem compromisso, uns 30 minutos pelo Google Meet. Quer que eu veja um horário?"
 
 IMPORTANTE na proposta: retome em uma frase a dor principal que o lead citou, usando as palavras dele sempre que possível. Nunca proponha a reunião de forma genérica se o lead já contou um problema específico.
 
@@ -4767,6 +4769,31 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
           : 'Me conta sobre a sua operação, o que você faz?'}`;
       }
     }
+    // Balão cortado no meio da frase. Visto em produção: a ponte terminou em
+    // "É online, gratuita e sem", e junto com "compromisso" foi embora a
+    // pergunta que fecha a etapa. O lead ficou 5 minutos parado e teve que
+    // perguntar "como funciona?" sozinho. O roteiro já foi corrigido, mas
+    // texto cortado nunca pode chegar ao lead: parece bot quebrado.
+    const partesResposta = resposta.split('|||').map(p => p.trim()).filter(Boolean);
+    const ultimoBalao = partesResposta[partesResposta.length - 1] || '';
+    if (partesResposta.length && balaoCortadoNoMeio(ultimoBalao)) {
+      // recupera até a última frase completa; se não sobrar nada, descarta o balão
+      const ateFraseCompleta = (ultimoBalao.match(/^[\s\S]*[.!?…]/) || [''])[0].trim();
+      if (ateFraseCompleta) partesResposta[partesResposta.length - 1] = ateFraseCompleta;
+      else if (partesResposta.length > 1) partesResposta.pop();
+      log(userPhone, 'warn', `Último balão chegou cortado: "${conteudoParaLog(ultimoBalao.slice(0, 60))}"`);
+      resposta = partesResposta.join('|||');
+    }
+
+    // A ponte sem a pergunta final deixa o lead sem saber o que fazer. Aqui a
+    // regra do roteiro vira trava: se a mensagem apresenta a conversa com o
+    // especialista e não tem NENHUMA pergunta, o fechamento é reposto.
+    const apresentaConversa = /especialista|sem compromisso|conversa gratuita|automatizar/i.test(resposta);
+    if (apresentaConversa && !resposta.includes('?') && !resposta.includes('[ENCERRAR]') && !leadsAgendados.has(userPhone)) {
+      log(userPhone, 'warn', 'Ponte veio sem a pergunta de fechamento; repondo');
+      resposta = `${resposta.replace(/\|+\s*$/, '').trim()}|||Quer que eu veja um horário?`;
+    }
+
     const respostaSeparada = separarPonteComercial(resposta);
     if (respostaSeparada !== resposta) {
       log(userPhone, 'warn', 'Ponte comercial longa dividida automaticamente em 3 balões');
@@ -5128,7 +5155,11 @@ async function chamarClaude(historico, contextoDinamico = '') {
       const duracao = Date.now() - inicio;
       const uso = response.data.usage || {};
       const cacheInfo = uso.cache_read_input_tokens ? ` | cache lido: ${uso.cache_read_input_tokens}` : (uso.cache_creation_input_tokens ? ` | cache criado: ${uso.cache_creation_input_tokens}` : '');
-      console.log(`[Claude] ${duracao}ms | input: ${uso.input_tokens || '?'} tokens | output: ${uso.output_tokens || '?'} tokens${cacheInfo} | msgs enviadas: ${mensagens.length}`);
+      // stop_reason no log: sem ele não dá pra distinguir "o modelo terminou"
+      // de "o modelo bateu no teto de tokens e parou no meio da frase"
+      const paradaAnormal = response.data?.stop_reason && response.data.stop_reason !== 'end_turn'
+        ? ` | stop_reason: ${response.data.stop_reason}` : '';
+      console.log(`[Claude] ${duracao}ms | input: ${uso.input_tokens || '?'} tokens | output: ${uso.output_tokens || '?'} tokens${cacheInfo}${paradaAnormal} | msgs enviadas: ${mensagens.length}`);
       const textoResposta = textoDaResposta(response);
       // Resposta sem bloco de texto (só raciocínio/estruturado): não devolve
       // vazio silencioso — lança pra cair no retry como qualquer falha.

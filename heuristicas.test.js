@@ -23,7 +23,35 @@ const {
   temIntencaoDeCompra,
   pediuOptOut,
   separarPonteComercial,
+  balaoCortadoNoMeio,
 } = require('./heuristicas');
+
+// Bug real (Adriano, 06/08 19:03): a ponte terminou em "É online, gratuita e
+// sem". Perdeu "compromisso" e, junto, o "Quer que eu veja um horário?". O
+// lead ficou 5 minutos parado e teve que perguntar "como funciona?" sozinho.
+test('detecta balão cortado no meio da frase', () => {
+  assert.strictEqual(balaoCortadoNoMeio('É online, gratuita e sem'), true);
+  assert.strictEqual(balaoCortadoNoMeio('Acho que vale uma conversa com'), true);
+  assert.strictEqual(balaoCortadoNoMeio('pra ele te mostrar o que dá pra'), true);
+  assert.strictEqual(balaoCortadoNoMeio(''), true);
+});
+
+// Balão curto sem ponto final é comum e legítimo: se o detector olhasse só a
+// pontuação, engoliria a saudação da abertura e o lead ficaria sem ela.
+test('não confunde balão curto legítimo com balão cortado', () => {
+  assert.strictEqual(balaoCortadoNoMeio('Boa noite, Adriano! 😊'), false);
+  assert.strictEqual(balaoCortadoNoMeio('Perfeito'), false);
+  assert.strictEqual(balaoCortadoNoMeio('Quer que eu veja um horário?'), false);
+  assert.strictEqual(balaoCortadoNoMeio('É online, gratuita e sem compromisso.'), false);
+  assert.strictEqual(balaoCortadoNoMeio('Show, combinado então'), false);
+});
+
+// \b casa entre "ã" e "o" em JS, então "\bo$" acusava toda palavra em "ão".
+test('palavra terminada em "ão" não é lida como balão cortado', () => {
+  for (const frase of ['Show, combinado então', 'Isso não', 'Fica a seu critério, sem pressão', 'Te mando a informação']) {
+    assert.strictEqual(balaoCortadoNoMeio(frase), false, `falso positivo em: ${frase}`);
+  }
+});
 
 test('mantém 9h quando o lead explicita horário de MS', () => {
   assert.strictEqual(horaCampoGrandeDoPedido('amanhã às 9h MS', 9), 9);
