@@ -66,6 +66,65 @@ test('lead que volta é reconhecido: histórico do banco é reidratado na memór
   assert.match(source, /l\.deleted_at IS NULL/);
 });
 
+test('a cada dado que tira, o bot devolve algo, e demonstra o produto ao vivo', () => {
+  // Lida da ótica do lead: perguntas em sequência sem devolutiva fazem ele
+  // sentir que só ele trabalha, e é onde a conversa morre.
+  assert.match(source, /REGRA DA TROCA JUSTA/);
+  assert.match(source, /a cada informação que você TIRA do lead, DEVOLVA uma/);
+  assert.match(source, /REGRA DA DEMONSTRAÇÃO AO VIVO/);
+  assert.match(source, /você É o produto funcionando/);
+});
+
+test('pergunta de preço tem resposta com motivo, não esquiva', () => {
+  assert.match(source, /"Quanto custa\? \/ Qual o valor\? \/ Qual o preço\?"/);
+  assert.match(source, /NUNCA responda só "o especialista te fala"/);
+  assert.match(source, /porque depende do tamanho do seu atendimento/);
+});
+
+test('confirmação do número é afirmação, para o turno ter uma pergunta só', () => {
+  assert.match(source, /a confirmação do número é AFIRMAÇÃO, não pergunta/);
+  assert.doesNotMatch(source, /Vou usar esse número mesmo pra contato, tá\?/);
+});
+
+test('a ponte usa 4 balões, com a pergunta isolada no último', () => {
+  assert.match(source, /Responda em EXATAMENTE 4 partes separadas pelo marcador "\|\|\|"/);
+  assert.match(source, /única etapa da conversa que usa 4 balões/);
+  assert.match(source, /a prova ao vivo, ligando o tempo de resposta que ELE acabou de receber/);
+  // "Acho que vale" (consultor dando opinião) em vez de "Ia te sugerir"
+  // (recuo na hora do fechamento) ou "Vou te sugerir" (anuncia em vez de fazer).
+  assert.match(source, /Acho que vale uma conversa com um especialista/);
+  assert.doesNotMatch(source, /[Ii]a te sugerir/);
+});
+
+test('qualificação tem três dados obrigatórios e portão de saída', () => {
+  // A estrutura antiga tinha 9 etapas, 3 delas "opcionais", sem critério de
+  // conclusão: o modelo decidia sozinho quando propor a reunião.
+  assert.match(source, /2\. QUALIFICAÇÃO: OS TRÊS DADOS OBRIGATÓRIOS/);
+  assert.match(source, /DADO 1, o que o lead faz/);
+  assert.match(source, /DADO 2, como ele atende hoje/);
+  assert.match(source, /DADO 3, a dor principal/);
+  assert.match(source, /PORTÃO DE SAÍDA/);
+  // urgência deixa de ser pergunta e passa a ser deduzida
+  assert.match(source, /URGÊNCIA: não pergunte, deduza/);
+  // a pergunta longa que o lead ignorou 4 vezes não pode voltar
+  assert.doesNotMatch(source, /pergunte sobre a operação, por exemplo/);
+});
+
+test('portão de qualificação é trava de código, não só instrução', () => {
+  assert.match(source, /propoeReuniao\(resposta\) && \(!negocioConhecido \|\| !dorConhecidaAgora\)/);
+  assert.match(source, /NÃO proponha reunião, conversa com especialista nem horário nesta mensagem/);
+});
+
+test('cada origem tem abertura própria, terminando na mesma pergunta', () => {
+  assert.match(source, /LEAD INDICADO/);
+  assert.match(source, /LEAD QUE CHEGOU \$\{canal\.toUpperCase\(\)\}/);
+  assert.match(source, /const PERGUNTA_DADO_2 = 'Hoje quem responde o WhatsApp aí, é você mesmo\?'/);
+  // Indicação, Site/Instagram e o caso com nome usam a MESMA pergunta final:
+  // a origem muda como se chega, não o que se precisa saber.
+  const usos = source.split('${PERGUNTA_DADO_2}').length - 1;
+  assert.ok(usos >= 3, `PERGUNTA_DADO_2 deveria ser usada em 3+ aberturas, usada em ${usos}`);
+});
+
 test('não repete pergunta que o lead não respondeu, nem na conversa nem no follow-up', () => {
   // Visto em produção: o segmento foi perguntado 4 vezes seguidas (abertura,
   // 2 follow-ups e a resposta a uma dúvida). É o que mais denuncia robô.

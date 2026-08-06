@@ -540,7 +540,20 @@ function separarPonteComercial(texto) {
   ].filter(Boolean).join('|||');
 }
 
+// Detecta se a resposta está propondo a reunião (etapa da ponte do roteiro).
+// Alimenta o PORTÃO DE QUALIFICAÇÃO: propor reunião sem saber o segmento e a
+// dor gera proposta genérica, que o próprio roteiro proíbe e que não converte.
+// Deliberadamente conservador: só acusa quando o texto tem a assinatura clara
+// da proposta, para nunca bloquear uma menção solta a "especialista".
+function propoeReuniao(texto) {
+  const t = String(texto || '').toLowerCase();
+  if (/quer que eu (veja|reserve|marque|separe) (um |o )?hor[áa]rio/.test(t)) return true;
+  if (/(conversa|reuni[ãa]o) (gratuita|sem compromisso)/.test(t) && /especialista/.test(t)) return true;
+  return false;
+}
+
 module.exports = {
+  propoeReuniao,
   textoDoConteudo,
   horaCampoGrandeDoPedido,
   temIntencaoDeCompra,

@@ -3,6 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const {
+  propoeReuniao,
   textoDoConteudo,
   horaCampoGrandeDoPedido,
   escolherSlot,
@@ -608,4 +609,21 @@ test('preserva respostas comuns e pontes que já estão separadas', () => {
   );
   const separada = 'Entendo a perda.|||Isso dá pra automatizar.|||Quer que eu veja um horário?';
   assert.strictEqual(separarPonteComercial(separada), separada);
+})
+
+test('detecta proposta de reunião para o portão de qualificação', () => {
+  assert.strictEqual(propoeReuniao('Quer que eu veja um horário?'), true);
+  assert.strictEqual(propoeReuniao('Quer que eu reserve o horário?'), true);
+  assert.strictEqual(
+    propoeReuniao('a gente oferece uma conversa gratuita, de 30 min com um especialista'),
+    true
+  );
+})
+
+test('portão não bloqueia menção solta a especialista nem pergunta comum', () => {
+  // Conservador de propósito: só acusa a assinatura clara da proposta.
+  assert.strictEqual(propoeReuniao('O especialista pode te explicar isso melhor depois.'), false);
+  assert.strictEqual(propoeReuniao('Hoje quem responde o WhatsApp aí, é você mesmo?'), false);
+  assert.strictEqual(propoeReuniao(''), false);
+  assert.strictEqual(propoeReuniao(null), false);
 })
