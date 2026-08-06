@@ -42,7 +42,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.38.0';
+const BOT_VERSION = '1.38.1';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -1990,6 +1990,7 @@ setInterval(async () => {
        FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
        WHERE t.client_id = $1 AND t.status = 'pendente' AND t.aviso_enviado = FALSE
          AND t.due_at <= NOW()
+         AND (t.lead_id IS NULL OR l.deleted_at IS NULL)
        ORDER BY t.due_at ASC LIMIT 20`,
       [CLIENT_ID]
     );
@@ -2097,10 +2098,23 @@ async function esquecerLeadNoBot(phone) {
 }
 
 // Apaga TUDO do lead (direito ao esquecimento): tarefas, análises de reunião,
-// conversas (CASCADE) e a própria linha. Usado pelo endpoint definitivo e pelo purge.
+// auditoria de envios, conversas e notas (CASCADE) e a própria linha.
+// Usado pelo endpoint definitivo e pelo purge.
 async function excluirLeadDefinitivo(leadId) {
+  // outbound_messages e bot_state são chaveados por telefone, não por lead_id,
+  // então nenhum CASCADE os alcança: sem isto o texto das mensagens e o número
+  // continuavam no banco depois da exclusão definitiva.
+  const { rows } = await pool.query('SELECT phone FROM leads WHERE id = $1 AND client_id = $2', [leadId, CLIENT_ID]);
+  const phone = rows[0]?.phone;
   await pool.query('DELETE FROM tasks WHERE lead_id = $1 AND client_id = $2', [leadId, CLIENT_ID]).catch(() => {});
   await pool.query('DELETE FROM meeting_analyses WHERE lead_id = $1', [leadId]).catch(() => {}); // tabela do agente (mesmo banco); pode não existir
+  if (phone) {
+    await pool.query('DELETE FROM outbound_messages WHERE client_id = $1 AND phone = $2', [CLIENT_ID, phone]).catch(() => {});
+    await pool.query('DELETE FROM bot_state WHERE client_id = $1 AND phone = $2', [CLIENT_ID, phone]).catch(() => {});
+    // opt_outs NÃO entra aqui de propósito: quem pediu pra não ser mais
+    // contatado tem que continuar protegido depois da exclusão do cadastro,
+    // senão o bot volta a escrever pra ele no próximo contato.
+  }
   await pool.query('DELETE FROM leads WHERE id = $1 AND client_id = $2', [leadId, CLIENT_ID]);
 }
 
@@ -2345,7 +2359,7 @@ app.get('/api/leads/:id/notes-log', verificarToken, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT n.id, n.texto, n.autor, n.created_at
        FROM lead_notes n JOIN leads l ON l.id = n.lead_id
-       WHERE n.lead_id = $1 AND l.client_id = $2
+       WHERE n.lead_id = $1 AND l.client_id = $2 AND l.deleted_at IS NULL
        ORDER BY n.created_at DESC`,
       [req.params.id, process.env.CLIENT_ID]
     );
@@ -2604,6 +2618,7 @@ app.get('/api/tasks', verificarToken, async (req, res) => {
               l.name AS lead_name, l.business_type AS lead_business_type, l.phone AS lead_phone
        FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
        WHERE t.client_id = $1 ${filtro}
+         AND (t.lead_id IS NULL OR l.deleted_at IS NULL)
        ORDER BY CASE WHEN t.status = 'pendente' THEN 0 ELSE 1 END, t.due_at ASC
        LIMIT 500`,
       params
@@ -2707,7 +2722,7 @@ app.get('/api/leads/:id/conversation', verificarToken, async (req, res) => {
       `SELECT c.messages, c.updated_at, l.phone, l.created_at AS lead_created_at
        FROM conversations c
        JOIN leads l ON l.id = c.lead_id AND l.client_id = c.client_id
-       WHERE c.lead_id = $1 AND c.client_id = $2
+       WHERE c.lead_id = $1 AND c.client_id = $2 AND l.deleted_at IS NULL
        ORDER BY c.updated_at DESC LIMIT 1`,
       [req.params.id, process.env.CLIENT_ID]
     );
@@ -2824,14 +2839,17 @@ app.post('/api/analise', verificarToken, async (req, res) => {
                     COUNT(*) FILTER (WHERE status = 'No-show')::int AS no_show
                   FROM leads WHERE deleted_at IS NULL AND client_id = $1`, [CLIENT_ID]),
       pool.query(`SELECT settings->'metas' AS metas FROM client_settings WHERE client_id = $1`, [CLIENT_ID]).catch(() => ({ rows: [] })),
-      pool.query(`SELECT COUNT(*) FILTER (WHERE status = 'pendente')::int AS pendentes,
-                    COUNT(*) FILTER (WHERE status = 'pendente' AND due_at < NOW())::int AS atrasadas
-                  FROM tasks WHERE client_id = $1`, [CLIENT_ID]).catch(() => ({ rows: [{ pendentes: 0, atrasadas: 0 }] })),
+      pool.query(`SELECT COUNT(*) FILTER (WHERE t.status = 'pendente')::int AS pendentes,
+                    COUNT(*) FILTER (WHERE t.status = 'pendente' AND t.due_at < NOW())::int AS atrasadas
+                  FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
+                  WHERE t.client_id = $1 AND (t.lead_id IS NULL OR l.deleted_at IS NULL)`, [CLIENT_ID]).catch(() => ({ rows: [{ pendentes: 0, atrasadas: 0 }] })),
       // Motivos de perda: registrados como tarefa "Perdido: <motivo>" quando o
       // vendedor fecha o desfecho. É o "por que estamos perdendo" que antes não
       // chegava ao Analista IA mesmo já estando gravado.
-      pool.query(`SELECT trim(substring(titulo from 'Perdido:(.*)')) AS motivo, COUNT(*)::int AS n
-                  FROM tasks WHERE client_id = $1 AND titulo LIKE 'Perdido:%'
+      pool.query(`SELECT trim(substring(t.titulo from 'Perdido:(.*)')) AS motivo, COUNT(*)::int AS n
+                  FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
+                  WHERE t.client_id = $1 AND t.titulo LIKE 'Perdido:%'
+                    AND (t.lead_id IS NULL OR l.deleted_at IS NULL)
                   GROUP BY 1 ORDER BY n DESC`, [CLIENT_ID]).catch(() => ({ rows: [] })),
     ]);
 
@@ -2856,7 +2874,8 @@ app.post('/api/analise', verificarToken, async (req, res) => {
          FROM meeting_analyses ma
          JOIN vendedores v ON v.id = ma.vendedor_id
          LEFT JOIN meeting_roda mr ON mr.meeting_id = ma.id
-         WHERE ma.client_id = $1
+         LEFT JOIN leads l ON l.id = ma.lead_id
+         WHERE ma.client_id = $1 AND (ma.lead_id IS NULL OR l.deleted_at IS NULL)
          GROUP BY v.nome ORDER BY reunioes_analisadas DESC LIMIT 10`,
         [CLIENT_ID]
       );

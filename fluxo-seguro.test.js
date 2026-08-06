@@ -36,6 +36,33 @@ test('lead quente registra o painel antes de tentar o WhatsApp', () => {
   assert.match(trecho, /notificacao === 'existing'/);
 });
 
+// Bug real: a exclusão marcava deleted_at e o card sumia do Kanban, mas as
+// tarefas, o histórico e as notas do lead continuavam aparecendo. Pior: o
+// lembrete de tarefa por WhatsApp continuava cobrando o vendedor sobre um
+// lead que ele tinha acabado de excluir.
+test('lead na lixeira some de todas as leituras, não só do Kanban', () => {
+  const semDeletado = /\(t\.lead_id IS NULL OR l\.deleted_at IS NULL\)/g;
+  const ocorrencias = (source.match(semDeletado) || []).length;
+  assert.ok(ocorrencias >= 4, `esperava o filtro em tasks (lista, lembrete, contadores, motivos de perda), achei ${ocorrencias}`);
+  // histórico da conversa e log de anotações
+  assert.match(source, /WHERE c\.lead_id = \$1 AND c\.client_id = \$2 AND l\.deleted_at IS NULL/);
+  assert.match(source, /WHERE n\.lead_id = \$1 AND l\.client_id = \$2 AND l\.deleted_at IS NULL/);
+  // BI de reuniões não pode contar reunião de lead excluído
+  assert.match(source, /WHERE ma\.client_id = \$1 AND \(ma\.lead_id IS NULL OR l\.deleted_at IS NULL\)/);
+});
+
+test('exclusão definitiva alcança o que não tem CASCADE, menos o opt-out', () => {
+  const trecho = source.slice(
+    source.indexOf('async function excluirLeadDefinitivo'),
+    source.indexOf('// DELETE /api/leads/:id — manda pra lixeira')
+  );
+  // chaveados por telefone: nenhum CASCADE chega neles
+  assert.match(trecho, /DELETE FROM outbound_messages WHERE client_id = \$1 AND phone = \$2/);
+  assert.match(trecho, /DELETE FROM bot_state WHERE client_id = \$1 AND phone = \$2/);
+  // e o opt-out precisa sobreviver, senão o bot volta a escrever pra quem pediu pra parar
+  assert.doesNotMatch(trecho, /DELETE FROM opt_outs/);
+});
+
 test('lead excluído que retorna começa com dados comerciais limpos', () => {
   const trecho = source.slice(
     source.indexOf('async function registrarLeadInicial'),
