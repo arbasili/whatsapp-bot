@@ -521,23 +521,41 @@ function separarPonteComercial(texto) {
   if (!/quer que eu veja um hor[áa]rio\?/i.test(original)) return original;
   if (!/(atendimento autom[áa]tico|automatizar|google meet|especialista)/i.test(original)) return original;
 
-  const inicioSolucao = original.search(
-    /\b(?:isso|essa situa[çc][ãa]o|esse problema|esse tipo de (?:coisa|situa[çc][ãa]o))\s+(?:d[áa]|pode)(?=\s)/i,
-  );
-  if (inicioSolucao <= 0) return original;
+  // Marcadores de início de cada balão da ponte, na ordem em que aparecem no
+  // texto. Cobrem a redação antiga ("isso dá pra resolver...", "pra te ajudar")
+  // e a nova da v1.35.0 (prova ao vivo, "acho que vale", "é online").
+  // A versão anterior desta função só conhecia a redação antiga: quando o
+  // roteiro mudou, ela parou de dividir e a ponte inteira ia num balão só.
+  // Visto em produção.
+  // Dois cuidados nestes padrões: \b NÃO funciona antes de letra acentuada em
+  // JS (É não é \w, então \bÉ nunca casa), e [ée] casaria também com a
+  // conjunção "e" ("gratuita e online"). Por isso os marcadores acentuados
+  // usam lookbehind de início de frase em vez de \b.
+  const MARCADORES_PONTE = [
+    /\b(?:isso|essa situa[çc][ãa]o|esse problema|esse tipo de (?:coisa|situa[çc][ãa]o))\s+(?:d[áa]|pode)(?=\s)|(?<=[.!?]\s{1,3})(?:[ée]|foi)\s+esse tempo de resposta/i,
+    /\b(?:acho que vale|ia te sugerir|vou te sugerir|pra te ajudar|para te ajudar|por isso|se fizer sentido|a gente oferece)\b/i,
+    /(?<=[.!?]\s{1,3})[ée]\s+(?:online|gratuita|gr[áa]tis)\b/i,
+  ];
 
-  const trechoAposSolucao = original.slice(inicioSolucao);
-  const propostaRelativa = trechoAposSolucao.search(
-    /\b(?:pra te ajudar|para te ajudar|por isso|se fizer sentido|a gente oferece)\b/i,
-  );
-  if (propostaRelativa <= 0) return original;
+  const cortes = [];
+  let deslocamento = 0;
+  for (const marcador of MARCADORES_PONTE) {
+    const relativo = original.slice(deslocamento).search(marcador);
+    if (relativo <= 0) continue;
+    const absoluto = deslocamento + relativo;
+    cortes.push(absoluto);
+    deslocamento = absoluto + 1; // o próximo marcador tem que vir depois deste
+  }
+  if (!cortes.length) return original;
 
-  const inicioProposta = inicioSolucao + propostaRelativa;
-  return [
-    original.slice(0, inicioSolucao).trim(),
-    original.slice(inicioSolucao, inicioProposta).trim(),
-    original.slice(inicioProposta).trim(),
-  ].filter(Boolean).join('|||');
+  const partes = [];
+  let anterior = 0;
+  for (const corte of cortes) {
+    partes.push(original.slice(anterior, corte).trim());
+    anterior = corte;
+  }
+  partes.push(original.slice(anterior).trim());
+  return partes.filter(Boolean).join('|||');
 }
 
 // Detecta se a resposta está propondo a reunião (etapa da ponte do roteiro).

@@ -627,3 +627,23 @@ test('portão não bloqueia menção solta a especialista nem pergunta comum', (
   assert.strictEqual(propoeReuniao(''), false);
   assert.strictEqual(propoeReuniao(null), false);
 })
+
+test('divide a ponte na redação nova (v1.35.0) em quatro balões', () => {
+  // Texto real de produção: a ponte saiu num balão só porque esta função
+  // reconhecia apenas a redação antiga ("isso dá pra resolver", "pra te ajudar").
+  const resposta = 'Isso é bem comum quando duas pessoas cuidam do WhatsApp junto com o resto do trabalho, a mensagem se perde no meio da correria. É esse tempo de resposta rápido que você teve aqui comigo que deixa de acontecer com o seu cliente quando bate o corre. Acho que vale uma conversa com um especialista, pra te mostrar como organizar esse atendimento e cortar essa demora. É online, gratuita e sem compromisso. Quer que eu veja um horário?';
+  const partes = separarPonteComercial(resposta).split('|||');
+  assert.strictEqual(partes.length, 4);
+  assert.match(partes[1], /É esse tempo de resposta/);
+  assert.match(partes[2], /Acho que vale/);
+  assert.match(partes[3], /Quer que eu veja um horário\?/);
+})
+
+test('não confunde a conjunção "e" com o verbo "é" ao cortar a ponte', () => {
+  // "gratuita e online" nao pode virar ponto de corte: \b nao funciona antes
+  // de letra acentuada em JS, e [ée] casaria com a conjuncao.
+  const resposta = 'Cliente que some é a pior perda. Isso dá pra resolver com atendimento automático. Por isso a gente oferece uma conversa gratuita e online com um especialista. Quer que eu veja um horário?';
+  const partes = separarPonteComercial(resposta).split('|||');
+  assert.strictEqual(partes.length, 3);
+  assert.match(partes[2], /gratuita e online/);
+})

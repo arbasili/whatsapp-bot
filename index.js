@@ -39,7 +39,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.36.0';
+const BOT_VERSION = '1.36.1';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -4427,8 +4427,14 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
 
     // Extrair nome direto do histórico
     // Fonte primária: nome capturado via marcador [NOME: X] durante a conversa
-    // Fallback: extração por heurística do histórico
-    const nome = agendamentos[userPhone]?.nomeConfirmado || extrairNomeLead(conversas[userPhone]);
+    // Fallback 1: extração por heurística do histórico
+    // Fallback 2: nome do perfil do WhatsApp (já validado em nomeDoWebhook).
+    //   Sem ele, o lead que chegou com nome no perfil e nunca precisou dizer o
+    //   nome fechava a reunião como "Fechado, você!" e ia pro CRM como
+    //   "Não informado", apagando o nome que já estava lá. Visto em produção.
+    const nome = agendamentos[userPhone]?.nomeConfirmado
+      || extrairNomeLead(conversas[userPhone])
+      || nomeDoWebhook;
 
     // Gerar resumo + campos estruturados com Claude
     let resumoConversa = 'Resumo não disponível';
@@ -4542,9 +4548,12 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       lembrete30minEnviado: false
     };
 
-    // Atualizar banco com os dados do agendamento
+    // Atualizar banco com os dados do agendamento.
+    // 'Nome' entra só quando existe: gravar "Não informado" APAGA o nome que já
+    // estava no CRM (ex: veio do perfil do WhatsApp no registro inicial). Visto
+    // em produção: card virou "Não informado" ao entrar em Reunião agendada.
     atualizarLead(userPhone, {
-      'Nome': nome || 'Não informado',
+      ...(nome ? { 'Nome': nome } : {}),
       'Email': emailLead,
       'Tipo de Negócio': tipoNegocio,
       'Dor': dorPrincipal,
