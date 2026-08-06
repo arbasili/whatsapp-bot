@@ -241,7 +241,23 @@ test('continua extraindo tipo de negócio de mensagem real do lead', () => {
     { role: 'assistant', content: 'O que você faz?' },
     { role: 'user', content: 'tenho um pet shop aqui no bairro' },
   ];
-  assert.strictEqual(extrairTipoNegocio(conversa), 'um pet shop aqui no bairro');
+  assert.strictEqual(extrairTipoNegocio(conversa), 'Pet shop aqui no bairro');
+});
+
+// Bug real (Adriano, 06/08): o card do Kanban mostrava "uma empresa de tecn…"
+// como Segmento. Na alternância dos padrões "tenho" casa antes de "tenho uma",
+// então o artigo entrava na captura, e o texto vem todo em minúscula porque a
+// busca é feita sobre o histórico lowercased.
+test('segmento sai sem artigo e capitalizado, no formato que a IA de resumo usa', () => {
+  const casos = [
+    ['Eu tenho uma empresa de tecnologia', 'Empresa de tecnologia'],
+    ['tenho um petshop', 'Petshop'],
+    ['sou dono de uma clínica odontológica', 'Clínica odontológica'],
+    ['minha empresa é uma software house', 'Software house'],
+  ];
+  for (const [fala, esperado] of casos) {
+    assert.strictEqual(extrairTipoNegocio(conversaCom('Adriano', fala)), esperado, `falhou em: ${fala}`);
+  }
 });
 
 // Bug real (Guilherme, seguradora): "tenho muitas dúvidas" casava o padrão de
@@ -253,7 +269,7 @@ test('ignora "tenho muitas dúvidas" e pega o negócio real (seguradora)', () =>
     'pelo fato de ser uma IA nao sei se dá conta. pois tenho muitas dúvidas',
     'Tenho uma seguradora',
   );
-  assert.strictEqual(extrairTipoNegocio(conversa), 'seguradora');
+  assert.strictEqual(extrairTipoNegocio(conversa), 'Seguradora');
 });
 
 // ─── extrairUrgencia: "hoje"/"agora" casuais não são urgência ────────────────

@@ -149,20 +149,36 @@ function extrairTipoNegocio(historico) {
   const NAO_EH_NEGOCIO = /\b(d[úu]vidas?|perguntas?|interesse|pressa|medo|receio|certeza|vontade|ideias?|problemas?|dificuldades?|muita|muitas|muito|muitos|v[áa]ri[oa]s?|alguns?|algumas?|nenhum[a]?|tempo)\b/i;
   const ehNegocio = txt => txt.length >= 3 && !NAO_EH_NEGOCIO.test(txt);
 
+  // O trecho capturado vem em minúsculas e ainda traz o artigo colado: em
+  // "tenho uma empresa de tecnologia", "tenho" casa antes de "tenho uma" na
+  // alternância, então a captura é "uma empresa de tecnologia". O CRM gravava
+  // isso literal e o card do Kanban mostrava "uma empresa de tecn…".
+  // Corrigir a ordem dos padrões mexeria em todos eles; normalizar a saída
+  // resolve num lugar só, e no MESMO formato que a IA de resumo produz
+  // ("Empresa de tecnologia", "Clínica odontológica").
+  const normalizarSegmento = txt => {
+    const limpo = txt.replace(/^(?:uma?|uns|umas|os?|as?|meu|minha|meus|minhas)\s+/i, '').trim();
+    return limpo ? limpo.charAt(0).toUpperCase() + limpo.slice(1) : limpo;
+  };
+
   for (const padrao of padroes) {
     // 'g' pra varrer TODAS as ocorrências, não só a 1ª: a primeira pode ser um
     // falso positivo ("tenho muitas dúvidas") e o negócio vir logo em seguida.
     const rx = new RegExp(padrao.source, 'gi');
     let m;
     while ((m = rx.exec(mensagensUsuario)) !== null) {
-      const cand = (m[1] || '').trim();
+      // normaliza ANTES de validar: tirar o artigo pode encurtar o candidato
+      const cand = normalizarSegmento((m[1] || '').trim());
       if (ehNegocio(cand)) return cand;
       if (m.index === rx.lastIndex) rx.lastIndex++; // guarda contra match vazio (loop infinito)
     }
   }
 
   const confirmacaoBot = respostasBot.match(/(?:^|\s)([\w\s]{3,30})\s+(?:é um negócio|é uma área|é um segmento)/i);
-  if (confirmacaoBot && ehNegocio(confirmacaoBot[1].trim())) return confirmacaoBot[1].trim();
+  if (confirmacaoBot) {
+    const cand = normalizarSegmento(confirmacaoBot[1].trim());
+    if (ehNegocio(cand)) return cand;
+  }
 
   return null;
 }
