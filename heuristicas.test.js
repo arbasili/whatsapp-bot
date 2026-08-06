@@ -24,6 +24,7 @@ const {
   pediuOptOut,
   separarPonteComercial,
   balaoCortadoNoMeio,
+  normalizarSegmento,
   quebrasDeLinhaViramBaloes,
   removerMuletaRepetida,
 } = require('./heuristicas');
@@ -321,6 +322,25 @@ test('continua extraindo tipo de negócio de mensagem real do lead', () => {
 // como Segmento. Na alternância dos padrões "tenho" casa antes de "tenho uma",
 // então o artigo entrava na captura, e o texto vem todo em minúscula porque a
 // busca é feita sobre o histórico lowercased.
+// O mesmo lead aparecia como "Empresa de tecnologia" numa coluna do Kanban e
+// "Empresa de Tecnologia" na seguinte: a heurística e a IA de resumo escrevem
+// no mesmo campo e cada uma usava um formato.
+test('segmento tem um formato só: frase, não título', () => {
+  assert.strictEqual(normalizarSegmento('Empresa de Tecnologia'), 'Empresa de tecnologia');
+  assert.strictEqual(normalizarSegmento('Assistência de Informática'), 'Assistência de informática');
+  assert.strictEqual(normalizarSegmento('uma empresa de tecnologia'), 'Empresa de tecnologia');
+  assert.strictEqual(normalizarSegmento('Clínica Odontológica e Estética'), 'Clínica odontológica e estética');
+  assert.strictEqual(normalizarSegmento(''), '');
+  assert.strictEqual(normalizarSegmento(null), '');
+});
+
+// Sigla e marca não são substantivo comum: baixar tudo estragaria o rótulo.
+test('sigla e marca no segmento ficam intactas', () => {
+  assert.strictEqual(normalizarSegmento('Empresa de TI'), 'Empresa de TI');
+  assert.strictEqual(normalizarSegmento('Consultoria de ERP'), 'Consultoria de ERP');
+  assert.strictEqual(normalizarSegmento('Plataforma SaaS'), 'Plataforma SaaS');
+});
+
 test('segmento sai sem artigo e capitalizado, no formato que a IA de resumo usa', () => {
   const casos = [
     ['Eu tenho uma empresa de tecnologia', 'Empresa de tecnologia'],

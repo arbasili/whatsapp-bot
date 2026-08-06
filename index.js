@@ -34,6 +34,7 @@ const {
   separarPonteComercial,
   propoeReuniao,
   balaoCortadoNoMeio,
+  normalizarSegmento,
   quebrasDeLinhaViramBaloes,
   removerMuletaRepetida,
 } = require('./heuristicas');
@@ -42,7 +43,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.38.1';
+const BOT_VERSION = '1.38.2';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -1109,7 +1110,7 @@ async function gerarResumoParcial(phone) {
     const dados = JSON.parse(m[0]);
 
     const atualizacoes = {};
-    if (dados.tipo_negocio) atualizacoes['Tipo de Negócio'] = dados.tipo_negocio;
+    if (dados.tipo_negocio) atualizacoes['Tipo de Negócio'] = normalizarSegmento(dados.tipo_negocio);
     if (dados.dor) atualizacoes['Dor'] = dados.dor;
     if (Object.keys(atualizacoes).length > 0) await atualizarLead(phone, atualizacoes);
 
@@ -4484,7 +4485,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
           max_tokens: 400,
           messages: mesclarTurnosConsecutivos([
             ...historicoParaResumo,
-            { role: 'user', content: `Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "o segmento do negócio em poucas palavras e capitalizado, ex: Empresa de tecnologia, Clínica odontológica, Pet shop, Software house (um rótulo curto de 2 a 4 palavras, NUNCA uma frase descritiva com detalhes do que a empresa faz)", "dor": "...", "urgencia": "imediata ou próximos dias ou próximos meses", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}.${tipoNegocio ? ` O tipo de negócio já identificado é: "${tipoNegocio}" — use isso no campo tipo_negocio.` : ''}${dorPrincipal ? ` A dor principal relatada foi: "${dorPrincipal.slice(0, 150)}" — use isso como base para o campo dor.` : ''}${urgenciaLead ? ` A urgência identificada é: "${urgenciaLead}" — use EXATAMENTE esse valor no campo urgencia.` : ' No campo urgencia, use EXATAMENTE um desses três valores: "imediata" (o lead demonstra PRESSA explícita em resolver — quer começar já, cobra rapidez; perda ativa sozinha não basta se ele não mostra pressa, ex: lead que adia a reunião sem necessidade não é imediata), "próximos dias" (dor real e disposição de resolver em breve, sem pressa explícita), "próximos meses" (sem urgência clara).'} No resumo, NÃO inclua o horário ou data do agendamento (isso já fica em coluna própria). Foque no perfil do lead: negócio, dor principal, contexto e urgência. Se algum campo não estiver claro na conversa, use string vazia.` }
+            { role: 'user', content: `Com base nessa conversa, responda APENAS com um JSON válido, sem texto antes ou depois, no formato: {"tipo_negocio": "o segmento do negócio em poucas palavras, com maiúscula APENAS na primeira letra do rótulo e o resto em minúscula, ex: Empresa de tecnologia, Clínica odontológica, Pet shop, Software house (um rótulo curto de 2 a 4 palavras, NUNCA uma frase descritiva com detalhes do que a empresa faz, e NUNCA com cada palavra capitalizada como em inglês)", "dor": "...", "urgencia": "imediata ou próximos dias ou próximos meses", "resumo": "resumo de 3 a 5 linhas para o vendedor, sem nome/email/telefone"}.${tipoNegocio ? ` O tipo de negócio já identificado é: "${tipoNegocio}" — use isso no campo tipo_negocio.` : ''}${dorPrincipal ? ` A dor principal relatada foi: "${dorPrincipal.slice(0, 150)}" — use isso como base para o campo dor.` : ''}${urgenciaLead ? ` A urgência identificada é: "${urgenciaLead}" — use EXATAMENTE esse valor no campo urgencia.` : ' No campo urgencia, use EXATAMENTE um desses três valores: "imediata" (o lead demonstra PRESSA explícita em resolver — quer começar já, cobra rapidez; perda ativa sozinha não basta se ele não mostra pressa, ex: lead que adia a reunião sem necessidade não é imediata), "próximos dias" (dor real e disposição de resolver em breve, sem pressa explícita), "próximos meses" (sem urgência clara).'} No resumo, NÃO inclua o horário ou data do agendamento (isso já fica em coluna própria). Foque no perfil do lead: negócio, dor principal, contexto e urgência. Se algum campo não estiver claro na conversa, use string vazia.` }
           ])
         },
         { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 20000 }
@@ -4497,7 +4498,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       if (jsonMatch) {
         try {
           const dados = JSON.parse(jsonMatch[0]);
-          tipoNegocio = dados.tipo_negocio || '';
+          tipoNegocio = normalizarSegmento(dados.tipo_negocio);
           dorPrincipal = dados.dor || '';
           urgenciaLead = dados.urgencia || '';
           resumoConversa = dados.resumo || 'Resumo não disponível';

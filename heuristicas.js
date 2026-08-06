@@ -110,6 +110,31 @@ function escolherSlot(texto, slots) {
   return null;
 }
 
+// Formato ÚNICO do campo Segmento no CRM. Duas coisas escrevem nesse campo, a
+// heurística abaixo e a IA de resumo, e cada uma escrevia de um jeito: o mesmo
+// lead aparecia como "Empresa de tecnologia" numa coluna do Kanban e
+// "Empresa de Tecnologia" na seguinte.
+// O padrão é frase, não título: português não põe maiúscula em substantivo
+// comum como o inglês faz, então "Empresa de tecnologia" é a forma correta.
+// Também tira o artigo colado pela captura ("uma empresa de tecnologia"), que
+// vinha porque "tenho" casa antes de "tenho uma" na alternância dos padrões.
+// Palavra com mais de uma maiúscula é sigla ou marca (TI, ERP, SaaS, iFood) e
+// fica intacta.
+function normalizarSegmento(texto) {
+  const limpo = String(texto || '')
+    .replace(/^(?:uma?|uns|umas|os?|as?|meu|minha|meus|minhas)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!limpo) return '';
+  return limpo
+    .split(' ')
+    .map((palavra, i) => {
+      if (i === 0) return palavra.charAt(0).toUpperCase() + palavra.slice(1);
+      return (palavra.match(/[A-ZÀ-ÖØ-Þ]/g) || []).length > 1 ? palavra : palavra.toLowerCase();
+    })
+    .join(' ');
+}
+
 // Extrai o tipo de negócio do lead a partir da conversa
 function extrairTipoNegocio(historico) {
   if (!historico || historico.length < 3) return null;
@@ -148,18 +173,6 @@ function extrairTipoNegocio(historico) {
   // costuma ser o negócio real (ex.: logo depois o lead diz "tenho uma seguradora").
   const NAO_EH_NEGOCIO = /\b(d[úu]vidas?|perguntas?|interesse|pressa|medo|receio|certeza|vontade|ideias?|problemas?|dificuldades?|muita|muitas|muito|muitos|v[áa]ri[oa]s?|alguns?|algumas?|nenhum[a]?|tempo)\b/i;
   const ehNegocio = txt => txt.length >= 3 && !NAO_EH_NEGOCIO.test(txt);
-
-  // O trecho capturado vem em minúsculas e ainda traz o artigo colado: em
-  // "tenho uma empresa de tecnologia", "tenho" casa antes de "tenho uma" na
-  // alternância, então a captura é "uma empresa de tecnologia". O CRM gravava
-  // isso literal e o card do Kanban mostrava "uma empresa de tecn…".
-  // Corrigir a ordem dos padrões mexeria em todos eles; normalizar a saída
-  // resolve num lugar só, e no MESMO formato que a IA de resumo produz
-  // ("Empresa de tecnologia", "Clínica odontológica").
-  const normalizarSegmento = txt => {
-    const limpo = txt.replace(/^(?:uma?|uns|umas|os?|as?|meu|minha|meus|minhas)\s+/i, '').trim();
-    return limpo ? limpo.charAt(0).toUpperCase() + limpo.slice(1) : limpo;
-  };
 
   for (const padrao of padroes) {
     // 'g' pra varrer TODAS as ocorrências, não só a 1ª: a primeira pode ser um
@@ -641,6 +654,7 @@ function propoeReuniao(texto) {
 module.exports = {
   propoeReuniao,
   balaoCortadoNoMeio,
+  normalizarSegmento,
   quebrasDeLinhaViramBaloes,
   removerMuletaRepetida,
   textoDoConteudo,
