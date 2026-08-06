@@ -115,6 +115,17 @@ test('portão de qualificação é trava de código, não só instrução', () =
   assert.match(source, /NÃO proponha reunião, conversa com especialista nem horário nesta mensagem/);
 });
 
+test('CTA "testar a IA" da bio vira origem própria, separada do Instagram comum', () => {
+  // Precisa ser checada ANTES do Instagram genérico, senão nunca dispara.
+  const posTeste = source.indexOf("origemLead = 'Instagram (teste)'");
+  const posGenerico = source.indexOf("origemLead = 'Instagram';");
+  assert.ok(posTeste > 0, 'origem Instagram (teste) não existe');
+  assert.ok(posTeste < posGenerico, 'a origem de teste precisa ser avaliada antes da genérica');
+  // Exige Instagram E intenção de testar: "quero testar" sozinho não é dessa origem.
+  assert.match(source, /\/instagram\/\.test\(textoInicial\) && \/testar a ia\|testar o bot\|quero testar\|teste uma conversa\//);
+  assert.match(source, /LEAD QUE VEIO TESTAR/);
+});
+
 test('cada origem tem abertura própria, terminando na mesma pergunta', () => {
   assert.match(source, /LEAD INDICADO/);
   assert.match(source, /LEAD QUE CHEGOU \$\{canal\.toUpperCase\(\)\}/);

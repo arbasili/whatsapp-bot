@@ -39,7 +39,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.35.0';
+const BOT_VERSION = '1.36.0';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -3979,6 +3979,10 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
       origemLead = 'Anúncio';
     } else if (/vim do site|pelo site|atrav[ée]s do site|no site de voc[êe]s|site clique e fecha/.test(textoInicial)) {
       origemLead = 'Site';
+    } else if (/instagram/.test(textoInicial) && /testar a ia|testar o bot|quero testar|teste uma conversa/.test(textoInicial)) {
+      // CTA "Teste uma conversa real" da bio: quem vem por aqui não é lead
+      // comum, veio avaliar o bot. Precisa vir ANTES do Instagram genérico.
+      origemLead = 'Instagram (teste)';
     } else if (/vim do instagram|pelo instagram|no insta|vi no instagram/.test(textoInicial)) {
       origemLead = 'Instagram';
     } else if (/indica[çc][ãa]o|me indicaram|fui indicad/.test(textoInicial)) {
@@ -4005,6 +4009,11 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
       aberturaPorOrigem = `INSTRUÇÃO ESPECIAL DE ABERTURA (LEAD INDICADO): este é o contato mais quente que existe, alguém confiou em você a ponto de recomendar. Honre isso na primeira mensagem e NÃO se apresente como se ele nunca tivesse ouvido falar da ${cfg.persona.empresa}. Sua primeira mensagem sai em 3 partes separadas por "|||", UMA frase curta cada:
 1) Saudação${nomeDoWebhook ? ' com o nome' : ''}.
 2) Reconheça a indicação, no espírito de "Que bom que te indicaram pra gente, quem indica é porque confia". Se o lead disse QUEM indicou, agradeça citando a pessoa.
+3) A pergunta de qualificação, exatamente: "${PERGUNTA_DADO_2}"${regraNomePerfil}`;
+    } else if (origemLead === 'Instagram (teste)') {
+      aberturaPorOrigem = `INSTRUÇÃO ESPECIAL DE ABERTURA (LEAD QUE VEIO TESTAR): ele clicou em "Teste uma conversa real" na bio do Instagram, ou seja, NÃO é um lead comum pedindo orçamento: ele veio avaliar o bot, provavelmente comparando com concorrente. Assuma isso com naturalidade e transforme em prova, em vez de fingir que ele é um lead qualquer. Sua primeira mensagem sai em 3 partes separadas por "|||", UMA frase curta cada:
+1) Saudação${nomeDoWebhook ? ' com o nome' : ''} e apresentação, numa frase só.
+2) Reconheça que ele veio testar e mostre que o teste já aconteceu, no espírito de "Você veio testar, então já testou: essa resposta chegou na hora, sem ninguém do outro lado".
 3) A pergunta de qualificação, exatamente: "${PERGUNTA_DADO_2}"${regraNomePerfil}`;
     } else if (origemLead === 'Site' || origemLead === 'Instagram') {
       const canal = origemLead === 'Site' ? 'pelo site' : 'pelo Instagram';
