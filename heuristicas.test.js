@@ -24,7 +24,52 @@ const {
   pediuOptOut,
   separarPonteComercial,
   balaoCortadoNoMeio,
+  quebrasDeLinhaViramBaloes,
+  removerMuletaRepetida,
 } = require('./heuristicas');
+
+// Bug real (Adriano, 06/08 19:09): a explicação do "como funciona?" chegou
+// como um parágrafo único de três linhas densas. O modelo tinha separado os
+// blocos, só usou quebra de linha em vez de "|||".
+test('quebra de linha no lugar do "|||" vira balão', () => {
+  const resposta = [
+    'Funciona assim: a gente entende como é o atendimento da sua empresa hoje e monta uma automação que responde os clientes na hora.',
+    'É tipo o que aconteceu aqui agora comigo: resposta rápida, sem ninguém precisando estar disponível o tempo todo.',
+    'O especialista te mostra os detalhes certinho, ajustado pro seu caso. Quer que eu veja um horário?',
+  ].join('\n');
+  assert.strictEqual(quebrasDeLinhaViramBaloes(resposta).split('|||').length, 3);
+});
+
+test('não quebra o que não é balão: lista, opções de horário e texto curto', () => {
+  const comOpcoes = 'Tenho duas opções disponíveis:\nsegunda-feira às 14h ou terça-feira às 10h. Qual funciona melhor pra você?';
+  assert.strictEqual(quebrasDeLinhaViramBaloes(comOpcoes), comOpcoes, 'frase terminada em ":" anuncia continuação');
+  const lista = 'O especialista vê isso com você:\n- como está hoje\n- o que dá pra automatizar\n- quanto tempo leva pra montar tudo isso aí';
+  assert.strictEqual(quebrasDeLinhaViramBaloes(lista), lista);
+  const curta = 'Show!\nJá te confirmo.';
+  assert.strictEqual(quebrasDeLinhaViramBaloes(curta), curta);
+  const jaSeparada = 'Primeiro balão aqui, com tamanho de frase real.|||Segundo balão\ncom quebra dentro.';
+  assert.strictEqual(quebrasDeLinhaViramBaloes(jaSeparada), jaSeparada);
+});
+
+// Bug real (Adriano, 06/08): os turnos das 19:00 e 19:02 abriram os dois com
+// "Entendi", em sequência.
+test('tira a muleta quando ela repete a do turno anterior', () => {
+  const anterior = 'Entendi, então divide o atendimento com sua secretária. E o que você faz, Adriano?';
+  const atual = 'Entendi, você e sua secretária dividem o atendimento na empresa de tecnologia. O que mais pega aí?';
+  assert.strictEqual(
+    removerMuletaRepetida(atual, anterior),
+    'Você e sua secretária dividem o atendimento na empresa de tecnologia. O que mais pega aí?'
+  );
+});
+
+test('mantém a muleta quando ela não repete, e nunca esvazia o balão', () => {
+  const anterior = 'Entendi, então divide o atendimento com sua secretária.';
+  const outra = 'Perfeito, vou ver os horários e já te falo qual tenho disponível.';
+  assert.strictEqual(removerMuletaRepetida(outra, anterior), outra, 'muleta diferente da anterior fica');
+  assert.strictEqual(removerMuletaRepetida('Entendi!', 'Entendi, então é isso.'), 'Entendi!', 'não sobraria mensagem');
+  const semMuleta = 'Perder cliente é a pior parte, ele já tava decidido a falar com você.';
+  assert.strictEqual(removerMuletaRepetida(semMuleta, anterior), semMuleta);
+});
 
 // Bug real (Adriano, 06/08 19:03): a ponte terminou em "É online, gratuita e
 // sem". Perdeu "compromisso" e, junto, o "Quer que eu veja um horário?". O

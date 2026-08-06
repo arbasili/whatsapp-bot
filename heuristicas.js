@@ -591,6 +591,41 @@ function balaoCortadoNoMeio(texto) {
   return /(?:^|\s)(?:a|ao|aos|as|at[ée]|com|como|da|das|de|do|dos|e|em|entre|mas|na|nas|nem|no|nos|o|os|ou|para|pela|pelo|por|pra|pro|que|se|sem|sobre|um|uma|uns|umas)$/i.test(limpo);
 }
 
+// O roteiro manda separar balões com "|||", mas o modelo às vezes estrutura a
+// resposta em blocos usando quebra de linha. Visto em produção: a explicação
+// do "como funciona?" chegou como um parágrafo único de três linhas densas.
+// O conteúdo já vinha separado do jeito certo, só o caractere estava errado.
+// Conservador de propósito: só converte quando o padrão é claramente de
+// balões, nunca em lista de opções nem em frase que anuncia continuação.
+function quebrasDeLinhaViramBaloes(texto) {
+  const original = String(texto || '');
+  if (!original.trim() || original.includes('|||')) return original;
+  const linhas = original.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  if (linhas.length < 2 || linhas.length > 4) return original;
+  // mensagem curta não ganha nada em ser quebrada
+  if (original.replace(/\s+/g, ' ').trim().length < 80) return original;
+  // "Tenho duas opções:" e listas são um balão só, não vários
+  if (linhas.some(l => /^[-*•>]|^\d+[.)]/.test(l) || /:$/.test(l))) return original;
+  return linhas.join('|||');
+}
+
+// "Entendi" abrindo dois turnos seguidos vira tique de robô (visto em produção
+// às 19:00 e 19:02). A muleta é enfeite: o conteúdo vem depois dela, então dá
+// pra tirar sem pedir reescrita e sem perder nada da mensagem.
+const ABERTURA_MULETA = /^(entendi|entendo|perfeito|show|legal|bacana|certo|beleza|massa|[óo]timo)\b[\s,!.:-]*/i;
+
+function removerMuletaRepetida(resposta, respostaAnterior) {
+  const atual = String(resposta || '');
+  const mAtual = atual.match(ABERTURA_MULETA);
+  const mAnterior = String(respostaAnterior || '').match(ABERTURA_MULETA);
+  if (!mAtual || !mAnterior) return atual;
+  if (mAtual[1].toLowerCase() !== mAnterior[1].toLowerCase()) return atual;
+  const semMuleta = atual.slice(mAtual[0].length).trim();
+  // sem isso, um balão que era só "Perfeito!" sumiria por inteiro
+  if (semMuleta.length < 20) return atual;
+  return semMuleta.charAt(0).toUpperCase() + semMuleta.slice(1);
+}
+
 // Detecta se a resposta está propondo a reunião (etapa da ponte do roteiro).
 // Alimenta o PORTÃO DE QUALIFICAÇÃO: propor reunião sem saber o segmento e a
 // dor gera proposta genérica, que o próprio roteiro proíbe e que não converte.
@@ -606,6 +641,8 @@ function propoeReuniao(texto) {
 module.exports = {
   propoeReuniao,
   balaoCortadoNoMeio,
+  quebrasDeLinhaViramBaloes,
+  removerMuletaRepetida,
   textoDoConteudo,
   horaCampoGrandeDoPedido,
   temIntencaoDeCompra,

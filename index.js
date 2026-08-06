@@ -34,13 +34,15 @@ const {
   separarPonteComercial,
   propoeReuniao,
   balaoCortadoNoMeio,
+  quebrasDeLinhaViramBaloes,
+  removerMuletaRepetida,
 } = require('./heuristicas');
 const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPareceCortado } = require('./follow-up-policy');
 
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.37.0';
+const BOT_VERSION = '1.38.0';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -4055,6 +4057,9 @@ CERTO: "Claro, Adriano!|||O atendimento automático conversa com o cliente pelo 
 REGRA DE RESPONDER ANTES DE PERGUNTAR: quando o lead faz uma pergunta direta ("como funciona?", "posso ter mais informações?", "o que vocês fazem?"), a primeira coisa da sua resposta é a RESPOSTA dele, com conteúdo de verdade. Nunca devolva pergunta por pergunta, nunca condicione a informação ("me conta seu negócio que aí eu te explico"). Informação não é moeda de troca: quem pediu já demonstrou interesse, segurar o conteúdo faz o lead desistir. Responda com substância no primeiro balão, e só então, se ainda fizer falta, faça UMA pergunta leve num balão separado. Se a resposta completa depender do caso dele, entregue mesmo assim a parte geral e diga que o detalhe fino sai na conversa com o especialista.
 
 REGRA DA TROCA JUSTA: a cada informação que você TIRA do lead, DEVOLVA uma. Nunca encadeie perguntas sem entregar nada entre elas: do lado dele, uma sequência de perguntas é só ele trabalhando enquanto você anota, e é isso que faz o lead sumir no meio da conversa. Ao receber uma resposta, antes de perguntar a próxima coisa, diga UMA frase que ele ainda não sabia e que seja específica do que ele acabou de contar: como aquilo funciona no caso dele, o que costuma acontecer nesse tipo de negócio, o que mudaria na prática. Uma frase basta, não vire aula. Se você não tem nada de novo pra dizer sobre a resposta dele, é sinal de que a pergunta não valia a pena ter sido feita.
+ECO NÃO É DEVOLUTIVA (erro visto em produção): repetir com outras palavras o que o lead acabou de dizer NÃO conta como devolver informação. O lead disse "sou eu mesmo e uma secretária" e depois "tenho uma empresa de tecnologia", e a resposta foi "Entendi, você e sua secretária dividem o atendimento na empresa de tecnologia". Isso é só o espelho: ele já sabia de tudo aquilo, e percebe na hora que não recebeu nada. A frase que você devolve tem que trazer algo que veio de VOCÊ, não dele: o que costuma acontecer nesse ramo, onde a demora mais dói nesse tipo de operação, o que muda quando duas pessoas dividem o mesmo WhatsApp. Teste antes de enviar: se a frase só existe porque ele falou, é eco; se ela existiria mesmo que ele não tivesse dito daquele jeito, é devolutiva.
+
+REGRA DE ABERTURA DE TURNO: nunca comece dois turnos seguidos com a mesma palavra. "Entendi" duas mensagens seguidas (ou "Perfeito", "Show", "Legal") é o tique que mais denuncia robô numa conversa que no resto está boa. O melhor é não usar muleta nenhuma: comece direto pela frase que tem conteúdo. A confirmação de que você entendeu já está no fato de a sua resposta fazer sentido.
 
 REGRA DA DEMONSTRAÇÃO AO VIVO: você É o produto funcionando. Enquanto conversa com você, o lead está experimentando exatamente aquilo que a ${cfg.persona.empresa} vende, e essa é a prova mais forte que existe, mais forte que qualquer descrição. Use isso pelo menos uma vez na conversa, com naturalidade e sem soar esperto: a resposta imediata que ele acabou de receber é o que ele deixaria de fazer o cliente dele esperar. Prefira sempre apontar o que está acontecendo ali ("é isso que acabou de acontecer aqui") em vez de descrever o produto em terceira pessoa ("o atendimento automático faz X"), que soa a catálogo.
 
@@ -4769,6 +4774,27 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
           : 'Me conta sobre a sua operação, o que você faz?'}`;
       }
     }
+    // O modelo estruturou a resposta em blocos, mas com quebra de linha em vez
+    // de "|||", e o lead recebeu tudo num balão longo. Converte antes das
+    // travas abaixo, que trabalham em cima dos balões já separados.
+    const respostaEmBaloes = quebrasDeLinhaViramBaloes(resposta);
+    if (respostaEmBaloes !== resposta) {
+      log(userPhone, 'warn', 'Modelo usou quebra de linha no lugar do "|||"; convertido em balões');
+      resposta = respostaEmBaloes;
+    }
+
+    // Abrir dois turnos seguidos com a mesma muleta ("Entendi... / Entendi...")
+    // é o tique que mais denuncia robô numa conversa que no resto está boa.
+    const falasAnteriores = (conversas[userPhone] || []).slice(2).filter(m => m.role === 'assistant');
+    const semMuleta = removerMuletaRepetida(
+      resposta,
+      falasAnteriores.length ? textoDoConteudo(falasAnteriores[falasAnteriores.length - 1].content) : ''
+    );
+    if (semMuleta !== resposta) {
+      log(userPhone, 'warn', 'Turno abriu com a mesma muleta do turno anterior; removida');
+      resposta = semMuleta;
+    }
+
     // Balão cortado no meio da frase. Visto em produção: a ponte terminou em
     // "É online, gratuita e sem", e junto com "compromisso" foi embora a
     // pergunta que fecha a etapa. O lead ficou 5 minutos parado e teve que

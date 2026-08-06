@@ -66,6 +66,18 @@ test('lead que volta é reconhecido: histórico do banco é reidratado na memór
   assert.match(source, /l\.deleted_at IS NULL/);
 });
 
+test('devolutiva não pode ser eco, e turno não repete a muleta do anterior', () => {
+  // Visto em produção: "Entendi, você e sua secretária dividem o atendimento
+  // na empresa de tecnologia" só devolve ao lead o que ele mesmo disse.
+  assert.match(source, /ECO NÃO É DEVOLUTIVA/);
+  assert.match(source, /se a frase só existe porque ele falou, é eco/);
+  assert.match(source, /REGRA DE ABERTURA DE TURNO/);
+  assert.match(source, /nunca comece dois turnos seguidos com a mesma palavra/);
+  // e a trava de código, porque instrução sozinha já falhou antes
+  assert.match(source, /removerMuletaRepetida\(/);
+  assert.match(source, /quebrasDeLinhaViramBaloes\(resposta\)/);
+});
+
 test('a cada dado que tira, o bot devolve algo, e demonstra o produto ao vivo', () => {
   // Lida da ótica do lead: perguntas em sequência sem devolutiva fazem ele
   // sentir que só ele trabalha, e é onde a conversa morre.
