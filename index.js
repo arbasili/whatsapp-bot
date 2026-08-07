@@ -45,7 +45,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.40.0';
+const BOT_VERSION = '1.40.1';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -4966,8 +4966,31 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       // Limpa slotConfirmado anterior: os slots vão mudar, qualquer confirmação prévia é inválida
       delete agendamentos[userPhone].slotConfirmado;
 
+      // Repetir a MESMA frase com as MESMAS opções é o que fez a conversa
+      // parecer quebrada em produção: o lead pediu sexta, depois "sexta que
+      // vem", depois "dia 14/08", e levou três vezes as opções de segunda e
+      // terça. Os bugs de data que causaram aquilo foram corrigidos, mas um
+      // dia genuinamente cheio traz o mesmo impasse. Na segunda vez seguida
+      // com as mesmas opções, o bot muda de abordagem em vez de insistir.
+      const ofertaDeAlternativas = async (prefixo, alternativas) => {
+        const ag = agendamentos[userPhone];
+        const chave = alternativas.map(s => s.inicio).join('|');
+        if (ag.ultimaOfertaRepetida === chave) {
+          log(userPhone, 'warn', 'Mesmas alternativas de agenda pela 2ª vez; trocando de abordagem');
+          await enviarERegistrar(userPhone, 'Nessa semana eu só consigo esses dois horários mesmo. Me diz um dia da semana que vem que eu procuro por lá.');
+          return;
+        }
+        ag.ultimaOfertaRepetida = chave;
+        ag.slots = alternativas;
+        ag.slotsGeradosEm = Date.now();
+        await enviarERegistrar(userPhone, `${prefixo} ${labelSemFuso(alternativas[0])} ou ${labelSemFuso(alternativas[1])} (horário de Brasília). Alguma funciona para você?`);
+      };
+      // Ofereceu horário de verdade: o impasse acabou, o contador zera.
+      const limparRepeticao = () => { delete agendamentos[userPhone].ultimaOfertaRepetida; };
+
       if (resultado.tipo === 'completo') {
         // Dia e hora livres: adiciona como opção escolhível e confirma
+        limparRepeticao();
         agendamentos[userPhone].slots = [resultado.slot];
         agendamentos[userPhone].slotsGeradosEm = Date.now();
         await enviarERegistrar(userPhone, `Tenho ${resultado.slot.label} disponível. Posso reservar esse horário para você?`);
@@ -4994,12 +5017,14 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
         }
 
         if (opcoesDia.length >= 2) {
+          limparRepeticao();
           agendamentos[userPhone].slots = opcoesDia;
           agendamentos[userPhone].slotsGeradosEm = Date.now();
           const h1 = horaDoLabel(opcoesDia[0].label).replace(' (horário de Brasília)', '');
           const h2 = horaDoLabel(opcoesDia[1].label).replace(' (horário de Brasília)', '');
           await enviarERegistrar(userPhone, `Para ${nomeDia}, tenho ${h1} ou ${h2} (horário de Brasília). Qual funciona melhor para você?`);
         } else if (opcoesDia.length === 1) {
+          limparRepeticao();
           agendamentos[userPhone].slots = opcoesDia;
           agendamentos[userPhone].slotsGeradosEm = Date.now();
           const h1 = horaDoLabel(opcoesDia[0].label).replace(' (horário de Brasília)', '');
@@ -5009,9 +5034,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
           let alternativas = [];
           try { alternativas = await buscarHorariosDisponiveis(); } catch (e) { console.error(e.message); }
           if (alternativas.length >= 2) {
-            agendamentos[userPhone].slots = alternativas;
-            agendamentos[userPhone].slotsGeradosEm = Date.now();
-            await enviarERegistrar(userPhone, `Nesse dia eu não tenho horário livre. As opções mais próximas são: ${labelSemFuso(alternativas[0])} ou ${labelSemFuso(alternativas[1])} (horário de Brasília). Alguma funciona para você?`);
+            await ofertaDeAlternativas('Nesse dia eu não tenho horário livre. As opções mais próximas são:', alternativas);
           } else {
             await enviarERegistrar(userPhone, 'Nesse dia eu não tenho horário livre. Pode me sugerir outro dia?');
           }
@@ -5021,10 +5044,9 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
         let alternativas = [];
         try { alternativas = await buscarHorariosDisponiveis(); } catch (e) { console.error(e.message); }
         if (alternativas.length >= 2) {
-          agendamentos[userPhone].slots = alternativas;
-          agendamentos[userPhone].slotsGeradosEm = Date.now();
-          await enviarERegistrar(userPhone, `Nesse horário eu não tenho disponibilidade. As opções mais próximas que tenho são: ${labelSemFuso(alternativas[0])} ou ${labelSemFuso(alternativas[1])} (horário de Brasília). Alguma funciona para você?`);
+          await ofertaDeAlternativas('Nesse horário eu não tenho disponibilidade. As opções mais próximas que tenho são:', alternativas);
         } else if (alternativas.length === 1) {
+          limparRepeticao();
           agendamentos[userPhone].slots = alternativas;
           agendamentos[userPhone].slotsGeradosEm = Date.now();
           await enviarERegistrar(userPhone, `Nesse horário eu não tenho disponibilidade. O horário mais próximo que tenho é ${alternativas[0].label}. Funciona para você?`);

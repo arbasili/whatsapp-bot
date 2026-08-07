@@ -277,6 +277,24 @@ test('fuso é citado uma vez por mensagem, não uma vez por horário', () => {
   assert.deepEqual(paresCrus, [], `ainda há par de horários citando o fuso duas vezes:\n${paresCrus.join('\n')}`);
 });
 
+// Loop real em produção: três respostas seguidas com as MESMAS duas opções.
+// Os bugs de data que causaram aquilo foram corrigidos, mas um dia
+// genuinamente cheio traz o mesmo impasse.
+test('não repete as mesmas alternativas de agenda duas vezes seguidas', () => {
+  assert.match(source, /const ofertaDeAlternativas = async \(prefixo, alternativas\)/);
+  assert.match(source, /if \(ag\.ultimaOfertaRepetida === chave\)/);
+  assert.match(source, /Me diz um dia da semana que vem que eu procuro por lá/);
+  // oferta boa zera o impasse, senão o lead ficaria preso na frase de saída
+  assert.match(source, /const limparRepeticao = \(\) =>/);
+  // e as duas frases de fallback com 2 opções passam pelo guarda, não pelo envio direto
+  const trecho = source.slice(
+    source.indexOf('const matchVerificar = resposta.match'),
+    source.indexOf('await persistirLead(userPhone);', source.indexOf('const matchVerificar = resposta.match'))
+  );
+  assert.doesNotMatch(trecho, /enviarERegistrar\(userPhone, `Nesse dia eu não tenho horário livre\. As opções/);
+  assert.doesNotMatch(trecho, /enviarERegistrar\(userPhone, `Nesse horário eu não tenho disponibilidade\. As opções/);
+});
+
 test('remarcação sincroniza próxima ação e limpa o estado transitório', () => {
   const trecho = source.slice(
     source.indexOf('async function tratarPosAgendamento'),
