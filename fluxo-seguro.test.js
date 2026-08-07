@@ -233,6 +233,37 @@ test('texto que menciona anúncio recebe a abertura especial mesmo sem referral 
   assert.match(source, /\$\{origemLead === 'Anúncio' \?/);
 });
 
+// Conversa real (06/08 19:33): o bot perguntou "qual é o seu negócio?" e no
+// turno seguinte disse "já tinha visto aqui que você trabalha com tecnologia".
+test('segmento conhecido não é esquecido entre turnos, nem anunciado ao lead', () => {
+  assert.match(source, /agendamentos\[userPhone\]\?\.tipoNegocioGravado/);
+  assert.match(source, /NUNCA anuncie que já o tinha/);
+  assert.match(source, /nada de "já tinha visto aqui"/);
+});
+
+// A confirmação é a mensagem mais importante da conversa e vinha como um
+// parágrafo único com o link do Meet no meio.
+test('confirmação do agendamento chega em balões, sem balão de espera antes', () => {
+  assert.match(source, /const enviarEmBaloes = async \(partes\)/);
+  assert.match(source, /O link da reunião é esse: \$\{meetLink\}`,/);
+  // o comentário que explica a remoção cita a frase, então a asserção olha o ENVIO
+  assert.doesNotMatch(source, /enviarERegistrar\(userPhone, 'Um segundo/);
+});
+
+// O lead disse "até lá" e recebeu a data e a hora de volta, por extenso.
+test('despedida após fechar a reunião não reabre a conversa', () => {
+  assert.match(source, /agendadoEm: Date\.now\(\)/);
+  assert.match(source, /Math\.max\(ag\.presencaConfirmadaEm \|\| 0, ag\.agendadoEm \|\| 0\)/);
+});
+
+// "X (horário de Brasília) ou Y (horário de Brasília)" na mesma frase.
+test('fuso é citado uma vez por mensagem, não uma vez por horário', () => {
+  assert.match(source, /const labelSemFuso = slot =>/);
+  assert.match(source, /labelCurto: `\$\{nomeDia\} às \$\{horaBrasilia\}h`/);
+  const paresCrus = (source.match(/\$\{\w+(?:\[0\]|\.rows\[0\])?\.label\} ou \$\{/g) || []);
+  assert.deepEqual(paresCrus, [], `ainda há par de horários citando o fuso duas vezes:\n${paresCrus.join('\n')}`);
+});
+
 test('remarcação sincroniza próxima ação e limpa o estado transitório', () => {
   const trecho = source.slice(
     source.indexOf('async function tratarPosAgendamento'),

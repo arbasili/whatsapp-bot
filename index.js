@@ -44,7 +44,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.38.4';
+const BOT_VERSION = '1.39.0';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -1222,6 +1222,9 @@ function horaDoLabel(label) {
   return partes[1] || label;
 }
 
+// Slots gravados antes da v1.39.0 não têm labelCurto: cai no label completo.
+const labelSemFuso = slot => slot?.labelCurto || slot?.label || '';
+
 async function buscarSlotDisponivel(dia, periodos) {
   const agoraMs = Date.now();
   const margemMs = 2 * 60 * 60 * 1000; // exige 2h de antecedência mínima
@@ -1252,6 +1255,11 @@ async function buscarSlotDisponivel(dia, periodos) {
         });
         return {
           label: `${nomeDia} às ${horaBrasilia}h (horário de Brasília)`,
+          // Sem o sufixo do fuso, para citá-lo UMA vez por mensagem em vez de
+          // uma vez por horário ("X (horário de Brasília) ou Y (horário de
+          // Brasília)" numa frase só). O matcher do marcador [SLOT:] já
+          // compara ignorando esse sufixo, então nada quebra.
+          labelCurto: `${nomeDia} às ${horaBrasilia}h`,
           labelCG: `${nomeDia} às ${hora}h (horário de Campo Grande)`,
           inicio: inicio.toISOString(),
           fim: fim.toISOString()
@@ -3405,7 +3413,7 @@ async function proximosSlotsRemarcacao(ag) {
 
 // Mensagem de oferta de horários numa remarcação (1 ou 2 opções).
 function _msgOfertaRemarcacao(slots) {
-  if (slots.length >= 2) return `Tenho estes horários: ${slots[0].label} ou ${slots[1].label}. Qual funciona melhor para você?`;
+  if (slots.length >= 2) return `Tenho estes horários: ${labelSemFuso(slots[0])} ou ${labelSemFuso(slots[1])} (horário de Brasília). Qual funciona melhor para você?`;
   return `Consigo ${slots[0].label}. Posso reservar esse?`;
 }
 
@@ -3662,7 +3670,13 @@ async function tratarPosAgendamento(userPhone, userText) {
   const PALAVRAS_DESPEDIDA_SIMPLES = ['ok', 'okay', 'blz', 'beleza', 'tá bom', 'ta bom', 'tá', 'ta', 'tudo bem', 'tudo certo', 'valeu', 'vlw', 'obrigado', 'obrigada', 'brigado', 'brigada', 'combinado', 'certo', 'entendi', 'já entendi', 'ja entendi', 'isso', 'isso mesmo', 'perfeito', 'ótimo', 'otimo', 'show', 'top', 'joia', 'jóia', '👍', '🙏', '😊', 'tmj', 'até', 'até lá', 'até mais', 'fechou', 'tô dentro', 'to dentro', 'tranquilo', 'de boa'];
   const partesDespedida = (userText || '').trim().toLowerCase().split(/[,.!]+/).map(p => p.trim()).filter(Boolean);
   const despedidaSimples = partesDespedida.length > 0 && partesDespedida.every(p => PALAVRAS_DESPEDIDA_SIMPLES.includes(p));
-  const confirmadaRecenteParaDespedida = ag.presencaConfirmadaEm && (Date.now() - ag.presencaConfirmadaEm < 30 * 60 * 1000);
+  // Vale para os DOIS marcos: confirmar presença e fechar a reunião. Só o
+  // primeiro estava coberto, então um "até lá" logo após o agendamento recebia
+  // de volta a data e a hora por extenso, o lead dizia "até lá" de novo e a
+  // conversa continuava depois de já ter terminado. Depois de fechado, quem
+  // fala demais reabre.
+  const marcoRecente = Math.max(ag.presencaConfirmadaEm || 0, ag.agendadoEm || 0);
+  const confirmadaRecenteParaDespedida = marcoRecente > 0 && (Date.now() - marcoRecente < 30 * 60 * 1000);
   if (despedidaSimples && confirmadaRecenteParaDespedida) {
     log(userPhone, 'info', 'Despedida simples logo após confirmação — não responde para evitar loop.');
     return true;
@@ -3977,7 +3991,7 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
       );
       slotsDisponiveis = await Promise.race([buscarHorariosDisponiveis(), timeoutPromise]);
       if (slotsDisponiveis.length >= 2) {
-        opcoesHorario = `${slotsDisponiveis[0].label} ou ${slotsDisponiveis[1].label}`;
+        opcoesHorario = `${labelSemFuso(slotsDisponiveis[0])} ou ${labelSemFuso(slotsDisponiveis[1])} (horário de Brasília)`;
       } else if (slotsDisponiveis.length === 1) {
         opcoesHorario = slotsDisponiveis[0].label;
       }
@@ -4516,8 +4530,9 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     }
 
     // Avisar que está gerando antes de processar
+    // Sem balão de espera aqui: "Um segundo, deixa eu confirmar aqui" não diz
+    // nada ao lead e só atrasa o desfecho, que vem logo em seguida.
     log(userPhone, 'info', `Iniciando agendamento — slot: ${slotEscolhido.label} | email: ${emailLead} | nome: ${nome || 'não identificado'}`);
-    await enviarERegistrar(userPhone, 'Um segundo, deixa eu confirmar aqui.');
 
     // Revalida a vaga bem no momento da confirmação — ela foi checada quando foi
     // oferecida, mas outro lead pode ter fechado o mesmo horário nesse meio-tempo.
@@ -4536,7 +4551,9 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
         agendamentos[userPhone].slots = novosSlots;
         agendamentos[userPhone].slotsGeradosEm = Date.now();
         agendamentos[userPhone].slotConfirmado = null;
-        const opcoes = novosSlots.length >= 2 ? `${novosSlots[0].label} ou ${novosSlots[1].label}` : novosSlots[0].label;
+        const opcoes = novosSlots.length >= 2
+          ? `${labelSemFuso(novosSlots[0])} ou ${labelSemFuso(novosSlots[1])} (horário de Brasília)`
+          : novosSlots[0].label;
         await enviarERegistrar(userPhone, `${motivo} Tenho esses outros disponíveis: ${opcoes}. Qual funciona melhor?`);
       } else {
         await enviarERegistrar(userPhone, `${motivo} Nossa equipe vai entrar em contato para encontrar um novo horário com você.`);
@@ -4555,7 +4572,9 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     // jornada pós-agendamento. Deixar isso vivo é o que permitiu, num caso real em produção,
     // uma mensagem antiga (webhook redelivery da Meta após restart, quando o dedup em memória
     // reseta) reabrir a confirmação de email de uma reunião que já tinha sido fechada.
-    agendamentos[userPhone] = { slots: [] };
+    // agendadoEm alimenta a guarda de despedida logo abaixo: depois de fechado,
+    // um "até lá" do lead não pode receber a data e a hora de volta.
+    agendamentos[userPhone] = { slots: [], agendadoEm: Date.now() };
 
     // Registrar para lembrete pré-reunião
     // Verifica se a reunião está a menos de 24h (ex: agendou agora para amanhã cedo)
@@ -4624,19 +4643,30 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     const horarioLead = slotEscolhido.label;
     const horarioInterno = slotEscolhido.labelCG || slotEscolhido.label;
 
+    // A confirmação é a mensagem mais importante da conversa e vinha como um
+    // parágrafo único com o link no meio. O conversor de quebras em balões só
+    // atua no que o modelo gera, então esse texto fixo passava direto.
+    // Balões separados aqui, no mesmo ritmo do resto da conversa.
+    const enviarEmBaloes = async (partes) => {
+      for (let i = 0; i < partes.length; i++) {
+        if (i > 0) await new Promise(r => setTimeout(r, 1500));
+        await enviarERegistrar(userPhone, partes[i]);
+      }
+    };
+
     if (meetLink) {
-      await enviarERegistrar(userPhone,
-        `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioLead}. É rapidinho, 30 minutos, e você já sai com um caminho claro de como deixar seu atendimento no automático.\n\nO link da reunião é esse: ${meetLink}\n\nTe mando um lembrete antes pra você não precisar ficar de olho no horário 😊`
-      );
-      await new Promise(r => setTimeout(r, 2000));
-      await enviarERegistrar(userPhone, `Qualquer dúvida até a reunião, é só me chamar por aqui. Até lá, ${nomeExibicao}!`);
+      await enviarEmBaloes([
+        `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioLead}. São 30 minutos, e você já sai com um caminho claro de como deixar seu atendimento no automático.`,
+        `O link da reunião é esse: ${meetLink}`,
+        `Te mando um lembrete antes pra você não precisar ficar de olho no horário. Qualquer dúvida até lá, é só me chamar por aqui 😊`,
+      ]);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioInterno}\nMeet: ${meetLink}`);
     } else {
-      await enviarERegistrar(userPhone,
-        `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioLead}. É uma conversa de 30 minutos pra te mostrar como automatizar seu atendimento.\n\nJá já te envio o link da reunião por aqui, pode ficar tranquilo. Te mando um lembrete antes também 😊`
-      );
-      await new Promise(r => setTimeout(r, 2000));
-      await enviarERegistrar(userPhone, `Qualquer dúvida até a reunião, é só me chamar por aqui. Até lá, ${nomeExibicao}!`);
+      await enviarEmBaloes([
+        `Fechado, ${nomeExibicao}! Tá marcado pra ${horarioLead}. São 30 minutos pra te mostrar como automatizar seu atendimento.`,
+        `Já já te envio o link da reunião por aqui, pode ficar tranquilo.`,
+        `Te mando um lembrete antes também. Qualquer dúvida até lá, é só me chamar por aqui 😊`,
+      ]);
       await enviarMensagem(MEU_NUMERO, `*Novo agendamento confirmado!*\n\nNome: ${nomeExibicao}\nWhatsApp: ${userPhone}\nEmail: ${emailLead}\nHorário: ${horarioInterno}\n\nAtenção: link do Meet não foi gerado automaticamente.`);
     }
     await criarNotificacao({
@@ -4700,7 +4730,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     } else {
       const slotsAtuais = agLead?.slots || [];
       const opcoesAtuais = slotsAtuais.length >= 2
-        ? `${slotsAtuais[0].label} ou ${slotsAtuais[1].label}`
+        ? `${labelSemFuso(slotsAtuais[0])} ou ${labelSemFuso(slotsAtuais[1])} (horário de Brasília)`
         : (slotsAtuais.length === 1 ? slotsAtuais[0].label : 'nenhum horário disponível no momento');
       const dataHoje = new Date().toLocaleDateString('pt-BR', {
         weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Campo_Grande'
@@ -4717,12 +4747,19 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     // O roteiro orienta a IA, mas estes dados objetivos são reforçados no turno
     // atual para impedir abertura genérica e repetição de perguntas já respondidas.
     const nomeConhecido = agLead?.nomeConfirmado || extrairNomeLead(conversas[userPhone]) || nomeDoWebhook || '';
-    const negocioConhecido = extrairTipoNegocio(conversas[userPhone]);
+    // extrairTipoNegocio olha só as ÚLTIMAS 5 mensagens do lead, então o dado
+    // some e reaparece conforme a janela anda. Visto em produção: o bot
+    // perguntou "qual é o seu negócio?" num turno e no seguinte disse "já
+    // tinha visto aqui que você trabalha com tecnologia". O que já foi
+    // detectado nesta conversa não pode ser esquecido no turno seguinte.
+    const negocioConhecido = extrairTipoNegocio(conversas[userPhone])
+      || agendamentos[userPhone]?.tipoNegocioGravado
+      || '';
     if (iniciandoNovaConversa && nomeConhecido) {
       contextoDinamico += ` ABERTURA PERSONALIZADA OBRIGATÓRIA: o nome conhecido é "${nomeConhecido}". Cumprimente usando o primeiro nome logo na abertura, sem perguntar o nome novamente e sem pedir autorização para usá-lo.`;
     }
     if (negocioConhecido) {
-      contextoDinamico += ` DADO JÁ CONHECIDO: o lead trabalha com "${negocioConhecido}". NÃO pergunte "o que você faz?", "qual é a sua operação?" nem repita a etapa de segmento. Reconheça esse contexto brevemente e avance para a próxima informação que ainda falta. Se esse dado veio de uma conversa antiga, confirme de forma natural apenas se continua válido, sem fazê-lo contar tudo de novo.`;
+      contextoDinamico += ` DADO JÁ CONHECIDO: o lead trabalha com "${negocioConhecido}". NÃO pergunte "o que você faz?", "qual é a sua operação?" nem repita a etapa de segmento. USE esse contexto na sua resposta, mas NUNCA anuncie que já o tinha: nada de "já tinha visto aqui", "já sabia que", "consta aqui" ou "isso já bate". Visto em produção: o bot perguntou o segmento num turno e no seguinte disse que já tinha visto, e do lado do lead só há duas leituras, ou você mentiu agora ou não prestou atenção quando perguntou. As duas queimam a conversa. Além disso, anunciar o que você sabe não entrega NADA ao lead: continue valendo a regra da troca justa, a frase que você devolve tem que trazer informação nova sobre o negócio dele. Se esse dado veio de uma conversa antiga, apenas siga usando, sem fazê-lo contar tudo de novo.`;
     }
     contextoDinamico += ` REVISÃO DE LINGUAGEM: espelhe as palavras usadas pelo lead e prefira construções neutras como "o atendimento fica com você". Não escreva combinações artificiais como "decidir e responder tudo sozinha".`;
 
@@ -5020,7 +5057,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
           if (alternativas.length >= 2) {
             agendamentos[userPhone].slots = alternativas;
             agendamentos[userPhone].slotsGeradosEm = Date.now();
-            await enviarERegistrar(userPhone, `Nesse dia eu não tenho horário livre. As opções mais próximas são: ${alternativas[0].label} ou ${alternativas[1].label}. Alguma funciona para você?`);
+            await enviarERegistrar(userPhone, `Nesse dia eu não tenho horário livre. As opções mais próximas são: ${labelSemFuso(alternativas[0])} ou ${labelSemFuso(alternativas[1])} (horário de Brasília). Alguma funciona para você?`);
           } else {
             await enviarERegistrar(userPhone, 'Nesse dia eu não tenho horário livre. Pode me sugerir outro dia?');
           }
@@ -5032,7 +5069,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
         if (alternativas.length >= 2) {
           agendamentos[userPhone].slots = alternativas;
           agendamentos[userPhone].slotsGeradosEm = Date.now();
-          await enviarERegistrar(userPhone, `Nesse horário eu não tenho disponibilidade. As opções mais próximas que tenho são: ${alternativas[0].label} ou ${alternativas[1].label}. Alguma funciona para você?`);
+          await enviarERegistrar(userPhone, `Nesse horário eu não tenho disponibilidade. As opções mais próximas que tenho são: ${labelSemFuso(alternativas[0])} ou ${labelSemFuso(alternativas[1])} (horário de Brasília). Alguma funciona para você?`);
         } else if (alternativas.length === 1) {
           agendamentos[userPhone].slots = alternativas;
           agendamentos[userPhone].slotsGeradosEm = Date.now();
