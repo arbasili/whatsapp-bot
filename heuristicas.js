@@ -150,6 +150,28 @@ function normalizarSegmento(texto) {
     .join(' ');
 }
 
+// O nome vem cru do perfil do WhatsApp, do jeito que o lead escreveu lá: sai
+// "shekinah" no card e "Boa noite, shekinah!" na conversa. Mesma lógica do
+// segmento, com dois cuidados próprios de nome de gente:
+// nome gritado ("MARCOS") é normalizado, mas maiúscula curta ("JR") e nome com
+// maiúscula no meio ("McDonald", "DiCaprio") ficam como estão.
+const CONECTORES_NOME = new Set(['de', 'da', 'do', 'das', 'dos', 'e']);
+
+function normalizarNome(texto) {
+  const limpo = String(texto || '').replace(/\s+/g, ' ').trim();
+  if (!limpo) return '';
+  return limpo
+    .split(' ')
+    .map((palavra, i) => {
+      const base = palavra.toLowerCase();
+      if (i > 0 && CONECTORES_NOME.has(base)) return base;
+      const gritado = palavra === palavra.toUpperCase() && palavra.length > 3;
+      if (!gritado && /[A-ZÀ-ÖØ-Þ]/.test(palavra.slice(1))) return palavra;
+      return base.charAt(0).toUpperCase() + base.slice(1);
+    })
+    .join(' ');
+}
+
 // Extrai o tipo de negócio do lead a partir da conversa
 function extrairTipoNegocio(historico) {
   if (!historico || historico.length < 3) return null;
@@ -275,7 +297,13 @@ function extrairUrgencia(historico) {
   return null;
 }
 
+// Normaliza num lugar só: a função tem vários pontos de saída e é chamada de
+// cinco lugares diferentes no index.
 function extrairNomeLead(conversa) {
+  return normalizarNome(extrairNomeLeadCru(conversa));
+}
+
+function extrairNomeLeadCru(conversa) {
   if (!conversa) return '';
 
   // Palavras de confirmação — quando o lead responde isso após "posso te chamar de X",
@@ -670,6 +698,7 @@ module.exports = {
   propoeReuniao,
   balaoCortadoNoMeio,
   normalizarSegmento,
+  normalizarNome,
   quebrasDeLinhaViramBaloes,
   removerMuletaRepetida,
   textoDoConteudo,

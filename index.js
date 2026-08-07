@@ -35,6 +35,7 @@ const {
   propoeReuniao,
   balaoCortadoNoMeio,
   normalizarSegmento,
+  normalizarNome,
   quebrasDeLinhaViramBaloes,
   removerMuletaRepetida,
 } = require('./heuristicas');
@@ -43,7 +44,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.38.3';
+const BOT_VERSION = '1.38.4';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -3839,7 +3840,7 @@ async function processarMensagem(userPhone, userText, imagem = null, nomePerfil 
     if (/[^a-záàãâéêíóôõúüçA-Z\s'-]/.test(nome.trim())) return false;
     return true;
   }
-  const nomeDoWebhook = nomePerfilValido(nomePerfil) ? nomePerfil.trim().split(' ')[0] : '';
+  const nomeDoWebhook = nomePerfilValido(nomePerfil) ? normalizarNome(nomePerfil.trim().split(' ')[0]) : '';
 
   // Lead bloqueado por abuso: ignora silenciosamente até o bloqueio expirar (24h)
   const bloqueadoEm = leadsBloqueados.get(userPhone);
@@ -4936,7 +4937,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     // Detectar marcador de nome [NOME: X] emitido pelo Claude
     const matchNome = resposta.match(/\[NOME:\s*([^\]]+)\]/i);
     if (matchNome) {
-      const nomeCapturado = matchNome[1].trim();
+      const nomeCapturado = normalizarNome(matchNome[1].trim());
       log(userPhone, 'info', `Nome capturado via marcador: ${nomeCapturado}`);
       if (!agendamentos[userPhone]) agendamentos[userPhone] = { slots: [] };
       agendamentos[userPhone].nomeConfirmado = nomeCapturado;

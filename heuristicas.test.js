@@ -25,6 +25,7 @@ const {
   separarPonteComercial,
   balaoCortadoNoMeio,
   normalizarSegmento,
+  normalizarNome,
   quebrasDeLinhaViramBaloes,
   removerMuletaRepetida,
 } = require('./heuristicas');
@@ -326,6 +327,22 @@ test('continua extraindo tipo de negócio de mensagem real do lead', () => {
 // O mesmo lead aparecia como "Empresa de tecnologia" numa coluna do Kanban e
 // "Empresa de Tecnologia" na seguinte: a heurística e a IA de resumo escrevem
 // no mesmo campo e cada uma usava um formato.
+// Visto em produção: o card mostrava "shekinah" porque o nome vem cru do
+// perfil do WhatsApp, e a conversa abria com "Boa noite, shekinah!".
+test('nome do perfil do WhatsApp é normalizado', () => {
+  assert.strictEqual(normalizarNome('shekinah'), 'Shekinah');
+  assert.strictEqual(normalizarNome('MARCOS'), 'Marcos', 'nome gritado é normalizado');
+  assert.strictEqual(normalizarNome('maria da silva'), 'Maria da Silva');
+  assert.strictEqual(normalizarNome('Adriano'), 'Adriano');
+  assert.strictEqual(normalizarNome(''), '');
+});
+
+test('nome com maiúscula no meio e sigla curta ficam intactos', () => {
+  assert.strictEqual(normalizarNome('McDonald'), 'McDonald');
+  assert.strictEqual(normalizarNome('DiCaprio'), 'DiCaprio');
+  assert.strictEqual(normalizarNome('Ana JR'), 'Ana JR');
+});
+
 test('segmento tem um formato só: título, com conector minúsculo', () => {
   assert.strictEqual(normalizarSegmento('empresa de tecnologia'), 'Empresa de Tecnologia');
   assert.strictEqual(normalizarSegmento('uma empresa de tecnologia'), 'Empresa de Tecnologia');
