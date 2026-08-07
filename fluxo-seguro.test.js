@@ -98,6 +98,9 @@ test('devolutiva não pode ser eco, e turno não repete a muleta do anterior', (
   // na empresa de tecnologia" só devolve ao lead o que ele mesmo disse.
   assert.match(source, /ECO NÃO É DEVOLUTIVA/);
   assert.match(source, /se a frase só existe porque ele falou, é eco/);
+  // O eco voltou justamente no turno de menos material ("sou eu mesmo")
+  assert.match(source, /O TURNO MAIS DIFÍCIL é a resposta curta sobre quem atende/);
+  assert.match(source, /Resposta curta do lead não te autoriza a devolver pouco/);
   assert.match(source, /REGRA DE ABERTURA DE TURNO/);
   assert.match(source, /nunca comece dois turnos seguidos com a mesma palavra/);
   // e a trava de código, porque instrução sozinha já falhou antes
@@ -252,7 +255,17 @@ test('confirmação do agendamento chega em balões, sem balão de espera antes'
 
 // O lead disse "até lá" e recebeu a data e a hora de volta, por extenso.
 test('despedida após fechar a reunião não reabre a conversa', () => {
-  assert.match(source, /agendadoEm: Date\.now\(\)/);
+  // A guarda lê agendamentosConfirmados. Gravar agendadoEm em agendamentos[]
+  // passava numa asserção solta e não fazia nada em produção: o lead disse
+  // "Combinado" e recebeu a data e a hora de volta mesmo assim. Por isso o
+  // teste agora exige o campo DENTRO do objeto certo.
+  assert.match(source, /const ag = agendamentosConfirmados\[userPhone\]/);
+  const bloco = source.slice(
+    source.indexOf('agendamentosConfirmados[userPhone] = {'),
+    source.indexOf('// Atualizar banco com os dados do agendamento')
+  );
+  assert.ok(bloco.length > 0, 'não localizou o bloco de agendamento confirmado');
+  assert.match(bloco, /agendadoEm: Date\.now\(\)/);
   assert.match(source, /Math\.max\(ag\.presencaConfirmadaEm \|\| 0, ag\.agendadoEm \|\| 0\)/);
 });
 

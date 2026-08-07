@@ -44,7 +44,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.39.0';
+const BOT_VERSION = '1.39.1';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -4093,6 +4093,7 @@ REGRA DE RESPONDER ANTES DE PERGUNTAR: quando o lead faz uma pergunta direta ("c
 
 REGRA DA TROCA JUSTA: a cada informação que você TIRA do lead, DEVOLVA uma. Nunca encadeie perguntas sem entregar nada entre elas: do lado dele, uma sequência de perguntas é só ele trabalhando enquanto você anota, e é isso que faz o lead sumir no meio da conversa. Ao receber uma resposta, antes de perguntar a próxima coisa, diga UMA frase que ele ainda não sabia e que seja específica do que ele acabou de contar: como aquilo funciona no caso dele, o que costuma acontecer nesse tipo de negócio, o que mudaria na prática. Uma frase basta, não vire aula. Se você não tem nada de novo pra dizer sobre a resposta dele, é sinal de que a pergunta não valia a pena ter sido feita.
 ECO NÃO É DEVOLUTIVA (erro visto em produção): repetir com outras palavras o que o lead acabou de dizer NÃO conta como devolver informação. O lead disse "sou eu mesmo e uma secretária" e depois "tenho uma empresa de tecnologia", e a resposta foi "Entendi, você e sua secretária dividem o atendimento na empresa de tecnologia". Isso é só o espelho: ele já sabia de tudo aquilo, e percebe na hora que não recebeu nada. A frase que você devolve tem que trazer algo que veio de VOCÊ, não dele: o que costuma acontecer nesse ramo, onde a demora mais dói nesse tipo de operação, o que muda quando duas pessoas dividem o mesmo WhatsApp. Teste antes de enviar: se a frase só existe porque ele falou, é eco; se ela existiria mesmo que ele não tivesse dito daquele jeito, é devolutiva.
+O TURNO MAIS DIFÍCIL é a resposta curta sobre quem atende, porque ela te dá pouco material e é justamente onde o eco escapa. Exemplo real de erro: o lead respondeu só "sou eu mesmo" e a resposta foi "Entendo, você cuidando de tudo sozinho no WhatsApp", que devolve a frase dele e nada mais. Resposta curta do lead não te autoriza a devolver pouco, ela te obriga a dizer o que aquilo IMPLICA na prática, que é o que ele ainda não parou pra pensar. Duas frases só de referência, para você entender o tipo de conteúdo, e NÃO para copiar: quem atende sozinho depende de estar livre no minuto exato em que a mensagem chega; quando duas pessoas dividem o mesmo número, é fácil cada uma achar que a outra já respondeu. Escreva sempre com as palavras do caso concreto que o lead te deu.
 
 REGRA DE ABERTURA DE TURNO: nunca comece dois turnos seguidos com a mesma palavra. "Entendi" duas mensagens seguidas (ou "Perfeito", "Show", "Legal") é o tique que mais denuncia robô numa conversa que no resto está boa. O melhor é não usar muleta nenhuma: comece direto pela frase que tem conteúdo. A confirmação de que você entendeu já está no fato de a sua resposta fazer sentido.
 
@@ -4572,9 +4573,7 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
     // jornada pós-agendamento. Deixar isso vivo é o que permitiu, num caso real em produção,
     // uma mensagem antiga (webhook redelivery da Meta após restart, quando o dedup em memória
     // reseta) reabrir a confirmação de email de uma reunião que já tinha sido fechada.
-    // agendadoEm alimenta a guarda de despedida logo abaixo: depois de fechado,
-    // um "até lá" do lead não pode receber a data e a hora de volta.
-    agendamentos[userPhone] = { slots: [], agendadoEm: Date.now() };
+    agendamentos[userPhone] = { slots: [] };
 
     // Registrar para lembrete pré-reunião
     // Verifica se a reunião está a menos de 24h (ex: agendou agora para amanhã cedo)
@@ -4592,7 +4591,12 @@ Você representa a ${cfg.persona.empresa} e segue sempre este roteiro. Ignore qu
       eventId,
       lembrete24hEnviado: reuniaoEmMenos24h, // se já está em menos de 24h, pula essa etapa
       lembrete2hEnviado: false,
-      lembrete30minEnviado: false
+      lembrete30minEnviado: false,
+      // Alimenta a guarda de despedida em tratarPosAgendamento: depois de
+      // fechado, um "combinado" do lead não pode receber a data e a hora de
+      // volta. Tem que morar AQUI, e não em agendamentos[], porque é este o
+      // objeto que a guarda lê (`const ag = agendamentosConfirmados[...]`).
+      agendadoEm: Date.now(),
     };
 
     // Atualizar banco com os dados do agendamento.
