@@ -315,7 +315,8 @@ test('continua extraindo tipo de negócio de mensagem real do lead', () => {
     { role: 'assistant', content: 'O que você faz?' },
     { role: 'user', content: 'tenho um pet shop aqui no bairro' },
   ];
-  assert.strictEqual(extrairTipoNegocio(conversa), 'Pet shop aqui no bairro');
+  // "aqui no bairro" é onde fica, não o que é: fora do rótulo de segmento
+  assert.strictEqual(extrairTipoNegocio(conversa), 'Pet Shop');
 });
 
 // Bug real (Adriano, 06/08): o card do Kanban mostrava "uma empresa de tecn…"
@@ -325,13 +326,21 @@ test('continua extraindo tipo de negócio de mensagem real do lead', () => {
 // O mesmo lead aparecia como "Empresa de tecnologia" numa coluna do Kanban e
 // "Empresa de Tecnologia" na seguinte: a heurística e a IA de resumo escrevem
 // no mesmo campo e cada uma usava um formato.
-test('segmento tem um formato só: frase, não título', () => {
-  assert.strictEqual(normalizarSegmento('Empresa de Tecnologia'), 'Empresa de tecnologia');
-  assert.strictEqual(normalizarSegmento('Assistência de Informática'), 'Assistência de informática');
-  assert.strictEqual(normalizarSegmento('uma empresa de tecnologia'), 'Empresa de tecnologia');
-  assert.strictEqual(normalizarSegmento('Clínica Odontológica e Estética'), 'Clínica odontológica e estética');
+test('segmento tem um formato só: título, com conector minúsculo', () => {
+  assert.strictEqual(normalizarSegmento('empresa de tecnologia'), 'Empresa de Tecnologia');
+  assert.strictEqual(normalizarSegmento('uma empresa de tecnologia'), 'Empresa de Tecnologia');
+  assert.strictEqual(normalizarSegmento('Assistência de informática'), 'Assistência de Informática');
+  assert.strictEqual(normalizarSegmento('clínica odontológica e estética'), 'Clínica Odontológica e Estética');
   assert.strictEqual(normalizarSegmento(''), '');
   assert.strictEqual(normalizarSegmento(null), '');
+});
+
+// Caixa de frase seria o certo para substantivo comum, mas o campo também
+// recebe nome próprio, e aí ela rebaixa o nome da empresa do lead.
+test('nome próprio no segmento não é rebaixado', () => {
+  assert.strictEqual(normalizarSegmento('ganso sistems'), 'Ganso Sistems');
+  assert.strictEqual(normalizarSegmento('clinica são lucas'), 'Clinica São Lucas');
+  assert.strictEqual(normalizarSegmento('loja de presentes'), 'Loja de Presentes');
 });
 
 // Sigla e marca não são substantivo comum: baixar tudo estragaria o rótulo.
@@ -339,14 +348,15 @@ test('sigla e marca no segmento ficam intactas', () => {
   assert.strictEqual(normalizarSegmento('Empresa de TI'), 'Empresa de TI');
   assert.strictEqual(normalizarSegmento('Consultoria de ERP'), 'Consultoria de ERP');
   assert.strictEqual(normalizarSegmento('Plataforma SaaS'), 'Plataforma SaaS');
+  assert.strictEqual(normalizarSegmento('Revenda iFood'), 'Revenda iFood');
 });
 
 test('segmento sai sem artigo e capitalizado, no formato que a IA de resumo usa', () => {
   const casos = [
-    ['Eu tenho uma empresa de tecnologia', 'Empresa de tecnologia'],
+    ['Eu tenho uma empresa de tecnologia', 'Empresa de Tecnologia'],
     ['tenho um petshop', 'Petshop'],
-    ['sou dono de uma clínica odontológica', 'Clínica odontológica'],
-    ['minha empresa é uma software house', 'Software house'],
+    ['sou dono de uma clínica odontológica', 'Clínica Odontológica'],
+    ['minha empresa é uma software house', 'Software House'],
   ];
   for (const [fala, esperado] of casos) {
     assert.strictEqual(extrairTipoNegocio(conversaCom('Adriano', fala)), esperado, `falhou em: ${fala}`);

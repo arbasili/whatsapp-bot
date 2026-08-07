@@ -114,23 +114,38 @@ function escolherSlot(texto, slots) {
 // heurística abaixo e a IA de resumo, e cada uma escrevia de um jeito: o mesmo
 // lead aparecia como "Empresa de tecnologia" numa coluna do Kanban e
 // "Empresa de Tecnologia" na seguinte.
-// O padrão é frase, não título: português não põe maiúscula em substantivo
-// comum como o inglês faz, então "Empresa de tecnologia" é a forma correta.
+// O padrão é TÍTULO, não frase. Caixa de frase seria o certo para substantivo
+// comum em português ("empresa de tecnologia"), mas o campo também recebe nome
+// próprio, e aí ela estraga: "Ganso Sistems" viraria "Ganso sistems" e
+// "Clínica São Lucas" viraria "Clínica são lucas". Errar para maiúscula é
+// menos feio do que rebaixar nome de empresa. Decisão do usuário.
+// Conectores ficam minúsculos, senão sai "Empresa De Tecnologia".
 // Também tira o artigo colado pela captura ("uma empresa de tecnologia"), que
 // vinha porque "tenho" casa antes de "tenho uma" na alternância dos padrões.
-// Palavra com mais de uma maiúscula é sigla ou marca (TI, ERP, SaaS, iFood) e
-// fica intacta.
+// Palavra com maiúscula fora da primeira letra é sigla ou marca (TI, ERP,
+// SaaS, iFood) e fica intacta.
+const CONECTORES_SEGMENTO = new Set([
+  'de', 'da', 'do', 'das', 'dos', 'e', 'em', 'no', 'na', 'nos', 'nas',
+  'a', 'o', 'as', 'os', 'ao', 'aos', 'à', 'às', 'para', 'pra', 'com', 'por',
+]);
+
 function normalizarSegmento(texto) {
   const limpo = String(texto || '')
     .replace(/^(?:uma?|uns|umas|os?|as?|meu|minha|meus|minhas)\s+/i, '')
+    // "tenho um pet shop aqui no bairro" capturava o complemento de lugar
+    // junto, e o segmento virava "Pet Shop Aqui no Bairro". Depois de "aqui"
+    // o lead está dizendo ONDE fica, não mais o que é.
+    .replace(/\s+aqui\b.*$/i, '')
     .replace(/\s+/g, ' ')
     .trim();
   if (!limpo) return '';
   return limpo
     .split(' ')
     .map((palavra, i) => {
-      if (i === 0) return palavra.charAt(0).toUpperCase() + palavra.slice(1);
-      return (palavra.match(/[A-ZÀ-ÖØ-Þ]/g) || []).length > 1 ? palavra : palavra.toLowerCase();
+      if (/[A-ZÀ-ÖØ-Þ]/.test(palavra.slice(1))) return palavra; // sigla ou marca
+      const base = palavra.toLowerCase();
+      if (i > 0 && CONECTORES_SEGMENTO.has(base)) return base;
+      return base.charAt(0).toUpperCase() + base.slice(1);
     })
     .join(' ');
 }
