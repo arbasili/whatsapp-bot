@@ -26,6 +26,7 @@ const {
   balaoCortadoNoMeio,
   normalizarSegmento,
   normalizarNome,
+  resolverDiaPedido,
   quebrasDeLinhaViramBaloes,
   removerMuletaRepetida,
 } = require('./heuristicas');
@@ -98,6 +99,42 @@ test('palavra terminada em "ão" não é lida como balão cortado', () => {
   for (const frase of ['Show, combinado então', 'Isso não', 'Fica a seu critério, sem pressão', 'Te mando a informação']) {
     assert.strictEqual(balaoCortadoNoMeio(frase), false, `falso positivo em: ${frase}`);
   }
+});
+
+// Loop real em produção (07/08, sexta, 17h18): o lead pediu sexta, depois
+// "sexta-feira que vem", depois "dia 14/08", e recebeu TRÊS VEZES a mesma
+// resposta com as mesmas duas opções de segunda e terça.
+const SEXTA_7AGO_17H = new Date(2026, 7, 7, 17, 18);   // sexta, fim do expediente
+const SEXTA_7AGO_9H = new Date(2026, 7, 7, 9, 0);      // mesma sexta, de manhã
+const dma = d => d && `${d.getDate()}/${d.getMonth() + 1}`;
+
+test('dia da semana sem horário sobrando hoje rola para a semana seguinte', () => {
+  assert.strictEqual(dma(resolverDiaPedido('não posso, posso apenas na sexta', SEXTA_7AGO_17H)), '14/8');
+  // de manhã ainda cabe hoje, então "sexta" é hoje mesmo
+  assert.strictEqual(dma(resolverDiaPedido('pode ser sexta?', SEXTA_7AGO_9H)), '7/8');
+});
+
+test('"que vem" depois do dia da semana joga para a semana seguinte', () => {
+  assert.strictEqual(dma(resolverDiaPedido('sexta-feira que vem, vc não consegue?', SEXTA_7AGO_9H)), '14/8');
+  assert.strictEqual(dma(resolverDiaPedido('na próxima sexta', SEXTA_7AGO_9H)), '14/8');
+});
+
+test('data numérica "14/08" é reconhecida', () => {
+  assert.strictEqual(dma(resolverDiaPedido('dia 14/08 vc tem?', SEXTA_7AGO_17H)), '14/8');
+  assert.strictEqual(dma(resolverDiaPedido('pode 20/8', SEXTA_7AGO_17H)), '20/8');
+  // vira o ano: em agosto, 10/02 é do ano que vem
+  assert.strictEqual(resolverDiaPedido('10/02', SEXTA_7AGO_17H).getFullYear(), 2027);
+});
+
+test('formas de data que já funcionavam continuam funcionando', () => {
+  assert.strictEqual(dma(resolverDiaPedido('amanhã', SEXTA_7AGO_17H)), '8/8');
+  assert.strictEqual(dma(resolverDiaPedido('depois de amanhã', SEXTA_7AGO_17H)), '9/8');
+  assert.strictEqual(dma(resolverDiaPedido('hoje mesmo', SEXTA_7AGO_9H)), '7/8');
+  assert.strictEqual(dma(resolverDiaPedido('semana que vem', SEXTA_7AGO_17H)), '10/8');
+  assert.strictEqual(dma(resolverDiaPedido('dia 20', SEXTA_7AGO_17H)), '20/8');
+  assert.strictEqual(dma(resolverDiaPedido('20 de agosto', SEXTA_7AGO_17H)), '20/8');
+  assert.strictEqual(resolverDiaPedido('quero saber o preço', SEXTA_7AGO_17H), null);
+  assert.strictEqual(resolverDiaPedido('', SEXTA_7AGO_17H), null);
 });
 
 test('mantém 9h quando o lead explicita horário de MS', () => {

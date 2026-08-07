@@ -172,6 +172,79 @@ function normalizarNome(texto) {
     .join(' ');
 }
 
+// Resolve QUAL DIA o lead pediu. Estava embutida em interpretarPedidoData no
+// index, junto de chamadas ao Google Calendar, então não dava pra testar e já
+// acumulou três bugs vistos em produção. Aqui é função pura: recebe o texto e
+// o "agora" em hora de Campo Grande, devolve a data ou null.
+const DIAS_SEMANA = {
+  domingo: 0, segunda: 1, 'terça': 2, terca: 2, quarta: 3, quinta: 4, sexta: 5, 'sábado': 6, sabado: 6,
+};
+const LIMITE_DIAS_BUSCA = 15;
+
+function resolverDiaPedido(texto, agoraCG, { ultimaHoraUtil = 17, margemHoras = 2 } = {}) {
+  const t = String(texto || '').toLowerCase();
+  if (!t || !(agoraCG instanceof Date)) return null;
+  const base = new Date(agoraCG);
+  const emDias = n => {
+    const d = new Date(base);
+    d.setDate(d.getDate() + n);
+    return d;
+  };
+
+  // Sem \b no fim de amanh[ãa]: em JS \b não casa após letra acentuada.
+  if (/\bhoje\b/.test(t)) return emDias(0);
+  if (/\bdepois\s+de\s+amanh[ãa]/.test(t)) return emDias(2);
+  if (/\bamanh[ãa]/.test(t)) return emDias(1);
+  if (/\bsemana\s+que\s+vem\b|\bpr[óo]xima\s+semana\b/.test(t)) {
+    return emDias(((8 - base.getDay()) % 7) || 7);
+  }
+
+  for (const [nome, num] of Object.entries(DIAS_SEMANA)) {
+    if (!t.includes(nome)) continue;
+    // "sexta que vem" dita numa sexta é a sexta SEGUINTE. A regra de "semana
+    // que vem" acima exige a palavra "semana", então esse caso não chegava lá.
+    const querProxima = /\bque\s+vem\b|\bpr[óo]xim[ao]\b/.test(t);
+    // Hoje só conta se ainda sobra horário útil dentro da margem de preparação.
+    // Sem isso, "sexta" dita numa sexta às 17h resolvia para HOJE, não sobrava
+    // nenhum horário e o bot respondia "nesse dia não tenho horário livre",
+    // em vez de entender que o lead falava da sexta seguinte. Visto em produção.
+    const aindaCabeHoje = base.getHours() + margemHoras <= ultimaHoraUtil;
+    for (let i = 0; i <= LIMITE_DIAS_BUSCA; i++) {
+      const cand = emDias(i);
+      if (cand.getDay() !== num) continue;
+      if (i === 0 && (querProxima || !aindaCabeHoje)) continue;
+      return cand;
+    }
+    return null;
+  }
+
+  // Data numérica "14/08" — formato mais comum em conversa no Brasil e que
+  // nenhum padrão pegava: o lead perguntou "dia 14/08 vc tem?" e o bot caiu no
+  // ramo de "não entendi a data", repetindo as mesmas duas opções de sempre.
+  const mNumerica = t.match(/\b(\d{1,2})\s*\/\s*(\d{1,2})\b/);
+  if (mNumerica) {
+    const dia = parseInt(mNumerica[1], 10);
+    const mes = parseInt(mNumerica[2], 10) - 1;
+    if (dia >= 1 && dia <= 31 && mes >= 0 && mes <= 11) {
+      for (let i = 0; i <= 366; i++) {
+        const cand = emDias(i);
+        if (cand.getDate() === dia && cand.getMonth() === mes) return cand;
+      }
+    }
+  }
+
+  const mDia = t.match(/\bdia\s+(\d{1,2})\b/) || t.match(/\b(\d{1,2})\s+de\s+\w+/);
+  if (mDia) {
+    const numDia = parseInt(mDia[1], 10);
+    for (let i = 0; i <= 60; i++) {
+      const cand = emDias(i);
+      if (cand.getDate() === numDia) return cand;
+    }
+  }
+
+  return null;
+}
+
 // Extrai o tipo de negócio do lead a partir da conversa
 function extrairTipoNegocio(historico) {
   if (!historico || historico.length < 3) return null;
@@ -699,6 +772,7 @@ module.exports = {
   balaoCortadoNoMeio,
   normalizarSegmento,
   normalizarNome,
+  resolverDiaPedido,
   quebrasDeLinhaViramBaloes,
   removerMuletaRepetida,
   textoDoConteudo,

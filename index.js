@@ -36,6 +36,7 @@ const {
   balaoCortadoNoMeio,
   normalizarSegmento,
   normalizarNome,
+  resolverDiaPedido,
   quebrasDeLinhaViramBaloes,
   removerMuletaRepetida,
 } = require('./heuristicas');
@@ -44,7 +45,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.39.1';
+const BOT_VERSION = '1.40.0';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -1398,64 +1399,13 @@ async function interpretarPedidoData(texto) {
   const tarde = [14, 15, 16, 17];
   const todos = [...manha, ...tarde];
 
-  const diasMap = { 'domingo':0,'segunda':1,'terça':2,'terca':2,'quarta':3,'quinta':4,'sexta':5,'sábado':6,'sabado':6 };
-
   const agora = new Date();
   const horaCG = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Campo_Grande' }));
-  const LIMITE_DIAS = 15;
 
-  // 1. Descobrir o DIA pedido (hoje/amanhã, dia da semana ou "dia N")
-  let diaAlvo = null;
-
-  // a) hoje / amanhã / depois de amanhã / semana que vem
-  // Sem \b no fim de amanh[ãa]: em JS \b não casa após letra acentuada, então
-  // /\bamanh[ãa]\b/ NUNCA casava com "amanhã" (só "amanha" sem acento) — visto
-  // em produção: lead disse "a minha é pra amanhã" e o bot não entendeu o dia.
-  // Mesma classe de bug do "deixa pra lá" em querPararRemarcacao.
-  if (/\bhoje\b/.test(t)) {
-    diaAlvo = new Date(horaCG);
-  } else if (/\bdepois\s+de\s+amanh[ãa]/.test(t)) {
-    diaAlvo = new Date(horaCG);
-    diaAlvo.setDate(diaAlvo.getDate() + 2);
-  } else if (/\bamanh[ãa]/.test(t)) {
-    diaAlvo = new Date(horaCG);
-    diaAlvo.setDate(diaAlvo.getDate() + 1);
-  } else if (/\bsemana\s+que\s+vem\b|\bpr[óo]xima\s+semana\b/.test(t)) {
-    // "semana que vem" sem dia específico: assume a próxima segunda-feira
-    diaAlvo = new Date(horaCG);
-    const ateSegunda = ((8 - diaAlvo.getDay()) % 7) || 7;
-    diaAlvo.setDate(diaAlvo.getDate() + ateSegunda);
-  }
-
-  // b) dia da semana
-  if (!diaAlvo) for (const [nome, num] of Object.entries(diasMap)) {
-    if (t.includes(nome)) {
-      // próxima ocorrência desse dia da semana (inclui hoje, se ainda houver
-      // margem de horário — isso é filtrado depois pela checagem de 2h mínimas)
-      const d = new Date(horaCG);
-      for (let i = 0; i <= LIMITE_DIAS; i++) {
-        const cand = new Date(d);
-        cand.setDate(cand.getDate() + i);
-        if (cand.getDay() === num) { diaAlvo = cand; break; }
-      }
-      break;
-    }
-  }
-
-  // c) "dia N" (dia do mês) — busca até 60 dias para cobrir o próximo mês
-  if (!diaAlvo) {
-    const m = t.match(/\bdia\s+(\d{1,2})\b/) || t.match(/\b(\d{1,2})\s+de\s+\w+/);
-    if (m) {
-      const numDia = parseInt(m[1], 10);
-      const d = new Date(horaCG);
-      for (let i = 0; i <= 60; i++) {
-        const cand = new Date(d);
-        cand.setDate(cand.getDate() + i);
-        if (cand.getDate() === numDia) { diaAlvo = cand; break; }
-      }
-    }
-  }
-
+  // Resolução do dia mora em heuristicas.js: é lógica pura e testável, e já
+  // acumulou três bugs vistos em produção (dia da semana caindo em hoje sem
+  // horário sobrando, "que vem" ignorado, e "14/08" não reconhecido).
+  const diaAlvo = resolverDiaPedido(t, horaCG, { ultimaHoraUtil: todos[todos.length - 1] });
   if (!diaAlvo) return { tipo: 'nada' };
 
   // Não permitir fim de semana
