@@ -197,7 +197,12 @@ test('cada origem tem abertura própria, terminando na mesma pergunta', () => {
   // Indicação, Site/Instagram e o caso com nome usam a MESMA pergunta final:
   // a origem muda como se chega, não o que se precisa saber.
   const usos = source.split('${PERGUNTA_DADO_2}').length - 1;
-  assert.ok(usos >= 3, `PERGUNTA_DADO_2 deveria ser usada em 3+ aberturas, usada em ${usos}`);
+  assert.ok(usos >= 5, `PERGUNTA_DADO_2 deveria ser usada nas 5 aberturas, usada em ${usos}`);
+  // A abertura de Anúncio escrevia a pergunta literal em vez da constante:
+  // trocar a constante deixaria essa origem para trás, sem ninguém perceber.
+  // Mesma classe de armadilha que fez a ponte pedir 4 balões e travar em 3.
+  const literal = source.split('Hoje quem responde o WhatsApp aí, é você mesmo?').length - 1;
+  assert.strictEqual(literal, 1, 'a pergunta do DADO 2 deve existir só na definição da constante');
 });
 
 test('não repete pergunta que o lead não respondeu, nem na conversa nem no follow-up', () => {

@@ -45,7 +45,7 @@ const { proximaTentativaFollowUp, horaEstaNoSilencio, followUpSeguro, followUpPa
 // Versão do bot — versionamento semântico MAJOR.MINOR.PATCH
 // Aparece no log de startup e no /health para confirmar qual versão está rodando
 // MAJOR = mudança grande/incompatível | MINOR = nova funcionalidade | PATCH = correção/ajuste
-const BOT_VERSION = '1.40.1';
+const BOT_VERSION = '1.40.2';
 const BOT_VERSION_DATA = '2026-08-05'; // data desta versão
 
 // Modelos separados por finalidade para cortar custo sem perder qualidade percebida:
@@ -4064,7 +4064,7 @@ Exemplo: se o lead disse que se chama João Silva, inclua [NOME: João] em algum
 ${origemLead === 'Anúncio' ? `INSTRUÇÃO ESPECIAL DE ABERTURA (LEAD DE ANÚNCIO): Este lead chegou por um anúncio, então você já sabe de onde ele veio. NÃO comece do zero nem pergunte "posso te chamar de X?". Sua primeira mensagem sai em 3 partes separadas por "|||":
 1) Saudação calorosa e apresentação curta sua e da ${cfg.persona.empresa}${nomeDoWebhook ? `, usando o nome do perfil com naturalidade dentro da saudação (ex.: "Prazer, ${nomeDoWebhook}!"), SEM pedir permissão pra usar o nome` : ''}.
 2) UMA frase que ENTREGA algo, não que promete. O lead veio do anúncio e já leu a promessa: repeti-la não informa nada. Aponte o que acabou de acontecer ali (REGRA DA DEMONSTRAÇÃO AO VIVO), no espírito de "na prática é o que acabou de acontecer aqui: você mandou mensagem e teve resposta na hora, sem ninguém largar o que estava fazendo". Se a primeira mensagem do lead foi uma pergunta (ex: "como funciona?", "quero mais informações"), esta frase é a RESPOSTA dela. PROIBIDO explicar como o serviço funciona por dentro (o que a gente monta, etapas, quando a equipe entra): isso aparece aos poucos nas próximas trocas. NUNCA diga ao lead o que ele já sabe ("você viu o anúncio, então já sabe que...").
-3) UMA pergunta só, curta, para começar a qualificar: "Hoje quem responde o WhatsApp aí, é você mesmo?". Se ele já informou o segmento na primeira mensagem, pergunte isso mesmo assim (é o DADO 2). A mensagem TERMINA nessa pergunta.
+3) UMA pergunta só, curta, para começar a qualificar: "${PERGUNTA_DADO_2}". Se ele já informou o segmento na primeira mensagem, pergunte isso mesmo assim (é o DADO 2). A mensagem TERMINA nessa pergunta.
 Cada uma das 3 partes é um balão curto (máximo 2 frases). Se a parte 2 estiver ficando com cara de parágrafo, corte: menos é mais na abertura.
 ${nomeDoWebhook ? `Inclua [NOME: ${nomeDoWebhook}] uma vez na resposta. Considere o nome do perfil válido para a abertura: NÃO pergunte depois se pode chamá-lo assim. Se o próprio lead corrigir espontaneamente, passe a usar o nome correto.` : ''}` : aberturaPorOrigem}
 
@@ -4099,7 +4099,7 @@ Use o nome da pessoa de forma natural a partir daqui, sem repetir em toda mensag
 
 Você precisa de exatamente TRÊS informações antes de propor a reunião, nem uma a mais:
 DADO 1, o que o lead faz: "E o que você faz aí?"
-DADO 2, como ele atende hoje: "Hoje quem responde o WhatsApp aí, é você mesmo?"
+DADO 2, como ele atende hoje: "${PERGUNTA_DADO_2}"
 DADO 3, a dor principal: "O que mais pega aí: demora, perder cliente ou bagunça no atendimento?"
 
 Como conduzir:
